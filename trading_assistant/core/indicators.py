@@ -28,10 +28,6 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.02, periods_per_year=252):
     sharpe = excess_returns.mean() / excess_returns.std() * (periods_per_year ** 0.5)
     return sharpe
 
-def sma(prices, period=20):
-    """simple moving average"""
-    return prices.rolling(window=period).mean()
-
 def ema(prices, period=20):
     """exponential moving average"""
     return prices.ewm(span=period, adjust=False).mean()
@@ -83,3 +79,17 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
+from functools import lru_cache
+import pandas as pd
+
+@lru_cache(maxsize=128)
+def _sma_cached(prices_tuple, period):
+    """Cached version of SMA calculation."""
+    prices = pd.Series(prices_tuple)
+    return prices.rolling(window=period).mean()
+
+def sma(prices, period=20):
+    """Simple moving average with caching."""
+    # Convert Series to tuple for hashing
+    prices_tuple = tuple(prices.values)
+    return _sma_cached(prices_tuple, period)

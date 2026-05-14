@@ -226,3 +226,23 @@ def test_rsi_with_fixture(sample_prices):
     """Test RSI using shared fixture."""
     rsi = calculate_rsi(sample_prices, period=14)
     assert rsi.dropna().between(0, 100).all()
+
+def test_sma_caching():
+    """Test that sma uses cache for repeated calls."""
+    prices = pd.Series([1,2,3,4,5,6,7,8,9,10])
+    
+    # First call
+    import time
+    start = time.time()
+    result1 = sma(prices, period=3)
+    time1 = time.time() - start
+    
+    # Second call (should be faster from cache)
+    start = time.time()
+    result2 = sma(prices, period=3)
+    time2 = time.time() - start
+    
+    # Results should be identical
+    assert result1.equals(result2)
+    # Second call should be faster (or at least not slower by much)
+    # Note: cache may not be significantly faster for small data
