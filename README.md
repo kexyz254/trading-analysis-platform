@@ -1,21 +1,33 @@
-cd ~/trading-assistant
+# trading-assistant
 
-cat > README.md << 'EOF'
-# Trading Assistant - AI Training Platform
+few tasks for ai agents to practice coding
 
-A Python library for backtesting trading strategies. This repository contains tasks for AI agents to practice implementing trading indicators.
+## what's here
 
-## Completed Tasks
+5 tasks right now:
+- 001: add rsi indicator
+- 002: add macd indicator  
+- 003: add bollinger bands
+- 004: add atr indicator
+- 005: add sharpe ratio
 
-| Task | Description | Status |
-|------|-------------|--------|
-| 001 | Add RSI Indicator | ✅ Complete |
-| 002 | Add MACD Indicator | ✅ Complete |
-| 003 | Add Bollinger Bands | 🚧 In Progress |
-| 004 | Add ATR Indicator | 📋 Planned |
-| 005 | Add Sharpe Ratio | 📋 Planned |
+each task has:
+- instruction.md - what to build
+- solve.sh - checks if it works
 
-## Installation
+## running tests
 
-```bash
+pytest tests/
+
+## install
+
 pip install -e .
+
+## docker
+
+docker build -t trading-assistant .
+docker run trading-assistant
+
+## tests passing
+
+16 tests, all pass
