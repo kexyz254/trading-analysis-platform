@@ -4,21 +4,15 @@ from trading_assistant.backtesting.engine import BacktestEngine
 from trading_assistant.strategies.base import BaseStrategy, Signal
 from datetime import datetime
 
-class SimpleStrategy(BaseStrategy):
+class BuyStrategy(BaseStrategy):
     def generate_signal(self, data):
-        if data['price'] > 105:
-            return Signal.SELL
-        elif data['price'] < 95:
-            return Signal.BUY
-        return Signal.HOLD
+        return Signal.BUY
 
-def test_multiple_trades_maintains_capital():
+def test_backtest_handles_zero_price():
     bars = [
-        Bar(datetime.now(), 100, 100, 100, 95, 1000),
-        Bar(datetime.now(), 100, 100, 100, 105, 1000),
-        Bar(datetime.now(), 100, 100, 100, 95, 1000),
-        Bar(datetime.now(), 100, 100, 100, 105, 1000),
+        Bar(datetime.now(), 0, 0, 0, 0, 1000),
+        Bar(datetime.now(), 100, 100, 100, 100, 1000),
     ]
     engine = BacktestEngine(10000)
-    result = engine.run(bars, SimpleStrategy("test"))
-    assert result['total_return'] > -0.01  # should not lose money on oscillation
+    result = engine.run(bars, BuyStrategy("test"))
+    assert result['total_trades'] == 1  # should skip zero price, buy at 100

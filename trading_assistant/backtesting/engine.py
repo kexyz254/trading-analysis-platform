@@ -16,6 +16,11 @@ class BacktestEngine:
         trades = 0
 
         for bar in bars:
+            # Skip if price is zero or negative
+            if bar.close <= 0:
+                print(f"Warning: skipping trade at price {bar.close}")
+                continue
+                
             signal = strategy.generate_signal({"price": bar.close})
             if signal == Signal.BUY and position == 0:
                 position = capital / bar.close
