@@ -1,8 +1,10 @@
+"""Tests for OHLC module."""
 import pytest
 import pandas as pd
 from trading_assistant.core.ohlc import OHLCReader, Bar
 
 def test_ohlc_reader_creates_bars():
+    """Test that OHLCReader correctly creates Bar objects."""
     dates = pd.date_range("2024-01-01", periods=5, freq="D")
     df = pd.DataFrame({
         "open": [100, 101, 102, 103, 104],
@@ -20,6 +22,7 @@ def test_ohlc_reader_creates_bars():
     assert bars[0].close == 101
 
 def test_ohlc_reader_validates_columns():
+    """Test that OHLCReader validates required columns."""
     df = pd.DataFrame({"open": [1, 2], "high": [3, 4]})
     with pytest.raises(ValueError, match="Missing columns"):
         OHLCReader(df)

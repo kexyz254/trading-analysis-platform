@@ -1,12 +1,16 @@
+"""Backtesting engine for trading strategies."""
 from typing import List
 from trading_assistant.core.ohlc import Bar
 from trading_assistant.strategies.base import BaseStrategy, Signal
 
 class BacktestEngine:
+    """Run backtests on historical data."""
+    
     def __init__(self, initial_capital: float = 10000.0):
         self.initial_capital = initial_capital
 
     def run(self, bars: List[Bar], strategy: BaseStrategy) -> dict:
+        """Run backtest and return results."""
         capital = self.initial_capital
         position = 0
         trades = 0
