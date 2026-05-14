@@ -221,3 +221,8 @@ def test_macd_empty_input():
     assert len(macd) == 0
     assert len(signal) == 0
     assert len(hist) == 0
+
+def test_rsi_with_fixture(sample_prices):
+    """Test RSI using shared fixture."""
+    rsi = calculate_rsi(sample_prices, period=14)
+    assert rsi.dropna().between(0, 100).all()
