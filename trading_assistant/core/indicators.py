@@ -61,3 +61,9 @@ def sma(prices, period=20):
 def ema(prices, period=20):
     """exponential moving average"""
     return prices.ewm(span=period, adjust=False).mean()
+
+def stochastic_k(high, low, close, period=14):
+    """stochastic oscillator %K"""
+    lowest_low = low.rolling(window=period).min()
+    highest_high = high.rolling(window=period).max()
+    return 100 * (close - lowest_low) / (highest_high - lowest_low)
