@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from trading_assistant.core.indicators import sma, calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
+from trading_assistant.core.indicators import sma, ema, calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
 
 def test_rsi_returns_between_0_and_100():
     prices = pd.Series(np.random.randn(100).cumsum() + 100)
@@ -181,3 +181,14 @@ def test_sma_calculation():
     assert pd.isna(result.iloc[0])
     assert pd.isna(result.iloc[1])
     assert result.iloc[2] == 2.0
+
+def test_ema_returns_series():
+    prices = pd.Series([1,2,3,4,5,6,7,8,9,10])
+    result = ema(prices, period=3)
+    assert len(result) == 10
+
+def test_ema_differs_from_sma():
+    prices = pd.Series([1,2,3,4,5,6,7,8,9,10])
+    sma_result = sma(prices, period=3)
+    ema_result = ema(prices, period=3)
+    assert not sma_result.equals(ema_result)

@@ -57,3 +57,7 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.02, periods_per_year=252):
 def sma(prices, period=20):
     """simple moving average"""
     return prices.rolling(window=period).mean()
+
+def ema(prices, period=20):
+    """exponential moving average"""
+    return prices.ewm(span=period, adjust=False).mean()
