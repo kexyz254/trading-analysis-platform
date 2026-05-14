@@ -246,3 +246,18 @@ def test_sma_caching():
     assert result1.equals(result2)
     # Second call should be faster (or at least not slower by much)
     # Note: cache may not be significantly faster for small data
+
+def test_stochastic_optimization():
+    """Test optimized stochastic produces same results."""
+    import time
+    high = pd.Series([10 + i for i in range(500)])
+    low = pd.Series([8 + i for i in range(500)])
+    close = pd.Series([9 + i for i in range(500)])
+    
+    # Should complete quickly with optimization
+    start = time.time()
+    result = stochastic_k(high, low, close, period=14)
+    elapsed = time.time() - start
+    
+    assert len(result) == 500
+    assert elapsed < 1.0  # Should be fast

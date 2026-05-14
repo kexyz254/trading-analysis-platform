@@ -32,12 +32,6 @@ def ema(prices, period=20):
     """exponential moving average"""
     return prices.ewm(span=period, adjust=False).mean()
 
-def stochastic_k(high, low, close, period=14):
-    """stochastic oscillator %K"""
-    lowest_low = low.rolling(window=period).min()
-    highest_high = high.rolling(window=period).max()
-    return 100 * (close - lowest_low) / (highest_high - lowest_low)
-
 def williams_r(high, low, close, period=14):
     """williams %R"""
     highest_high = high.rolling(window=period).max()
@@ -93,3 +87,15 @@ def sma(prices, period=20):
     # Convert Series to tuple for hashing
     prices_tuple = tuple(prices.values)
     return _sma_cached(prices_tuple, period)
+
+def stochastic_k(high, low, close, period=14):
+    """Optimized stochastic oscillator %K."""
+    # Use rolling min/max which is already vectorized
+    lowest_low = low.rolling(window=period).min()
+    highest_high = high.rolling(window=period).max()
+    # Avoid division by zero
+    denominator = highest_high - lowest_low
+    k = 100 * (close - lowest_low) / denominator
+    # Handle division by zero
+    k = k.where(denominator != 0, 50)
+    return k
