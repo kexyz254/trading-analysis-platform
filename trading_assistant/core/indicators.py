@@ -2,19 +2,6 @@
 import pandas as pd
 import numpy as np
 
-def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-    """Calculate Relative Strength Index (RSI)."""
-    if len(prices) < period + 1:
-        return pd.Series([np.nan] * len(prices), index=prices.index)
-    
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
 
 def calculate_macd(prices, fast=12, slow=26, signal=9):
     """Calculate MACD line, signal line, and histogram."""
@@ -73,3 +60,21 @@ def williams_r(high, low, close, period=14):
     highest_high = high.rolling(window=period).max()
     lowest_low = low.rolling(window=period).min()
     return -100 * (highest_high - close) / (highest_high - lowest_low)
+
+def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate Relative Strength Index (RSI)."""
+    if len(prices) < period + 1:
+        return pd.Series([np.nan] * len(prices), index=prices.index)
+    
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    
+    # Fix: handle case when both gain and loss are zero
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # When gain and loss are both zero, rs is NaN, set rsi to 50
+    rsi = rsi.fillna(50)
+    
+    return rsi

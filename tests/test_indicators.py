@@ -206,3 +206,10 @@ def test_williams_r_range():
     close = pd.Series([9 + i for i in range(50)])
     wr = williams_r(high, low, close, period=14)
     assert (wr.dropna() >= -100).all() and (wr.dropna() <= 0).all()
+
+def test_rsi_flat_prices_returns_50():
+    """Test RSI returns 50 when prices don't change."""
+    prices = pd.Series([100] * 20)
+    rsi = calculate_rsi(prices, period=14)
+    # After warmup, RSI should be 50
+    assert rsi.iloc[14] == 50
