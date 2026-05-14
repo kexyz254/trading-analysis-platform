@@ -53,3 +53,7 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.02, periods_per_year=252):
     excess_returns = returns - (risk_free_rate / periods_per_year)
     sharpe = excess_returns.mean() / excess_returns.std() * (periods_per_year ** 0.5)
     return sharpe
+
+def sma(prices, period=20):
+    """simple moving average"""
+    return prices.rolling(window=period).mean()

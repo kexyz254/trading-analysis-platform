@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from trading_assistant.core.indicators import calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
+from trading_assistant.core.indicators import sma, calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
 
 def test_rsi_returns_between_0_and_100():
     prices = pd.Series(np.random.randn(100).cumsum() + 100)
@@ -168,3 +168,16 @@ def test_sharpe_ratio_handles_zero_volatility():
     sharpe = calculate_sharpe_ratio(constant_returns)
     # With zero volatility, Sharpe Ratio should be very high
     assert sharpe > 0 or pd.isna(sharpe)
+
+def test_sma_returns_series():
+    prices = pd.Series([1,2,3,4,5,6,7,8,9,10])
+    result = sma(prices, period=3)
+    assert len(result) == 10
+
+def test_sma_calculation():
+    prices = pd.Series([1,2,3,4,5])
+    result = sma(prices, period=3)
+    # first two should be nan, third = (1+2+3)/3 = 2
+    assert pd.isna(result.iloc[0])
+    assert pd.isna(result.iloc[1])
+    assert result.iloc[2] == 2.0
