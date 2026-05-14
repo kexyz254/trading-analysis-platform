@@ -67,3 +67,9 @@ def stochastic_k(high, low, close, period=14):
     lowest_low = low.rolling(window=period).min()
     highest_high = high.rolling(window=period).max()
     return 100 * (close - lowest_low) / (highest_high - lowest_low)
+
+def williams_r(high, low, close, period=14):
+    """williams %R"""
+    highest_high = high.rolling(window=period).max()
+    lowest_low = low.rolling(window=period).min()
+    return -100 * (highest_high - close) / (highest_high - lowest_low)

@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from trading_assistant.core.indicators import sma, ema, stochastic_k, calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
+from trading_assistant.core.indicators import sma, ema, stochastic_k, williams_r, calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
 
 def test_rsi_returns_between_0_and_100():
     prices = pd.Series(np.random.randn(100).cumsum() + 100)
@@ -199,3 +199,10 @@ def test_stochastic_returns_range():
     close = pd.Series([9 + i for i in range(50)])
     k = stochastic_k(high, low, close, period=14)
     assert (k.dropna() >= 0).all() and (k.dropna() <= 100).all()
+
+def test_williams_r_range():
+    high = pd.Series([10 + i for i in range(50)])
+    low = pd.Series([8 + i for i in range(50)])
+    close = pd.Series([9 + i for i in range(50)])
+    wr = williams_r(high, low, close, period=14)
+    assert (wr.dropna() >= -100).all() and (wr.dropna() <= 0).all()
