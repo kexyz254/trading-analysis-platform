@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 import pandas as pd
+from trading_assistant.core.validation import validate_ohlc
 
 @dataclass
 class Bar:
@@ -18,15 +19,9 @@ class OHLCReader:
     """Read and validate OHLC data."""
     
     def __init__(self, df: pd.DataFrame):
-        self.df = self._validate(df)
-
-    def _validate(self, df: pd.DataFrame) -> pd.DataFrame:
-        required = ["open", "high", "low", "close", "volume"]
-        missing = [c for c in required if c not in df.columns]
-        if missing:
-            raise ValueError(f"Missing columns: {missing}")
-        return df
-
+        validate_ohlc(df)
+        self.df = df
+    
     def get_bars(self) -> List[Bar]:
         """Convert dataframe to list of Bar objects."""
         bars = []

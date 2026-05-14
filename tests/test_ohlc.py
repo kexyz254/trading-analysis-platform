@@ -26,3 +26,13 @@ def test_ohlc_reader_validates_columns():
     df = pd.DataFrame({"open": [1, 2], "high": [3, 4]})
     with pytest.raises(ValueError, match="Missing columns"):
         OHLCReader(df)
+
+def test_validate_ohlc_function():
+    """Test standalone validate_ohlc function."""
+    from trading_assistant.core.validation import validate_ohlc
+    df = pd.DataFrame({'open': [1], 'high': [2], 'low': [0], 'close': [1], 'volume': [100]})
+    assert validate_ohlc(df) is True
+    
+    bad_df = pd.DataFrame({'open': [1], 'high': [2]})
+    with pytest.raises(ValueError, match="Missing columns"):
+        validate_ohlc(bad_df)
