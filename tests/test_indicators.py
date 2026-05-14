@@ -213,3 +213,11 @@ def test_rsi_flat_prices_returns_50():
     rsi = calculate_rsi(prices, period=14)
     # After warmup, RSI should be 50
     assert rsi.iloc[14] == 50
+
+def test_macd_empty_input():
+    """Test MACD handles empty series."""
+    empty_prices = pd.Series(dtype=float)
+    macd, signal, hist = calculate_macd(empty_prices)
+    assert len(macd) == 0
+    assert len(signal) == 0
+    assert len(hist) == 0

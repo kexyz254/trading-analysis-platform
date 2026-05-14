@@ -3,19 +3,6 @@ import pandas as pd
 import numpy as np
 
 
-def calculate_macd(prices, fast=12, slow=26, signal=9):
-    """Calculate MACD line, signal line, and histogram."""
-    if len(prices) < slow:
-        nan_series = pd.Series([np.nan] * len(prices), index=prices.index)
-        return nan_series, nan_series, nan_series
-    
-    ema_fast = prices.ewm(span=fast, adjust=False).mean()
-    ema_slow = prices.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    histogram = macd_line - signal_line
-    return macd_line, signal_line, histogram
-
 def calculate_bollinger_bands(prices, period=20, num_std=2):
     """Calculate Bollinger Bands for price data."""
     middle_band = prices.rolling(window=period).mean()
@@ -78,3 +65,21 @@ def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
     rsi = rsi.fillna(50)
     
     return rsi
+
+def calculate_macd(prices, fast=12, slow=26, signal=9):
+    """Calculate MACD line, signal line, and histogram."""
+    # Handle empty or None input
+    if prices is None or len(prices) == 0:
+        empty = pd.Series(dtype=float)
+        return empty, empty, empty
+    
+    if len(prices) < slow:
+        nan_series = pd.Series([np.nan] * len(prices), index=prices.index)
+        return nan_series, nan_series, nan_series
+    
+    ema_fast = prices.ewm(span=fast, adjust=False).mean()
+    ema_slow = prices.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
