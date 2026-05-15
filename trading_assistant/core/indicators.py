@@ -99,3 +99,86 @@ def stochastic_k(high, low, close, period=14):
     # Handle division by zero
     k = k.where(denominator != 0, 50)
     return k
+
+def obv(close, volume):
+    """On-Balance Volume indicator."""
+    obv_values = [0]
+    for i in range(1, len(close)):
+        if close.iloc[i] > close.iloc[i-1]:
+            obv_values.append(obv_values[-1] + volume.iloc[i])
+        elif close.iloc[i] < close.iloc[i-1]:
+            obv_values.append(obv_values[-1] - volume.iloc[i])
+        else:
+            obv_values.append(obv_values[-1])
+    return pd.Series(obv_values, index=close.index)
+
+def roc(prices, period=12):
+    """Rate of Change indicator."""
+    return ((prices - prices.shift(period)) / prices.shift(period)) * 100
+
+def keltner_channel(high, low, close, period=20, multiplier=1.5):
+    """Keltner Channel indicator."""
+    typical_price = (high + low + close) / 3
+    middle = typical_price.rolling(window=period).mean()
+    true_range = (high - low).rolling(window=period).mean()
+    upper = middle + (true_range * multiplier)
+    lower = middle - (true_range * multiplier)
+    return upper, middle, lower
+
+def donchian_channel(high, low, period=20):
+    """Donchian Channel indicator."""
+    upper = high.rolling(window=period).max()
+    lower = low.rolling(window=period).min()
+    middle = (upper + lower) / 2
+    return upper, middle, lower
+
+def ichimoku_cloud(high, low, close, conversion=9, base=26, lagging=52):
+    """Calculate Ichimoku Cloud components."""
+    conversion_line = (high.rolling(window=conversion).max() + 
+                       low.rolling(window=conversion).min()) / 2
+    base_line = (high.rolling(window=base).max() + 
+                 low.rolling(window=base).min()) / 2
+    leading_span_a = ((conversion_line + base_line) / 2).shift(base)
+    leading_span_b = ((high.rolling(window=lagging).max() + 
+                       low.rolling(window=lagging).min()) / 2).shift(base)
+    lagging_span = close.shift(-base)
+    
+    return conversion_line, base_line, leading_span_a, leading_span_b, lagging_span
+
+def vortex_indicator(high, low, close, period=14):
+    """Calculate Vortex Indicator."""
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    
+    vm_plus = (high - low.shift()).abs().rolling(window=period).sum()
+    vm_minus = (low - high.shift()).abs().rolling(window=period).sum()
+    tr_sum = tr.rolling(window=period).sum()
+    
+    vi_plus = vm_plus / tr_sum
+    vi_minus = vm_minus / tr_sum
+    
+    return vi_plus, vi_minus
+
+def ultimate_oscillator(high, low, close, period1=7, period2=14, period3=28):
+    """Calculate Ultimate Oscillator."""
+    bp = close - pd.concat([low, close.shift()], axis=1).min(axis=1)
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    
+    avg1 = bp.rolling(window=period1).sum() / tr.rolling(window=period1).sum()
+    avg2 = bp.rolling(window=period2).sum() / tr.rolling(window=period2).sum()
+    avg3 = bp.rolling(window=period3).sum() / tr.rolling(window=period3).sum()
+    
+    uo = 100 * (4 * avg1 + 2 * avg2 + avg3) / 7
+    return uo
+
+def fibonacci_retracement(high, low, levels=[0.236, 0.382, 0.5, 0.618, 0.786]):
+    """Calculate Fibonacci retracement levels."""
+    diff = high - low
+    return {level: high - (diff * level) for level in levels}

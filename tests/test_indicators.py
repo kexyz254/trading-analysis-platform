@@ -2,7 +2,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from trading_assistant.core.indicators import sma, ema, stochastic_k, williams_r, calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
+from trading_assistant.core.indicators import obv, roc, keltner_channel, donchian_channel, sma, ema, stochastic_k, williams_r, calculate_rsi, calculate_macd, calculate_bollinger_bands, calculate_atr, calculate_sharpe_ratio
 
 def test_rsi_returns_between_0_and_100():
     prices = pd.Series(np.random.randn(100).cumsum() + 100)
@@ -261,3 +261,27 @@ def test_stochastic_optimization():
     
     assert len(result) == 500
     assert elapsed < 1.0  # Should be fast
+
+def test_obv_basic():
+    close = pd.Series([100, 101, 100, 102, 101])
+    volume = pd.Series([1000, 1100, 900, 1200, 1000])
+    result = obv(close, volume)
+    assert len(result) == 5
+
+def test_roc_basic():
+    prices = pd.Series([100, 102, 104, 106, 108])
+    result = roc(prices, period=1)
+    assert abs(result.iloc[1] - 2.0) < 0.01
+
+def test_keltner_channel():
+    high = pd.Series([10, 11, 12, 13, 14])
+    low = pd.Series([8, 9, 10, 11, 12])
+    close = pd.Series([9, 10, 11, 12, 13])
+    upper, middle, lower = keltner_channel(high, low, close, period=2)
+    assert len(upper) == 5
+
+def test_donchian_channel():
+    high = pd.Series([10, 11, 12, 13, 14])
+    low = pd.Series([8, 9, 10, 11, 12])
+    upper, middle, lower = donchian_channel(high, low, period=2)
+    assert len(upper) == 5
