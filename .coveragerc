@@ -1,0 +1,10 @@
+[run]
+source = trading_assistant
+omit =
+    trading_assistant/version.py
+    trading_assistant/analysis/ta_lib.py
+    trading_assistant/backtesting/framework.py
+
+[report]
+show_missing = True
+skip_empty = True
