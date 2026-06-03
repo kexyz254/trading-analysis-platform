@@ -1,3 +1,10 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# Local archives
+*.zip
+
+# Coverage artifacts
+.coverage
+htmlcov/
