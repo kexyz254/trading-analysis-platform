@@ -1,4 +1,3 @@
-cat > README.md <<'EOF'
 # Trading Analysis Platform
 
 A Python-based algorithmic trading research framework for testing technical indicators, portfolio simulations, risk metrics, and reproducible backtesting workflows.
@@ -21,7 +20,7 @@ Indicator implementations used by research strategies, including moving averages
 
 ### Strategy Research
 
-Reusable strategy components for generating signals from indicator outputs and evaluating simple systematic trading ideas.
+Reusable strategy components for generating signals from indicator outputs and evaluating systematic trading ideas.
 
 ### Backtesting
 
@@ -44,5 +43,23 @@ Risk and analytics utilities for drawdown, returns, volatility, exposure, Sharpe
 
 Install dependencies:
 
-```bash
-pip install -r requirements.txt
+    pip install -r requirements.txt
+
+Run the test suite:
+
+    pytest tests
+
+Run coverage:
+
+    pytest --cov=trading_assistant --cov-report=term-missing
+
+## Current Quality Baseline
+
+- 106 pytest tests passing
+- Coverage configured for active package modules
+- Current coverage target: 80%+
+- No external broker or live trading dependency
+
+## Project Status
+
+This is an active personal research project. The current focus is improving data validation, simulation correctness, risk analytics, and portfolio-level behavior.
