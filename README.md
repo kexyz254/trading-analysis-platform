@@ -63,3 +63,15 @@ Run coverage:
 ## Project Status
 
 This is an active personal research project. The current focus is improving data validation, simulation correctness, risk analytics, and portfolio-level behavior.
+
+## CSV Market Data Loading
+
+The data layer includes a CSV loader for OHLCV research datasets. It reads a local CSV file, forwards optional `pandas.read_csv` settings, and validates the loaded data with the market-data validator.
+
+Example usage:
+
+    from trading_assistant.data import load_ohlcv_csv
+
+    prices = load_ohlcv_csv("data/prices.csv")
+
+The loader raises `FileNotFoundError` for missing files and `MarketDataValidationError` when the CSV contents violate the expected OHLCV schema.
