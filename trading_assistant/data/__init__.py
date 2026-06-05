@@ -1,6 +1,7 @@
 """Data utilities for trading analysis workflows."""
 
 from .csv_loader import load_ohlcv_csv
+from .quality import MarketDataQualityReport, analyze_ohlcv_quality
 from .validation import (
     MarketDataSchema,
     MarketDataValidationError,
@@ -8,6 +9,8 @@ from .validation import (
 )
 
 __all__ = [
+    "analyze_ohlcv_quality",
+    "MarketDataQualityReport",
     "load_ohlcv_csv",
     "MarketDataSchema",
     "MarketDataValidationError",
