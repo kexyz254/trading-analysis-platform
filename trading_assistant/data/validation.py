@@ -49,11 +49,26 @@ def validate_ohlcv_dataframe(
     *,
     schema: MarketDataSchema | None = None,
     sort: bool = True,
+    timestamp_format: str | None = "ISO8601",
 ) -> pd.DataFrame:
     """Validate and normalize an OHLCV market data frame.
 
     The returned frame is a copy of the input with parsed timestamps, numeric
     OHLCV columns, deterministic ordering, and a clean integer index.
+
+    Parameters
+    ----------
+    data:
+        Input market data.
+    schema:
+        Optional OHLCV schema with custom column names.
+    sort:
+        Whether to sort rows by timestamp.
+    timestamp_format:
+        Format passed to pandas.to_datetime. Defaults to "ISO8601" to avoid
+        ambiguous timestamp inference warnings for normal ISO-style datasets.
+        Pass a strptime format such as "%d/%m/%Y" for custom date strings, or
+        None to allow pandas inference.
     """
 
     schema = schema or MarketDataSchema()
@@ -73,6 +88,7 @@ def validate_ohlcv_dataframe(
         cleaned[schema.timestamp],
         errors="coerce",
         utc=True,
+        format=timestamp_format,
     )
 
     if cleaned[schema.timestamp].isna().any():

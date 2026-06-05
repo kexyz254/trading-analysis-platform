@@ -15,6 +15,7 @@ def load_ohlcv_csv(
     *,
     schema: MarketDataSchema | None = None,
     sort: bool = True,
+    timestamp_format: str | None = "ISO8601",
     read_csv_kwargs: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Load OHLCV market data from CSV and validate it.
@@ -27,6 +28,8 @@ def load_ohlcv_csv(
         Optional schema describing the timestamp, OHLC, and volume columns.
     sort:
         Whether to sort the cleaned frame by timestamp.
+    timestamp_format:
+        Timestamp format passed to the OHLCV validator.
     read_csv_kwargs:
         Optional keyword arguments forwarded to pandas.read_csv.
     """
@@ -37,4 +40,9 @@ def load_ohlcv_csv(
 
     options = dict(read_csv_kwargs or {})
     raw = pd.read_csv(csv_path, **options)
-    return validate_ohlcv_dataframe(raw, schema=schema, sort=sort)
+    return validate_ohlcv_dataframe(
+        raw,
+        schema=schema,
+        sort=sort,
+        timestamp_format=timestamp_format,
+    )
