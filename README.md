@@ -87,3 +87,16 @@ Example usage:
     prices = load_ohlcv_csv("data/prices.csv", timestamp_format="%d/%m/%Y")
 
 This is useful for regional datasets that use day-first dates or other non-ISO timestamp layouts.
+
+## Market Data Quality Reports
+
+The data package can also generate a compact quality report from validated OHLCV data. The report includes row count, start and end timestamps, low/high bounds, average close, and total volume.
+
+Example usage:
+
+    from trading_assistant.data import analyze_ohlcv_quality
+
+    report = analyze_ohlcv_quality(prices)
+    payload = report.to_dict()
+
+This is useful when checking whether a research dataset has the expected coverage before running indicators, backtests, or portfolio analytics.
