@@ -107,3 +107,24 @@ def test_validate_ohlcv_dataframe_supports_custom_schema():
     cleaned = validate_ohlcv_dataframe(data, schema=schema)
 
     assert cleaned.loc[0, "c"] == 105
+
+
+def test_validate_ohlcv_dataframe_supports_explicit_timestamp_format():
+    data = valid_market_data()
+    data["timestamp"] = ["03/01/2026", "01/01/2026", "02/01/2026"]
+
+    cleaned = validate_ohlcv_dataframe(data, timestamp_format="%d/%m/%Y")
+
+    assert cleaned["timestamp"].is_monotonic_increasing
+    assert cleaned["close"].tolist() == [102.0, 103.0, 104.0]
+
+
+def test_validate_ohlcv_dataframe_default_iso8601_avoids_inference_warning():
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        validate_ohlcv_dataframe(valid_market_data())
+
+    messages = [str(item.message) for item in caught]
+    assert not any("Could not infer format" in message for message in messages)
