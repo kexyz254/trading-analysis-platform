@@ -88,3 +88,23 @@ def test_load_ohlcv_csv_forwards_read_csv_options(tmp_path):
     result = load_ohlcv_csv(path, read_csv_kwargs={"sep": ";"})
 
     assert result.loc[0, "close"] == 105
+
+
+def test_load_ohlcv_csv_passes_timestamp_format_to_validator(tmp_path):
+    path = tmp_path / "uk_dates.csv"
+    path.write_text(
+        "\n".join(
+            [
+                "timestamp,open,high,low,close,volume",
+                "03/01/2026,102,105,99,104,1200",
+                "01/01/2026,100,103,98,102,1000",
+                "02/01/2026,101,104,100,103,1100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = load_ohlcv_csv(path, timestamp_format="%d/%m/%Y")
+
+    assert result["timestamp"].is_monotonic_increasing
+    assert result["close"].tolist() == [102, 103, 104]
