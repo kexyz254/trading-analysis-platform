@@ -10,6 +10,29 @@ import pandas as pd
 from .validation import MarketDataSchema, validate_ohlcv_dataframe
 
 
+
+@dataclass(frozen=True)
+class MarketDataGapSummary:
+    """Compact summary of missing timestamps in an OHLCV time series."""
+
+    gap_count: int
+    first_gap: pd.Timestamp | None
+    last_gap: pd.Timestamp | None
+    missing_timestamps: tuple[pd.Timestamp, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of the gap summary."""
+
+        return {
+            "gap_count": self.gap_count,
+            "first_gap": self.first_gap.isoformat() if self.first_gap is not None else None,
+            "last_gap": self.last_gap.isoformat() if self.last_gap is not None else None,
+            "missing_timestamps": [
+                timestamp.isoformat() for timestamp in self.missing_timestamps
+            ],
+        }
+
+
 @dataclass(frozen=True)
 class MarketDataGap:
     """A missing timestamp inside an expected market data interval."""
@@ -93,3 +116,28 @@ def find_ohlcv_time_gaps(
         )
 
     return gaps
+
+
+def summarize_ohlcv_time_gaps(
+    data: pd.DataFrame,
+    *,
+    expected_frequency: str = "D",
+    schema: MarketDataSchema | None = None,
+    timestamp_format: str | None = "ISO8601",
+) -> MarketDataGapSummary:
+    """Return a compact summary of missing timestamps in validated OHLCV data."""
+
+    gaps = find_ohlcv_time_gaps(
+        data,
+        expected_frequency=expected_frequency,
+        schema=schema,
+        timestamp_format=timestamp_format,
+    )
+    missing = tuple(gap.expected_timestamp for gap in gaps)
+
+    return MarketDataGapSummary(
+        gap_count=len(missing),
+        first_gap=missing[0] if missing else None,
+        last_gap=missing[-1] if missing else None,
+        missing_timestamps=missing,
+    )
