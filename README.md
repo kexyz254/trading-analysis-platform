@@ -55,7 +55,7 @@ Run coverage:
 
 ## Current Quality Baseline
 
-- 134 pytest tests passing
+- 137 pytest tests passing
 - Coverage configured for active package modules
 - Current coverage target: 80%+
 - No external broker or live trading dependency
@@ -112,3 +112,16 @@ Example usage:
     gaps = find_ohlcv_time_gaps(prices, expected_frequency="D")
 
 Each detected gap includes the expected timestamp plus the nearest previous and next observed timestamps. The gap detector reuses the OHLCV validator, so malformed prices, duplicate timestamps, and invalid rows are rejected before interval checks run.
+
+## Market Data Gap Summaries
+
+Gap detection also supports compact summaries for reporting workflows. A summary includes the number of missing timestamps, the first missing timestamp, the last missing timestamp, and the complete list of missing timestamps.
+
+Example usage:
+
+    from trading_assistant.data import summarize_ohlcv_time_gaps
+
+    summary = summarize_ohlcv_time_gaps(prices, expected_frequency="D")
+    payload = summary.to_dict()
+
+This is useful for quickly deciding whether a dataset is complete enough for indicator research or backtesting.
