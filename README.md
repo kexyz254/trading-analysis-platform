@@ -55,7 +55,7 @@ Run coverage:
 
 ## Current Quality Baseline
 
-- 123 pytest tests passing
+- 128 pytest tests passing
 - Coverage configured for active package modules
 - Current coverage target: 80%+
 - No external broker or live trading dependency
