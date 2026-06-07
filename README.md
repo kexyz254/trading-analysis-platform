@@ -55,7 +55,7 @@ Run coverage:
 
 ## Current Quality Baseline
 
-- 128 pytest tests passing
+- 134 pytest tests passing
 - Coverage configured for active package modules
 - Current coverage target: 80%+
 - No external broker or live trading dependency
@@ -100,3 +100,15 @@ Example usage:
     payload = report.to_dict()
 
 This is useful when checking whether a research dataset has the expected coverage before running indicators, backtests, or portfolio analytics.
+
+## Market Data Gap Detection
+
+The data package can detect missing timestamps inside validated OHLCV time series. This helps identify incomplete research datasets before running indicators, simulations, or portfolio analysis.
+
+Example usage:
+
+    from trading_assistant.data import find_ohlcv_time_gaps
+
+    gaps = find_ohlcv_time_gaps(prices, expected_frequency="D")
+
+Each detected gap includes the expected timestamp plus the nearest previous and next observed timestamps. The gap detector reuses the OHLCV validator, so malformed prices, duplicate timestamps, and invalid rows are rejected before interval checks run.
