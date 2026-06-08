@@ -132,3 +132,100 @@ def summarize_portfolio_exposure(
         largest_symbol=largest_symbol,
         largest_position_value=largest_position_value,
     )
+
+
+
+@dataclass(frozen=True)
+class PortfolioConcentrationSummary:
+    """Position concentration summary based on absolute market value."""
+
+    total_market_value: float
+    top_symbol: str | None
+    top_weight: float
+    position_weights: dict[str, float]
+    over_limit_symbols: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of concentration risk."""
+
+        return {
+            "total_market_value": self.total_market_value,
+            "top_symbol": self.top_symbol,
+            "top_weight": self.top_weight,
+            "position_weights": dict(self.position_weights),
+            "over_limit_symbols": list(self.over_limit_symbols),
+        }
+
+
+def summarize_position_concentration(
+    positions: pd.DataFrame,
+    *,
+    symbol_column: str = "symbol",
+    quantity_column: str = "quantity",
+    price_column: str = "price",
+    max_weight: float = 0.25,
+) -> PortfolioConcentrationSummary:
+    """Summarize portfolio concentration by absolute position value."""
+
+    if not 0 <= max_weight <= 1:
+        raise PortfolioExposureError("max_weight must be between 0 and 1")
+
+    if not isinstance(positions, pd.DataFrame):
+        raise PortfolioExposureError("positions must be a pandas DataFrame")
+
+    required = [symbol_column, quantity_column, price_column]
+    missing = [column for column in required if column not in positions.columns]
+    if missing:
+        raise PortfolioExposureError(
+            f"missing required position columns: {', '.join(missing)}"
+        )
+
+    if positions.empty:
+        return PortfolioConcentrationSummary(
+            total_market_value=0.0,
+            top_symbol=None,
+            top_weight=0.0,
+            position_weights={},
+            over_limit_symbols=(),
+        )
+
+    clean = positions.copy()
+    clean[quantity_column] = pd.to_numeric(clean[quantity_column], errors="coerce")
+    clean[price_column] = pd.to_numeric(clean[price_column], errors="coerce")
+
+    if clean[[quantity_column, price_column]].isna().any().any():
+        raise PortfolioExposureError("quantity and price columns must be numeric")
+
+    if (clean[price_column] < 0).any():
+        raise PortfolioExposureError("price column cannot contain negative values")
+
+    clean["_absolute_value"] = (clean[quantity_column] * clean[price_column]).abs()
+    grouped = clean.groupby(symbol_column, dropna=False)["_absolute_value"].sum()
+
+    total_market_value = float(grouped.sum())
+    if total_market_value == 0:
+        return PortfolioConcentrationSummary(
+            total_market_value=0.0,
+            top_symbol=None,
+            top_weight=0.0,
+            position_weights={str(symbol): 0.0 for symbol in grouped.index},
+            over_limit_symbols=(),
+        )
+
+    weights = {
+        str(symbol): float(value / total_market_value)
+        for symbol, value in grouped.items()
+    }
+    top_symbol = max(weights, key=weights.get)
+    top_weight = weights[top_symbol]
+    over_limit_symbols = tuple(
+        symbol for symbol, weight in weights.items() if weight > max_weight
+    )
+
+    return PortfolioConcentrationSummary(
+        total_market_value=total_market_value,
+        top_symbol=top_symbol,
+        top_weight=top_weight,
+        position_weights=weights,
+        over_limit_symbols=over_limit_symbols,
+    )
