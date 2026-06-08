@@ -55,7 +55,7 @@ Run coverage:
 
 ## Current Quality Baseline
 
-- 137 pytest tests passing
+- 146 pytest tests passing
 - Coverage configured for active package modules
 - Current coverage target: 80%+
 - No external broker or live trading dependency
@@ -125,3 +125,25 @@ Example usage:
     payload = summary.to_dict()
 
 This is useful for quickly deciding whether a dataset is complete enough for indicator research or backtesting.
+
+## Portfolio Exposure Reporting
+
+The portfolio package can summarize position exposure from quantity and mark price data. Positive quantities are treated as long positions, negative quantities are treated as short positions, and the summary reports long, short, gross, and net exposure.
+
+Example usage:
+
+    import pandas as pd
+    from trading_assistant.portfolio import summarize_portfolio_exposure
+
+    positions = pd.DataFrame(
+        {
+            "symbol": ["AAPL", "MSFT", "TSLA"],
+            "quantity": [10, 5, -3],
+            "price": [200.0, 100.0, 250.0],
+        }
+    )
+
+    exposure = summarize_portfolio_exposure(positions)
+    payload = exposure.to_dict()
+
+This is useful for checking portfolio concentration, long/short balance, and gross exposure before running risk analytics.
