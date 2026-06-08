@@ -55,7 +55,7 @@ Run coverage:
 
 ## Current Quality Baseline
 
-- 146 pytest tests passing
+- 156 pytest tests passing
 - Coverage configured for active package modules
 - Current coverage target: 80%+
 - No external broker or live trading dependency
@@ -147,3 +147,20 @@ Example usage:
     payload = exposure.to_dict()
 
 This is useful for checking portfolio concentration, long/short balance, and gross exposure before running risk analytics.
+
+## Portfolio Concentration Reporting
+
+The portfolio package can also summarize concentration risk by absolute position value. This helps identify whether one symbol dominates the portfolio before running risk analytics or strategy evaluation.
+
+Example usage:
+
+    from trading_assistant.portfolio import summarize_position_concentration
+
+    concentration = summarize_position_concentration(
+        positions,
+        max_weight=0.25,
+    )
+
+    payload = concentration.to_dict()
+
+The report includes total market value, each symbol's portfolio weight, the largest position, and any symbols above the configured concentration limit.
