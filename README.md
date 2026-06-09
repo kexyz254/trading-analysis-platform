@@ -55,7 +55,7 @@ Run coverage:
 
 ## Current Quality Baseline
 
-- 156 pytest tests passing
+- 168 pytest tests passing
 - Coverage configured for active package modules
 - Current coverage target: 80%+
 - No external broker or live trading dependency
@@ -164,3 +164,29 @@ Example usage:
     payload = concentration.to_dict()
 
 The report includes total market value, each symbol's portfolio weight, the largest position, and any symbols above the configured concentration limit.
+
+## Portfolio Rebalance Planning
+
+The portfolio package can generate long-only rebalance recommendations from current positions and target weights. The planner calculates current weights, target values, trade values, trade quantities, trade direction, and total portfolio turnover.
+
+Example usage:
+
+    import pandas as pd
+    from trading_assistant.portfolio import plan_portfolio_rebalance
+
+    positions = pd.DataFrame(
+        {
+            "symbol": ["AAPL", "MSFT", "TSLA"],
+            "quantity": [10, 5, 2],
+            "price": [200.0, 100.0, 250.0],
+        }
+    )
+
+    plan = plan_portfolio_rebalance(
+        positions,
+        {"AAPL": 0.40, "MSFT": 0.40, "TSLA": 0.20},
+    )
+
+    payload = plan.to_dict()
+
+This is useful for comparing current portfolio weights against research targets before running exposure, concentration, or risk checks.
