@@ -10,6 +10,9 @@ from .exposure import (
 
 
 __all__ = [
+    "analyze_allocation_drift",
+    "AllocationDriftReport",
+    "AllocationDrift",
     "check_portfolio_limits",
     "PortfolioLimitViolation",
     "PortfolioLimitReport",
@@ -35,4 +38,10 @@ from .limits import (
     PortfolioLimitReport,
     PortfolioLimitViolation,
     check_portfolio_limits,
+)
+
+from .drift import (
+    AllocationDrift,
+    AllocationDriftReport,
+    analyze_allocation_drift,
 )
