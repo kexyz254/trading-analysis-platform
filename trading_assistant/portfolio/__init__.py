@@ -10,6 +10,12 @@ from .exposure import (
 
 
 __all__ = [
+    "analyze_allocation_drift",
+    "AllocationDriftReport",
+    "AllocationDrift",
+    "check_portfolio_limits",
+    "PortfolioLimitViolation",
+    "PortfolioLimitReport",
     "plan_portfolio_rebalance",
     "RebalanceTrade",
     "PortfolioRebalancePlan",
@@ -26,4 +32,16 @@ from .rebalance import (
     PortfolioRebalancePlan,
     RebalanceTrade,
     plan_portfolio_rebalance,
+)
+
+from .limits import (
+    PortfolioLimitReport,
+    PortfolioLimitViolation,
+    check_portfolio_limits,
+)
+
+from .drift import (
+    AllocationDrift,
+    AllocationDriftReport,
+    analyze_allocation_drift,
 )

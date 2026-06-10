@@ -55,7 +55,7 @@ Run coverage:
 
 ## Current Quality Baseline
 
-- 168 pytest tests passing
+- 187 pytest tests passing
 - Coverage configured for active package modules
 - Current coverage target: 80%+
 - No external broker or live trading dependency
@@ -190,3 +190,31 @@ Example usage:
     payload = plan.to_dict()
 
 This is useful for comparing current portfolio weights against research targets before running exposure, concentration, or risk checks.
+
+## Portfolio Analytics Roadmap
+
+The portfolio layer is designed to support exposure reporting, concentration checks, rebalance planning, and risk-control workflows. The goal is to help researchers inspect whether a portfolio is balanced, over-concentrated, or drifting away from target allocations before running backtests or risk analytics.
+
+## Portfolio Risk Controls
+
+The portfolio package includes risk-control helpers for checking position concentration, gross exposure, net exposure, short exposure, and allocation drift. These reports are designed to run before backtests or risk analytics so a researcher can catch portfolio construction problems early.
+
+Example usage:
+
+    from trading_assistant.portfolio import (
+        analyze_allocation_drift,
+        check_portfolio_limits,
+    )
+
+    limit_report = check_portfolio_limits(
+        positions,
+        max_position_weight=0.25,
+        max_gross_exposure=500000,
+    )
+
+    drift_report = analyze_allocation_drift(
+        positions,
+        {"AAPL": 0.40, "MSFT": 0.40, "TSLA": 0.20},
+    )
+
+Both reports provide `to_dict()` methods for JSON-style reporting workflows.
