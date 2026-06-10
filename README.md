@@ -190,3 +190,7 @@ Example usage:
     payload = plan.to_dict()
 
 This is useful for comparing current portfolio weights against research targets before running exposure, concentration, or risk checks.
+
+## Portfolio Analytics Roadmap
+
+The portfolio layer is designed to support exposure reporting, concentration checks, rebalance planning, and risk-control workflows. The goal is to help researchers inspect whether a portfolio is balanced, over-concentrated, or drifting away from target allocations before running backtests or risk analytics.
