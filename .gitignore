@@ -8,3 +8,12 @@ __pycache__/
 # Coverage artifacts
 .coverage
 htmlcov/
+
+# Fuzzing/local build outputs
+out/
+crash-*
+leak-*
+timeout-*
+oom-*
+*.profraw
+*.profdata

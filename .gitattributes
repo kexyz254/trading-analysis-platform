@@ -1,0 +1,12 @@
+* text=auto
+
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.cc text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+
+.clusterfuzzlite/build.sh text eol=lf
+tools/check_fuzz_build.sh text eol=lf
+fuzz/corpus/** text eol=lf

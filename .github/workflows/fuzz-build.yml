@@ -1,0 +1,24 @@
+name: Fuzz Build Smoke Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fuzz-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Run fuzz build smoke test
+        run: |
+          chmod +x .clusterfuzzlite/build.sh
+          chmod +x tools/check_fuzz_build.sh
+          ./tools/check_fuzz_build.sh

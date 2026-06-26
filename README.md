@@ -218,3 +218,34 @@ Example usage:
     )
 
 Both reports provide `to_dict()` methods for JSON-style reporting workflows.
+
+## Native Fuzzing Surface
+
+The repository includes a dependency-free C++ market-data parsing layer under `native/marketdata/` and ClusterFuzzLite-compatible fuzz targets under `fuzz/`.
+
+The fuzzing surface covers:
+
+- OHLCV CSV market-data parsing
+- pipe-delimited order message parsing
+- order stream validation
+- symbol validation
+- price and volume validation
+- sequence-order validation
+
+Fuzz targets:
+
+- `ohlcv_csv_fuzzer`
+- `order_message_fuzzer`
+
+Seed corpora are stored under `fuzz/corpus/`.
+
+ClusterFuzzLite entry point:
+
+`.clusterfuzzlite/build.sh`
+
+Local smoke test:
+
+`./tools/check_fuzz_build.sh`
+
+Note: on Windows Git Bash, Clang may require a full Visual Studio C++ environment to locate standard C++ headers. The repository also includes a Linux GitHub Actions fuzz-build smoke test under `.github/workflows/fuzz-build.yml`.
+

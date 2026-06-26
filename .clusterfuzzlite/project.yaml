@@ -1,0 +1,9 @@
+language: c++
+fuzzing_engines:
+  - libfuzzer
+sanitizers:
+  - address
+  - undefined
+fuzz_targets:
+  - ohlcv_csv_fuzzer
+  - order_message_fuzzer
