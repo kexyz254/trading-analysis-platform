@@ -1,0 +1,36 @@
+name: Manual Fuzz Hunt
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds_per_target:
+        description: "Seconds per fuzz target"
+        required: true
+        default: "1800"
+
+jobs:
+  fuzz-hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm lld
+
+      - name: Run high-risk fuzz hunt
+        continue-on-error: true
+        run: |
+          chmod +x .clusterfuzzlite/build.sh tools/gha_fuzz_hunt.sh
+          tools/gha_fuzz_hunt.sh "${{ inputs.seconds_per_target }}"
+
+      - name: Upload fuzz findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings-${{ github.run_id }}
+          path: findings/
+          if-no-files-found: warn

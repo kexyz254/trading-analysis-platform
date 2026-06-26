@@ -17,3 +17,6 @@ timeout-*
 oom-*
 *.profraw
 *.profdata
+
+findings/
+out/
