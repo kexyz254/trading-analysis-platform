@@ -7,6 +7,12 @@ on:
         description: "Seconds per fuzz target"
         required: true
         default: "1800"
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/manual-fuzz-hunt.yml"
+      - "tools/gha_fuzz_hunt.sh"
 
 jobs:
   fuzz-hunt:
@@ -25,7 +31,11 @@ jobs:
         continue-on-error: true
         run: |
           chmod +x .clusterfuzzlite/build.sh tools/gha_fuzz_hunt.sh
-          tools/gha_fuzz_hunt.sh "${{ inputs.seconds_per_target }}"
+          SECONDS_PER_TARGET="${{ github.event.inputs.seconds_per_target }}"
+          if [ -z "$SECONDS_PER_TARGET" ]; then
+            SECONDS_PER_TARGET="1800"
+          fi
+          tools/gha_fuzz_hunt.sh "$SECONDS_PER_TARGET"
 
       - name: Upload fuzz findings
         if: always()
