@@ -1,0 +1,49 @@
+name: Resubmission Fuzz Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds_per_target:
+        description: "Seconds per fuzz target"
+        required: true
+        default: "900"
+  push:
+    branches:
+      - resubmission-fuzz-v2
+    paths:
+      - ".github/workflows/resubmission-fuzz-gate.yml"
+      - "tools/pre_submit_fuzz_gate.sh"
+      - "fuzz/**"
+      - "native/**"
+      - ".clusterfuzzlite/**"
+
+jobs:
+  fuzz-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm lld
+
+      - name: Run pre-submit fuzz gate
+        continue-on-error: true
+        run: |
+          chmod +x .clusterfuzzlite/build.sh tools/pre_submit_fuzz_gate.sh
+          SECONDS_PER_TARGET="${{ github.event.inputs.seconds_per_target }}"
+          if [ -z "$SECONDS_PER_TARGET" ]; then
+            SECONDS_PER_TARGET="900"
+          fi
+          tools/pre_submit_fuzz_gate.sh "$SECONDS_PER_TARGET"
+
+      - name: Upload fuzz findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resubmission-fuzz-findings-${{ github.run_id }}
+          path: findings/
+          if-no-files-found: warn
