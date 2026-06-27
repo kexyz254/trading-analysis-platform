@@ -7,16 +7,6 @@ on:
         description: "Seconds per fuzz target"
         required: true
         default: "900"
-  push:
-    branches:
-      - resubmission-fuzz-v2
-    paths:
-      - ".github/workflows/resubmission-fuzz-gate.yml"
-      - "tools/pre_submit_fuzz_gate.sh"
-      - "fuzz/**"
-      - "native/**"
-      - ".clusterfuzzlite/**"
-
 jobs:
   fuzz-gate:
     runs-on: ubuntu-latest
