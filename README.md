@@ -43,3 +43,9 @@ Additional allocation workflow modules:
 - Allocation plan journal
 - Allocation drift explainer
 - Allocation limit ledger
+
+Final post-allocation modules:
+
+- Allocation fill reconciler
+- Allocation post-trade validator
+- Allocation exception book
