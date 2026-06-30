@@ -2,22 +2,21 @@
 
 Trading Analysis Platform Native Core is a C++ market-data and allocation-validation library.
 
-It parses allocation plans, validates portfolio targets, evaluates reconciliation rules, checks risk and liquidity limits, and supports fuzz testing of structured allocation input.
+It parses allocation plans, validates portfolio targets, plans execution orders, evaluates allocation risk budgets, simulates rebalance execution, solves allocation constraints, and builds allocation trace diagnostics.
 
-The primary native component under fuzzing is the allocation-plan parser and validator. The allocation_plan_fuzzer.cc target feeds structured bytes into the C++ allocation parser and exercises the native market-data validation layer.
+The primary native component under fuzzing is the allocation-plan parser and validator. The allocation_plan_fuzzer.cc target feeds structured bytes into the C++ allocation parser and exercises native market-data validation code under native/marketdata.
 
 ## Native C++ components
 
 - Allocation plan parser
 - Allocation diagnostics engine
+- Allocation execution planner
+- Allocation risk budget evaluator
+- Allocation rebalance simulator
+- Allocation constraint solver
+- Allocation trace builder
 - Portfolio reconciliation engine
 - Trade lifecycle validator
-- Margin risk engine
-- Stress scenario engine
-- Execution quality engine
-- Position limit engine
-- Settlement risk engine
-- Liquidity risk engine
 - Market data parser
 - Binary feed decoder
 - Replay event log parser
