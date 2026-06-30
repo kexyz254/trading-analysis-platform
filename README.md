@@ -49,3 +49,9 @@ Final post-allocation modules:
 - Allocation fill reconciler
 - Allocation post-trade validator
 - Allocation exception book
+
+Additional professional allocation modules:
+
+- Allocation tax lot selector
+- Allocation settlement projector
+- Allocation transaction cost model
