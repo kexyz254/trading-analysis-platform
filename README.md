@@ -55,3 +55,5 @@ Additional professional allocation modules:
 - Allocation tax lot selector
 - Allocation settlement projector
 - Allocation transaction cost model
+
+- Allocation pre-trade guard
