@@ -35,3 +35,11 @@ It is connected to the native C++ allocation-plan parsing and validation code un
 ## Build
 
 ClusterFuzzLite builds the C++ harnesses from .clusterfuzzlite/build.sh.
+
+Additional allocation workflow modules:
+
+- Allocation cash ladder
+- Allocation order router
+- Allocation plan journal
+- Allocation drift explainer
+- Allocation limit ledger
