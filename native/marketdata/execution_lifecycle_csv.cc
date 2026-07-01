@@ -5,6 +5,7 @@
 #include <cctype>
 #include <limits>
 #include <set>
+#include <system_error>
 
 namespace marketdata {
 namespace {
@@ -67,12 +68,6 @@ std::vector<std::string> SplitLines(const std::string& input) {
   return lines;
 }
 
-bool IsTerminalState(ExecutionLifecycleCsvParser::OrderState state) {
-  return state == ExecutionLifecycleCsvParser::OrderState::kFilled ||
-         state == ExecutionLifecycleCsvParser::OrderState::kCancelled ||
-         state == ExecutionLifecycleCsvParser::OrderState::kRejected ||
-         state == ExecutionLifecycleCsvParser::OrderState::kExpired;
-}
 
 }  // namespace
 
@@ -492,7 +487,8 @@ bool ExecutionLifecycleCsvParser::ValidateEvent(
     fail("remaining_quantity", "remaining quantity exceeds order quantity");
   }
 
-  if (event.filled_quantity + event.remaining_quantity > event.quantity) {
+  if (event.filled_quantity <= event.quantity &&
+      event.remaining_quantity > event.quantity - event.filled_quantity) {
     fail("quantity", "filled plus remaining exceeds quantity");
   }
 
@@ -523,9 +519,6 @@ bool ExecutionLifecycleCsvParser::ValidateEvent(
 bool ExecutionLifecycleCsvParser::ValidateTransition(
     OrderState previous,
     ExecutionEventType next) const {
-  if (IsTerminalState(previous)) {
-    return false;
-  }
 
   switch (previous) {
     case OrderState::kNone:
@@ -811,3 +804,5 @@ bool ParseExecutionLifecycleCsv(
 }
 
 }  // namespace marketdata
+
+
