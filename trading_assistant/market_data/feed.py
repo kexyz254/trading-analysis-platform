@@ -1,10 +1,12 @@
 import asyncio
-import websocket
 import json
 import threading
-from datetime import datetime
-from typing import Callable, Dict, List, Optional
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
+
+import pandas as pd
+import websocket
 
 @dataclass
 class Tick:
@@ -25,6 +27,62 @@ class Candle:
     close: float
     volume: int
     timestamp: datetime
+
+class LiveFeed:
+    """Fetch OHLCV data from a live source and return it as a pandas DataFrame."""
+
+    def __init__(self, symbol: str = "BTC/USDT", timeframe: str = "1m", data_source: Optional[Callable[..., Any]] = None):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self._data_source = data_source
+
+    def _default_data_source(self, symbol: str, timeframe: str, limit: int) -> List[List[Any]]:
+        try:
+            import ccxt
+        except ImportError as exc:  # pragma: no cover - exercised when ccxt is unavailable
+            raise RuntimeError("ccxt is required to fetch live Binance OHLCV data") from exc
+
+        exchange = ccxt.binance({"enableRateLimit": True})
+        return exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+
+    async def stream_ohlcv(self, limit: int = 100, timeframe: Optional[str] = None, interval: float = 1.0, max_bars: Optional[int] = None):
+        """Yield OHLCV DataFrames continuously for a live trading loop."""
+        bars_seen = 0
+        while max_bars is None or bars_seen < max_bars:
+            yield self.fetch_ohlcv(limit=limit, timeframe=timeframe)
+            bars_seen += 1
+            if max_bars is not None and bars_seen >= max_bars:
+                break
+            await asyncio.sleep(interval)
+
+    def fetch_ohlcv(self, limit: int = 100, timeframe: Optional[str] = None) -> pd.DataFrame:
+        """Fetch the latest OHLCV bars and convert them into a validated DataFrame."""
+        source = self._data_source or self._default_data_source
+        rows = source(self.symbol, timeframe or self.timeframe, limit=limit)
+
+        if isinstance(rows, pd.DataFrame):
+            frame = rows.copy()
+        else:
+            frame = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        if frame.empty:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        if "timestamp" in frame.columns:
+            frame = frame.copy()
+            if pd.api.types.is_numeric_dtype(frame["timestamp"]):
+                frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+            else:
+                frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+        else:
+            frame.insert(0, "timestamp", pd.to_datetime(range(len(frame)), unit="ns"))
+
+        for column in ["open", "high", "low", "close", "volume"]:
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+        return frame[["timestamp", "open", "high", "low", "close", "volume"]]
+
 
 class WebSocketFeed:
     def __init__(self):

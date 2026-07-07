@@ -1,9 +1,64 @@
 """Concrete trading strategy implementations."""
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+
+from ..core.indicators import calculate_macd, calculate_rsi
 from .base import BaseStrategy, Signal
-from ..core.indicators import calculate_rsi, calculate_macd
+
+
+class AIStrategy(BaseStrategy):
+    """Generate trading signals from a probabilistic ML model."""
+
+    def __init__(self, model=None, feature_columns=None, buy_threshold=0.6, sell_threshold=0.4, name="AI Strategy"):
+        super().__init__(name=name)
+        self.model = model
+        self.feature_columns = feature_columns or []
+        self.buy_threshold = buy_threshold
+        self.sell_threshold = sell_threshold
+
+    def _prepare_features(self, data):
+        if isinstance(data, pd.DataFrame):
+            frame = data.copy()
+        elif isinstance(data, dict):
+            frame = data.get("features") or data.get("df") or pd.DataFrame(data)
+        else:
+            frame = pd.DataFrame(data)
+
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame(frame)
+
+        if self.feature_columns:
+            return frame[self.feature_columns]
+        return frame
+
+    def generate_signal(self, data):
+        features = self._prepare_features(data)
+        if self.model is None or features.empty:
+            return Signal.HOLD
+
+        try:
+            probabilities = self.model.predict_proba(features.iloc[[-1]])
+            probability = float(probabilities[0][1])
+        except AttributeError:
+            prediction = self.model.predict(features.iloc[[-1]])
+            if len(prediction) == 0:
+                return Signal.HOLD
+            value = float(prediction[0])
+            if value > 0:
+                return Signal.BUY
+            if value < 0:
+                return Signal.SELL
+            return Signal.HOLD
+        except (IndexError, TypeError, ValueError):
+            return Signal.HOLD
+
+        if probability >= self.buy_threshold:
+            return Signal.BUY
+        if probability <= self.sell_threshold:
+            return Signal.SELL
+        return Signal.HOLD
+
 
 class SMACrossoverStrategy(BaseStrategy):
     """Buy when fast SMA crosses above slow SMA, sell when crosses below."""
