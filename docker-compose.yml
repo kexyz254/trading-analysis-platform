@@ -25,11 +25,11 @@ services:
     # Retrain/tournament passes train RandomForest + XGBoost per symbol
     # across the whole discovered universe (up to ~30 symbols) - with no
     # cap, a memory spike during that pass can OOM the entire VPS, not
-    # just this container, on a small box. TUNE THESE to your actual VPS's
-    # real RAM/CPU (see docs/production_readiness_audit.md item #2) -
-    # these are conservative starting points for a small ($5-10/mo) box,
-    # not a measured ceiling.
-    mem_limit: 1500m
+    # just this container, on a small box. Measured against the actual
+    # deployment VPS (Hetzner, 1.9GB total RAM): 1000m + dashboard's 256m
+    # leaves ~650MB headroom for the OS/Docker daemon - re-tune if you
+    # move to a different plan (check with `free -h` on the host first).
+    mem_limit: 1000m
     cpus: 1.5
     # Docker's own json-file log driver has NO size cap by default -
     # distinct from (and in addition to) this app's own already-rotated
@@ -65,7 +65,7 @@ services:
       - ./trading_system.db:/app/trading_system.db
     # Read-only, low-traffic web process - far lighter than the engine's
     # retrain/tournament workload, but still uncapped by default without this.
-    mem_limit: 512m
+    mem_limit: 256m
     cpus: 0.5
     logging:
       driver: json-file
