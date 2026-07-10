@@ -104,6 +104,14 @@ def markets(quote: str = "USDT"):
         raise HTTPException(status_code=502, detail=f"Could not fetch market overview: {exc}") from exc
 
 
+@app.get("/api/wallet-balance")
+def wallet_balance(quote: str = "USDT"):
+    try:
+        return da.real_wallet_balance(_config, quote_currency=quote)
+    except Exception as exc:  # noqa: BLE001 - surface as a clean API error, not a 500 stack trace
+        raise HTTPException(status_code=502, detail=f"Could not fetch real wallet balance: {exc}") from exc
+
+
 @app.get("/api/ohlcv")
 def ohlcv(symbol: str, timeframe: str = "1h", limit: int = 300):
     if timeframe not in da.TIMEFRAMES:

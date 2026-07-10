@@ -165,6 +165,66 @@ def market_overview(config: Config, quote_currency: str = "USDT") -> List[Dict[s
     return _cache.get_or_set(("market_overview", quote_currency), ttl_seconds=30, factory=_fetch)
 
 
+def real_wallet_balance(config: Config, quote_currency: str = "USDT") -> Dict[str, Any]:
+    """Every asset actually held in the real exchange account right now,
+    priced live and summed - matches what the Binance app itself shows as
+    total spot wallet balance.
+
+    Deliberately NOT the same figure as "Equity" elsewhere on this
+    dashboard (real_portfolio_metrics/get_total_value): that figure is
+    scoped to capital and positions this system's own trades actually
+    explain, and mixing in untracked/unexplained balances there has
+    already caused one real incident - see _EQUITY_ACCOUNTING_FIX_CUTOFF's
+    docstring (a testnet WBTC grant this system never bought was once
+    counted as strategy equity, producing a fabricated ~90% "drawdown").
+    This function is a plain, unscoped "what does the account hold"
+    snapshot - never fed into any Sharpe/drawdown/win-rate calculation.
+
+    Assets with no direct {asset}/{quote_currency} ticker (e.g. a wrapped/
+    Earn-product token Binance doesn't spot-list against USDT) are
+    included with price/value as None rather than silently dropped or
+    guessed at - an honest "can't price this" beats a wrong number.
+    """
+    def _fetch():
+        exchange = get_exchange(config)
+        balance = exchange.fetch_balance()
+        tickers = exchange.fetch_tickers()
+
+        assets = []
+        total_value = 0.0
+        has_unpriced = False
+        raw = {k: v for k, v in balance.items() if isinstance(v, dict) and "total" in v}
+        for asset, amounts in raw.items():
+            quantity = float(amounts.get("total") or 0.0)
+            if quantity <= 0:
+                continue
+            if asset == quote_currency:
+                price, value = 1.0, quantity
+            else:
+                ticker = tickers.get(f"{asset}/{quote_currency}")
+                price = float(ticker["last"]) if ticker and ticker.get("last") else None
+                value = quantity * price if price is not None else None
+            if value is None:
+                has_unpriced = True
+            else:
+                total_value += value
+            assets.append({"asset": asset, "quantity": quantity, "price": price, "value": value})
+
+        assets.sort(key=lambda a: (a["value"] is None, -(a["value"] or 0.0)))
+        return {
+            "quote_currency": quote_currency,
+            "total_value": total_value,
+            "has_unpriced_assets": has_unpriced,
+            "assets": assets,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # Short TTL (real exchange balance call, not free) but still much
+    # fresher than the engine's own 5-minute poll cycle - "sync more
+    # often" without hammering the exchange on every dashboard tick.
+    return _cache.get_or_set(("real_wallet_balance", quote_currency), ttl_seconds=15, factory=_fetch)
+
+
 def fetch_ohlcv(config: Config, symbol: str, timeframe: str, limit: int = 300) -> List[Dict[str, Any]]:
     def _fetch():
         exchange = get_exchange(config)

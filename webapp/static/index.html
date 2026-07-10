@@ -65,6 +65,7 @@
       <div class="sidebar-section" id="quick-stats">
         <h3>Quick stats</h3>
         <div class="quick-stat"><span class="quick-stat-label">Equity</span><span class="quick-stat-value" id="qs-equity">&mdash;</span></div>
+        <div class="quick-stat"><span class="quick-stat-label">Real wallet balance</span><span class="quick-stat-value" id="qs-wallet-balance">&mdash;</span></div>
         <div class="quick-stat"><span class="quick-stat-label">Today's PnL</span><span class="quick-stat-value" id="qs-pnl-today">&mdash;</span></div>
         <div class="quick-stat"><span class="quick-stat-label">Trades today</span><span class="quick-stat-value" id="qs-trades-today">&mdash;</span></div>
         <div class="quick-stat"><span class="quick-stat-label">Win rate</span><span class="quick-stat-value" id="qs-winrate">&mdash;</span></div>
@@ -98,6 +99,16 @@
       <div class="panel">
         <h2>Open positions</h2>
         <div id="positions-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Real Binance wallet balance</h2>
+        <p class="caption">Every asset actually held in the account, priced live - matches the Binance app's
+          own total spot balance. Deliberately separate from "Equity" above, which is scoped to capital and
+          positions this system's own trades explain (mixing untracked balances into that figure has caused
+          real accounting bugs before).</p>
+        <div class="metric-row" id="wallet-balance-metrics"></div>
+        <div id="wallet-balance-table" class="table-wrap"></div>
       </div>
 
       <div class="panel">

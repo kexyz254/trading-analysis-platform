@@ -550,6 +550,49 @@ function renderEquity(equity) {
   });
 }
 
+async function loadWalletBalance() {
+  const data = await getJSON("/api/wallet-balance");
+  renderWalletBalance(data);
+}
+
+function renderWalletBalance(data) {
+  const metricsEl = document.getElementById("wallet-balance-metrics");
+  const tableEl = document.getElementById("wallet-balance-table");
+  const qsEl = document.getElementById("qs-wallet-balance");
+  metricsEl.innerHTML = "";
+
+  const totalStr = `$${fmtNum(data.total_value)}`;
+  qsEl.textContent = totalStr;
+
+  const metrics = [["Total value", totalStr, null]];
+  metrics.forEach(([label, value, cls]) => {
+    const m = el("div", "metric");
+    m.appendChild(el("span", "metric-label", label));
+    m.appendChild(el("span", `metric-value${cls ? " " + cls : ""}`, value));
+    metricsEl.appendChild(m);
+  });
+
+  renderTable(tableEl, [
+    { key: "asset", label: "Asset" },
+    { key: "quantity", label: "Quantity" },
+    { key: "price", label: "Price" },
+    { key: "value", label: "Value" },
+  ], data.assets, {
+    quantity: (v) => fmtNum(v, 6),
+    price: (v) => (v === null ? "—" : fmtNum(v, 4)),
+    // Assets with no direct {asset}/USDT ticker (e.g. an Earn/Savings
+    // token) are shown, not dropped - an honest "can't price this" beats
+    // a silently wrong total. has_unpriced_assets flags this in the
+    // caption so a non-zero gap vs. the Binance app has a visible reason.
+    value: (v) => (v === null ? "price unavailable" : `$${fmtNum(v)}`),
+  });
+
+  if (data.has_unpriced_assets) {
+    const note = el("div", "caption", "Some held assets have no direct " + data.quote_currency + " ticker and are excluded from the total above - shown with quantity only.");
+    tableEl.appendChild(note);
+  }
+}
+
 function renderPositions(equity) {
   const container = document.getElementById("positions-table");
   if (!equity || equity.length === 0) {
@@ -1094,6 +1137,7 @@ async function boot() {
   await loadStatus();
   await loadHealth();
   await loadOverview();
+  await loadWalletBalance();
   await loadMarkets();
   const tickerSymbols = await loadTickerTape();
   await initChartTab(); // defined in chart.js
@@ -1113,6 +1157,10 @@ async function boot() {
   // scheduling for all of these from here on (see the controller above).
   AutoRefresh.register("overview", 15000, loadOverview);
   AutoRefresh.register("markets", 15000, loadMarkets);
+  // A real exchange fetch_balance()+fetch_tickers() call (cached 15s
+  // server-side, see data_access.real_wallet_balance) - matches the
+  // backend TTL rather than polling faster than the data actually changes.
+  AutoRefresh.register("wallet-balance", 15000, loadWalletBalance);
   // Slow reconciliation poll, not the primary price-update path - a
   // safety net in case the WebSocket silently drops, or the tracked
   // symbol set changes.
