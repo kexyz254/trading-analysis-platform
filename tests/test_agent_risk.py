@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -473,6 +474,63 @@ def test_evaluate_buy_skips_confluence_check_when_not_configured():
     higher_timeframe_factor, no ohlcv_frame) keep the original behavior,
     even against a heavily-declining price history."""
     agent = RiskAgent(max_position_size=0.5)  # higher_timeframe_factor defaults to None
+    declining = _trending_ohlcv(n=200, start=300.0, step=-1.0)
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=declining
+    )
+
+    assert verdict.approved is True
+
+
+def test_evaluate_buy_rejects_when_price_has_fallen_below_the_fast_sma():
+    agent = RiskAgent(max_position_size=0.5, trend_alignment_fast_period=20, trend_alignment_slow_period=50)
+    # A steady uptrend (so SMA20 sits above SMA50, the normal aligned
+    # ordering), then a sudden one-bar drop that dips price below SMA20
+    # without falling below the lower SMA50.
+    closes = list(np.linspace(80.0, 100.0, 49)) + [90.0]
+    frame = _trending_ohlcv(n=len(closes))
+    frame["close"] = closes
+    frame["open"] = closes
+    frame["high"] = [c + 1 for c in closes]
+    frame["low"] = [c - 1 for c in closes]
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=frame
+    )
+
+    assert verdict.approved is False
+    assert "trend alignment" in verdict.reason
+
+
+def test_evaluate_buy_approves_when_price_is_fully_aligned_above_both_smas():
+    agent = RiskAgent(max_position_size=0.5, trend_alignment_fast_period=20, trend_alignment_slow_period=50)
+    rising = _trending_ohlcv(n=100, start=100.0, step=1.0)
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=rising
+    )
+
+    assert verdict.approved is True
+
+
+def test_evaluate_buy_approves_when_trend_alignment_history_is_insufficient():
+    """Not enough history to compute both SMAs is a data gap, not a veto."""
+    agent = RiskAgent(max_position_size=0.5, trend_alignment_fast_period=20, trend_alignment_slow_period=50)
+    short_history = _trending_ohlcv(n=10, start=100.0, step=-1.0)
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=short_history
+    )
+
+    assert verdict.approved is True
+
+
+def test_evaluate_buy_skips_trend_alignment_check_when_not_configured():
+    """Backward compatible: existing callers that never opt in (no
+    trend_alignment_fast_period) keep the original behavior, even against
+    a heavily-declining price history."""
+    agent = RiskAgent(max_position_size=0.5)  # trend_alignment_fast_period defaults to None
     declining = _trending_ohlcv(n=200, start=300.0, step=-1.0)
 
     verdict = agent.evaluate_buy(

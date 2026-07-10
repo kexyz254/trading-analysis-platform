@@ -249,6 +249,8 @@ def build_orchestrator(config: Config) -> Orchestrator:
                 else None
             ),
             higher_timeframe_factor=config.risk.higher_timeframe_factor,
+            trend_alignment_fast_period=config.risk.trend_alignment_fast_period,
+            trend_alignment_slow_period=config.risk.trend_alignment_slow_period,
             alert_manager=alert_manager,
             max_drawdown_pct=config.risk.max_drawdown_pct,
             atr_multiplier=config.risk.atr_multiplier,

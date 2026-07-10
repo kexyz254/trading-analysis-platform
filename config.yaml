@@ -95,6 +95,17 @@ risk:
   # warns about. 4 (against 1h bars) = a 4h higher timeframe, resampled
   # from the same 1h history already fetched - zero extra API calls.
   higher_timeframe_factor: 4
+  # SMA trend-alignment confluence: only take a new long while
+  # price > SMA20 > SMA50 on the SAME timeframe this decision is made on -
+  # distinct from higher_timeframe_factor above (a DIFFERENT, higher
+  # timeframe's regime, not this one's SMA structure) and from
+  # sma_crossover (one tournament candidate's own signal, not a gate
+  # applied to every real buy). Buying into a market that's already lost
+  # this structure is buying against a broken trend regardless of what
+  # any single indicator or model signal says in isolation. None disables
+  # the check entirely.
+  trend_alignment_fast_period: 20
+  trend_alignment_slow_period: 50
   # Pre-trade execution quality: a market order fired during a moment of
   # abnormally wide bid-ask spread can fill far worse than the price
   # risk-sizing assumed - checked immediately before every real buy order.

@@ -21,6 +21,7 @@ from trading_assistant.risk.correlation import compute_returns, correlated_expos
 from trading_assistant.risk.crisis import CrisisState
 from trading_assistant.risk.timeframe_confluence import higher_timeframe_blocks_buy, higher_timeframe_regime
 from trading_assistant.risk.atr_stop import DEFAULT_MAX_STOP_PCT, DEFAULT_MIN_STOP_PCT, compute_atr_stop_pct
+from trading_assistant.risk.trend_alignment import compute_trend_alignment, trend_alignment_blocks_buy
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,20 @@ class RiskAgent:
         # param), size is bumped up rather than silently producing a
         # doomed order, but only when capital can comfortably afford it.
         min_stake_usd: float = 1.0,
+        # SMA trend-alignment confluence (trading_assistant.risk.
+        # trend_alignment): only take a new long while price > SMA_fast >
+        # SMA_slow on the SAME timeframe this decision is being made on -
+        # distinct from higher_timeframe_factor above (a DIFFERENT,
+        # higher timeframe's regime) and from SMACrossoverStrategy (one
+        # tournament candidate's own signal, not a gate applied to every
+        # buy). None disables this check entirely (opt-in, backward
+        # compatible - existing callers that never pass ohlcv_frame, or
+        # that leave this None, get exactly the old behavior).
+        trend_alignment_fast_period: Optional[int] = None,
+        trend_alignment_slow_period: int = 50,
     ):
+        self.trend_alignment_fast_period = trend_alignment_fast_period
+        self.trend_alignment_slow_period = trend_alignment_slow_period
         self.risk_manager = risk_manager or RiskManager(
             max_position_size=max_position_size, max_daily_loss=max_daily_loss
         )
@@ -278,6 +292,25 @@ class RiskAgent:
                     reason=(
                         f"higher-timeframe confluence: {symbol} would be a buy against a confirmed "
                         f"{higher_tf_regime} on the higher timeframe (top-down analysis discipline)"
+                    ),
+                )
+
+        if self.trend_alignment_fast_period is not None and ohlcv_frame is not None:
+            alignment = compute_trend_alignment(
+                ohlcv_frame["close"], self.trend_alignment_fast_period, self.trend_alignment_slow_period
+            )
+            if trend_alignment_blocks_buy(alignment):
+                severity = (
+                    "price has fallen below BOTH the fast and slow SMA - be more cautious, this is a "
+                    "stronger bearish signal"
+                    if alignment == "below_slow"
+                    else "price has fallen below the fast SMA - avoid new longs until it reclaims it"
+                )
+                return RiskVerdict(
+                    approved=False,
+                    reason=(
+                        f"trend alignment: {symbol} is not in a price > SMA{self.trend_alignment_fast_period} > "
+                        f"SMA{self.trend_alignment_slow_period} uptrend structure ({severity})"
                     ),
                 )
 

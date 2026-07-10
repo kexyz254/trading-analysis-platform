@@ -101,6 +101,13 @@ class RiskConfig:
     # timeframe, resampled from the same 1h history already fetched - zero
     # extra API calls. None disables the check entirely.
     higher_timeframe_factor: Optional[int] = 4
+    # SMA trend-alignment confluence: only take a new long while
+    # price > SMA_fast > SMA_slow on the SAME timeframe (20/50 by
+    # default) - a same-timeframe structural check, distinct from
+    # higher_timeframe_factor above (a DIFFERENT, higher timeframe's
+    # regime). None disables the check entirely.
+    trend_alignment_fast_period: Optional[int] = 20
+    trend_alignment_slow_period: int = 50
     # Pre-trade execution quality: a market order fired during a moment of
     # abnormally wide bid-ask spread can fill far worse than the price
     # risk-sizing assumed. 0.01 = reject a real buy if the current spread
