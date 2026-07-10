@@ -1,8 +1,22 @@
 """Concrete trading strategy implementations."""
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
+from ..analysis.candlestick_patterns import (
+    bearish_engulfing,
+    bearish_harami,
+    bullish_engulfing,
+    bullish_harami,
+    dragonfly_doji,
+    evening_star,
+    gravestone_doji,
+    hammer,
+    morning_star,
+    shooting_star,
+)
 from ..core.indicators import calculate_macd, calculate_rsi
 from .base import BaseStrategy, Signal
 
@@ -16,6 +30,13 @@ class AIStrategy(BaseStrategy):
         self.feature_columns = feature_columns or []
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
+        # The model's raw "probability of up" for the most recent
+        # generate_signal() call - distinct from PredictProbaAdapter's
+        # last_confidence (an ensemble agreement metric). This is the actual
+        # number the buy/sell thresholds are applied to, and without
+        # exposing it nothing downstream (journal, dashboard) can show HOW
+        # CLOSE a HOLD was to actually firing a trade.
+        self.last_probability_up: Optional[float] = None
 
     def _prepare_features(self, data):
         if isinstance(data, pd.DataFrame):
@@ -33,6 +54,11 @@ class AIStrategy(BaseStrategy):
         return frame
 
     def generate_signal(self, data):
+        # Reset before attempting: if this call falls through to HOLD via an
+        # early return below, a stale value from a previous successful call
+        # must not linger and get journaled as if it were current.
+        self.last_probability_up = None
+
         features = self._prepare_features(data)
         if self.model is None or features.empty:
             return Signal.HOLD
@@ -53,6 +79,7 @@ class AIStrategy(BaseStrategy):
         except (IndexError, TypeError, ValueError):
             return Signal.HOLD
 
+        self.last_probability_up = probability
         if probability >= self.buy_threshold:
             return Signal.BUY
         if probability <= self.sell_threshold:
@@ -188,5 +215,82 @@ class GridTradingStrategy(BaseStrategy):
             return Signal.BUY
         elif current_level > self.grid_levels / 2:
             return Signal.SELL
-        
+
+        return Signal.HOLD
+
+
+class CandlestickPatternStrategy(BaseStrategy):
+    """Reversal trading from Japanese candlestick patterns, gated by trend
+    context - codifying The Candlestick Trading Bible's single most-repeated
+    rule: "you can't trade any candlestick pattern alone, you will need
+    other technical tools to confirm your entries." A bullish reversal
+    pattern (hammer, bullish engulfing, bullish harami, morning star,
+    dragonfly doji) only signals BUY when the recent trend has actually
+    been down - trading a hammer mid-uptrend isn't a reversal signal at
+    all, per the book's own examples (every illustrated hammer/engulfing
+    trade occurs at the end of an established move, never in the middle of
+    one). The trend filter here (price vs. a declining/rising rolling SMA)
+    is a mechanical stand-in for the book's hand-drawn support/resistance
+    and trendline confluence, which this system can't yet compute -
+    deliberately simple rather than a false-precision reimplementation of
+    subjective chart-drawing.
+
+    This is a strategy CANDIDATE like every other one in
+    StrategyManager.default_candidates() - it earns a live decision only by
+    clearing the same walk-forward promotion bar (min Sharpe, min folds,
+    min %% profitable) the tournament applies to everything else. Adding it
+    here does not mean it trades; it means it gets to compete."""
+
+    def __init__(self, trend_period: int = 20):
+        super().__init__("Candlestick Patterns")
+        self.trend_period = trend_period
+
+    def generate_signal(self, data):
+        open_, high, low, close = data.get("open"), data.get("high"), data.get("low"), data.get("close")
+        if open_ is None or high is None or low is None or close is None:
+            return Signal.HOLD
+        # Need enough history for the trend SMA plus morning/evening star's
+        # 2-bar lookback, or every early bar would be a spurious NaN-driven signal.
+        if len(close) < self.trend_period + 3:
+            return Signal.HOLD
+
+        # Trend context is judged as of the bar BEFORE the candidate pattern
+        # candle, not contaminated by it - the whole point of a reversal
+        # pattern is that its own close breaks the prior trend, so including
+        # it in the trend judgment would be circular (a strong bearish
+        # reversal candle can single-handedly drag a short SMA window below
+        # the "uptrend" it's meant to be reversing).
+        sma = close.rolling(self.trend_period).mean()
+        if len(close) < self.trend_period + 4:
+            return Signal.HOLD
+        reference_close, reference_sma = close.iloc[-2], sma.iloc[-2]
+        prior_sma = sma.iloc[-2 - self.trend_period]
+        if pd.isna(reference_sma) or pd.isna(prior_sma):
+            return Signal.HOLD
+
+        downtrend_context = reference_close < reference_sma and reference_sma < prior_sma
+        uptrend_context = reference_close > reference_sma and reference_sma > prior_sma
+
+        if downtrend_context:
+            bullish_reversal = (
+                bullish_engulfing(open_, high, low, close).iloc[-1]
+                or hammer(open_, high, low, close).iloc[-1]
+                or dragonfly_doji(open_, high, low, close).iloc[-1]
+                or bullish_harami(open_, high, low, close).iloc[-1]
+                or morning_star(open_, high, low, close).iloc[-1]
+            )
+            if bullish_reversal:
+                return Signal.BUY
+
+        if uptrend_context:
+            bearish_reversal = (
+                bearish_engulfing(open_, high, low, close).iloc[-1]
+                or shooting_star(open_, high, low, close).iloc[-1]
+                or gravestone_doji(open_, high, low, close).iloc[-1]
+                or bearish_harami(open_, high, low, close).iloc[-1]
+                or evening_star(open_, high, low, close).iloc[-1]
+            )
+            if bearish_reversal:
+                return Signal.SELL
+
         return Signal.HOLD

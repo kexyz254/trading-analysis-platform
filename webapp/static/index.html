@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Autonomous Trading System</title>
+  <link rel="icon" href="data:," />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">&#9670;</span>
+      <span class="brand-name">Autonomous Trading System</span>
+      <span class="health-dot" id="topbar-health-dot" title="System health: unavailable"></span>
+    </div>
+    <div class="stat-strip" id="stat-strip">
+      <div class="stat"><span class="stat-label">Mode</span><span class="stat-value" id="stat-mode">&mdash;</span></div>
+      <div class="stat"><span class="stat-label">Symbols</span><span class="stat-value" id="stat-symbols">&mdash;</span></div>
+      <div class="stat"><span class="stat-label">Tournament</span><span class="stat-value" id="stat-tournament">&mdash;</span></div>
+      <div class="stat"><span class="stat-label">Timeframe</span><span class="stat-value" id="stat-timeframe">&mdash;</span></div>
+      <div class="stat"><span class="stat-label">Nairobi time</span><span class="stat-value" id="clock">&mdash;</span></div>
+    </div>
+    <div class="refresh-control" id="refresh-control">
+      <button class="refresh-btn" id="refresh-now-btn" title="Refresh now" aria-label="Refresh now">
+        <span class="refresh-icon" id="refresh-icon">&#8635;</span>
+      </button>
+      <div class="refresh-status">
+        <span class="refresh-dot" id="refresh-dot"></span>
+        <span class="refresh-text" id="refresh-text">Live</span>
+      </div>
+      <button class="refresh-toggle" id="refresh-toggle-btn" title="Pause auto-refresh" aria-label="Pause auto-refresh" aria-pressed="false">Pause</button>
+    </div>
+  </header>
+
+  <div id="live-banner" class="live-banner hidden">LIVE MODE &mdash; real funds are at risk</div>
+
+  <div class="ticker-tape" id="ticker-tape"></div>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <button class="sidebar-collapse-btn" id="sidebar-collapse-btn" aria-expanded="true" aria-label="Collapse sidebar">&#8249;</button>
+
+      <div class="sidebar-section" id="health-section">
+        <div class="health-ring" id="health-ring">
+          <svg viewBox="0 0 120 70" class="health-ring-svg">
+            <path class="health-ring-track" d="M 10 65 A 50 50 0 0 1 110 65"></path>
+            <path class="health-ring-fill" id="health-ring-fill" d="M 10 65 A 50 50 0 0 1 110 65" style="stroke-dasharray: 0 157;"></path>
+          </svg>
+          <div class="health-ring-score" id="health-ring-score">&mdash;</div>
+        </div>
+        <div class="health-label" id="health-label">Unavailable</div>
+        <div class="health-uptime" id="health-uptime">Uptime: &mdash;</div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3>Alerts</h3>
+        <div class="alert-ticker" id="alert-ticker"><div class="empty-msg">No alerts yet.</div></div>
+      </div>
+
+      <div class="sidebar-section" id="quick-stats">
+        <h3>Quick stats</h3>
+        <div class="quick-stat"><span class="quick-stat-label">Equity</span><span class="quick-stat-value" id="qs-equity">&mdash;</span></div>
+        <div class="quick-stat"><span class="quick-stat-label">Today's PnL</span><span class="quick-stat-value" id="qs-pnl-today">&mdash;</span></div>
+        <div class="quick-stat"><span class="quick-stat-label">Trades today</span><span class="quick-stat-value" id="qs-trades-today">&mdash;</span></div>
+        <div class="quick-stat"><span class="quick-stat-label">Win rate</span><span class="quick-stat-value" id="qs-winrate">&mdash;</span></div>
+      </div>
+    </aside>
+
+    <div class="app-main">
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="overview">Overview</button>
+        <button class="tab-btn" data-tab="markets">Markets</button>
+        <button class="tab-btn" data-tab="chart">Chart</button>
+        <button class="tab-btn" data-tab="paper">Paper Trading</button>
+        <button class="tab-btn" data-tab="readiness">Readiness</button>
+      </nav>
+
+      <main>
+    <section id="tab-overview" class="tab-panel active">
+      <div class="panel">
+        <h2>Equity curve</h2>
+        <div id="equity-chart" class="chart-box"></div>
+        <div class="metric-row" id="equity-metrics"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Real portfolio performance</h2>
+        <p class="caption">Computed with the same Sharpe/drawdown math paper-trading candidates are graded
+          with - the real portfolio gets no less scrutiny than the simulated ones.</p>
+        <div class="metric-row" id="real-performance-metrics"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Open positions</h2>
+        <div id="positions-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Circuit breaker</h2>
+        <div id="circuit-breaker-status" class="status-line">&mdash;</div>
+      </div>
+
+      <div class="panel">
+        <h2>Alerts</h2>
+        <p class="caption">Conditions serious enough to need attention now - circuit breaker trips,
+          significant feature drift, protective stop-loss triggers - separated out from routine cycle
+          logs. Always journaled here regardless of whether external (webhook) notification is configured.</p>
+        <div id="alerts-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Recent decisions</h2>
+        <p class="caption">Real decisions only - the tournament's paper-trading candidates (5 per symbol, every
+          cycle) are tracked separately on the Paper Trading tab, not mixed in here.</p>
+        <div id="decisions-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Recent trades</h2>
+        <div class="metric-row" id="trades-metrics"></div>
+        <div id="trades-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Model health &mdash; walk-forward retrain history</h2>
+        <div id="retrain-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Strategy tournament &mdash; stability tracking</h2>
+        <div id="tournament-table" class="table-wrap"></div>
+        <p class="caption">Stability score = fraction of consecutive re-runs where the winner stayed the
+          same. Needs at least 2 runs to show anything; the readiness bar (see the Readiness tab) needs
+          many more than that.</p>
+      </div>
+    </section>
+
+    <section id="tab-markets" class="tab-panel">
+      <div class="panel">
+        <p class="caption" id="markets-caption">Live from the exchange - every pair currently listed, not
+          limited to the liquidity-filtered subset the system actually trades.</p>
+        <div class="filters">
+          <input id="market-search" type="text" placeholder="Search symbol&hellip;" />
+          <input id="market-min-volume" type="number" placeholder="Min 24h volume ($)" min="0" step="1000000" />
+          <select id="market-sort">
+            <option value="quote_volume_24h">24h Volume</option>
+            <option value="change_24h_pct">24h % Change</option>
+            <option value="last">Price</option>
+          </select>
+          <select id="market-direction">
+            <option value="desc">Descending</option>
+            <option value="asc">Ascending</option>
+          </select>
+          <div class="view-toggle" id="markets-view-toggle" role="group" aria-label="Markets view">
+            <button type="button" class="view-toggle-btn active" data-view="table">Table</button>
+            <button type="button" class="view-toggle-btn" data-view="grid">Grid</button>
+          </div>
+        </div>
+        <p class="caption" id="markets-count"></p>
+        <div id="markets-table" class="table-wrap"></div>
+        <div id="markets-grid" class="markets-grid hidden"></div>
+      </div>
+    </section>
+
+    <section id="tab-chart" class="tab-panel">
+      <div class="panel">
+        <div class="chart-controls">
+          <select id="chart-symbol"></select>
+          <div class="tf-group" id="tf-group"></div>
+          <label class="live-toggle"><input type="checkbox" id="live-toggle" checked /> <span class="live-dot">&#9679;</span> Live</label>
+          <span class="caption" id="live-updated">&mdash;</span>
+        </div>
+        <div class="hero-price-row">
+          <span class="hero-price" id="hero-price">&mdash;</span>
+          <span class="hero-change" id="hero-change"></span>
+        </div>
+        <div id="candle-chart" class="chart-box chart-box-tall"></div>
+        <div class="metric-row" id="chart-metrics"></div>
+        <p class="caption" id="chart-caption"></p>
+      </div>
+    </section>
+
+    <section id="tab-paper" class="tab-panel">
+      <div class="panel">
+        <h2>Paper trading &mdash; simulated bankrolls, zero real risk</h2>
+        <p class="caption">Every strategy candidate from the regime tournament trades this same live data in
+          its own simulated portfolio, starting from the same capital. <strong>None of this touches the real
+          exchange, even on testnet</strong> &mdash; it is a parallel, forward-only comparison used to build
+          confidence before any strategy is trusted with real execution. Numbers here are never real money.</p>
+        <div id="paper-leaderboard-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <div class="chart-controls">
+          <select id="paper-symbol"></select>
+          <select id="paper-candidate"></select>
+        </div>
+        <div id="paper-equity-chart" class="chart-box"></div>
+        <div class="metric-row" id="paper-metrics"></div>
+      </div>
+    </section>
+
+    <section id="tab-readiness" class="tab-panel">
+      <div class="panel">
+        <h2>Go-live readiness scorecard</h2>
+        <p class="caption">A computed answer to "are we ready to trust this with a live decision" -
+          every threshold here is configured in <code>config.yaml</code>'s <code>readiness</code> section,
+          not invented on the spot. This never changes any live behavior by itself; it's a read-only report.</p>
+        <div id="readiness-verdict" class="readiness-verdict"></div>
+        <div id="readiness-criteria"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Tournament stability detail</h2>
+        <p class="caption">Every symbol/regime combination, not just the currently-winning one - this is
+          the raw evidence the "Tournament stability" criterion above is computed from.</p>
+        <div id="stability-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Feature drift</h2>
+        <p class="caption">Population Stability Index (PSI) comparing each symbol's live feature
+          distribution against the training baseline of its currently-promoted model - an early warning
+          that live market conditions may have moved beyond what the model was actually trained on,
+          checked every cycle rather than only at the next scheduled retrain.</p>
+        <div id="drift-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Execution quality</h2>
+        <p class="caption">Real slippage (fill price vs. the price the decision was made at) and order
+          latency, per symbol - measured from the exchange's own order responses, not assumed. Positive
+          slippage means the fill was worse than intended, either direction.</p>
+        <div id="execution-quality-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Trade audit trail</h2>
+        <p class="caption">The immutable, append-only record of every realized trade - entry and exit
+          price, strategy, model confidence, market regime, and the reason for each side, together in
+          one row. Records are never edited or deleted; a correction (if one is ever needed) appears as
+          a new row referencing the one it supersedes, so the full history stays intact.</p>
+        <div id="trade-audit-table" class="table-wrap"></div>
+      </div>
+
+      <div class="panel">
+        <h2>Backtest-vs-live correlation</h2>
+        <p class="caption">Every symbol/candidate pair with enough live paper trades to say something -
+          the raw evidence behind the "Backtest-vs-live correlation" criterion above. A candidate whose
+          backtest Sharpe and live Sharpe move together is evidence the walk-forward methodology
+          transfers to real conditions; if a candidate consistently backtests well but trades poorly
+          live (or vice versa), that pair is exactly what to investigate first.</p>
+        <div id="backtest-live-table" class="table-wrap"></div>
+      </div>
+    </section>
+      </main>
+    </div>
+  </div>
+
+  <footer>
+    <span id="footer-text">&mdash;</span>
+  </footer>
+
+  <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+  <script src="/static/ws.js"></script>
+  <script src="/static/app.js"></script>
+  <script src="/static/chart.js"></script>
+</body>
+</html>

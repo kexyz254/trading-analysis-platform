@@ -1,0 +1,360 @@
+# Default configuration for the autonomous trading system.
+# `mode: testnet` is the safe default — switching to `live` plus supplying
+# real Binance API keys is a separate, deliberate decision.
+mode: live
+
+exchange:
+  name: binance
+  api_key_env: BINANCE_API_KEY
+  api_secret_env: BINANCE_API_SECRET
+  # A stalled connection isn't an exception, it just blocks - without an
+  # explicit timeout, a hung network call could freeze a live cycle (or a
+  # background loop iteration) indefinitely with nothing to detect it.
+  timeout_ms: 20000
+
+symbols:
+  - BTC/USDT
+  - ETH/USDT
+
+# With symbol_discovery.enabled below, this list is only the startup seed -
+# used immediately before the first discovery run completes. Once discovery
+# enabled, the actual watchlist is auto-selected top-volume USDT spot pairs.
+
+symbol_discovery:
+  enabled: true
+  quote_currency: USDT
+  # Lowered from 5,000,000: measured against real testnet data, volume falls
+  # off a cliff after the top 7 pairs (BNB/USDT barely clears $5M at $5.5M,
+  # DOGE/USDT misses at $4.4M) - $5M was silently capping the universe at 7
+  # regardless of max_symbols below. $1M/day still filters out the genuinely
+  # thin/manipulable tail (hundreds of pairs under $300k, some under $10k on
+  # testnet) while surfacing ~22 real pairs instead of 7 - verified by
+  # querying live tickers, not guessed.
+  min_24h_volume_usd: 1000000
+  # A single machine can't retrain (fetch + train + backtest) an unbounded
+  # number of symbols on a reasonable cadence - keep this bounded and raise
+  # it deliberately, watching retrain_interval_hours' actual wall-clock cost.
+  # Raised from 20 to give headroom above the ~22 pairs the new volume floor
+  # actually selects - at ~45s/symbol (retrain+tournament combined,
+  # measured), a full warm-start across 22-30 symbols costs ~17-23 minutes,
+  # only paid on process start/restart, not every cycle.
+  max_symbols: 30
+  refresh_interval_hours: 24
+
+# 1h chosen deliberately, not arbitrarily: backtesting on real data showed
+# the model finds no usable edge at 1m/4h/15m on these symbols, only at 1h
+# (see learning agent's retrain_interval_hours below). Change with caution -
+# any change here should be re-validated with a fresh retrain before going live.
+timeframe: 1h
+poll_interval_seconds: 300
+
+risk:
+  max_position_size: 0.1
+  max_daily_loss: 0.02
+  risk_per_trade: 0.02
+  # The FALLBACK stop distance when volatility-adjusted sizing (below)
+  # can't compute one (no OHLCV yet, disabled). With atr_multiplier set,
+  # this is rarely what's actually used live - see atr_multiplier.
+  stop_loss_pct: 0.01
+  max_position_weight: 0.25
+  # max_gross_exposure/max_net_exposure are absolute quote-currency (e.g. USDT)
+  # caps, not ratios - these are set to 80% of portfolio.initial_capital below.
+  max_gross_exposure: 800.0
+  max_net_exposure: 800.0
+  # After this many consecutive execution failures (or one daily-loss-limit
+  # breach), the circuit breaker trips: no new positions until an operator
+  # explicitly calls CircuitBreaker.reset(). This does NOT reset on process
+  # restart - the trip state is persisted in trading_system.db.
+  max_consecutive_errors: 3
+  # Correlation-aware concentration cap: per-symbol caps alone can't see
+  # that many "different" symbols may really be one leveraged bet on the
+  # same market factor - crypto altcoins are typically 70-90%+ correlated
+  # to BTC, especially during risk-off moves (exactly when a risk system
+  # needs to work). 0.4 means no correlated cluster (the candidate plus
+  # every held position moving with it above correlation_threshold) may
+  # exceed 40% of total portfolio value.
+  max_correlated_exposure_pct: 0.4
+  correlation_threshold: 0.6
+  correlation_lookback_bars: 50
+  # Drawdown-based adaptive risk scaling: risk shrinks in discrete steps as
+  # equity falls further below its peak, floors at zero (halt opening new
+  # positions) past the deepest tier - a losing streak earns a SMALLER bet,
+  # not the same fixed one. Deliberately conservative, round numbers rather
+  # than backtested-and-overfit thresholds: this is a safety ladder, not an
+  # alpha signal. Empty list disables adaptive scaling.
+  drawdown_tiers:
+    - {drawdown_pct: 0.05, risk_scale: 0.75}
+    - {drawdown_pct: 0.10, risk_scale: 0.50}
+    - {drawdown_pct: 0.15, risk_scale: 0.25}
+    - {drawdown_pct: 0.20, risk_scale: 0.0}
+  # Top-down analysis discipline: a 1h BUY against a confirmed higher-
+  # timeframe downtrend is the classic retracement trap this system's own
+  # candlestick-pattern strategy is built to recognize on the entry
+  # timeframe - the higher timeframe must agree, or a lower-timeframe
+  # signal is exactly the kind of trap professional price action trading
+  # warns about. 4 (against 1h bars) = a 4h higher timeframe, resampled
+  # from the same 1h history already fetched - zero extra API calls.
+  higher_timeframe_factor: 4
+  # Pre-trade execution quality: a market order fired during a moment of
+  # abnormally wide bid-ask spread can fill far worse than the price
+  # risk-sizing assumed - checked immediately before every real buy order.
+  max_spread_pct: 0.01
+  # Adaptive order placement: a marketable LIMIT order (capped price)
+  # instead of an unbounded MARKET order when the spread is comfortably
+  # tight - caps the worst-case fill price without meaningfully risking a
+  # missed fill, since the spread is already narrow. An unfilled limit
+  # (rare - it's priced to fill immediately in normal conditions) is
+  # cancelled automatically rather than left resting.
+  enable_adaptive_order_type: true
+  # Trailing stop: once a position is up 3%+ from its high-water mark's
+  # perspective, the resting protective stop follows it up rather than
+  # sitting frozen at the original entry-based level for the position's
+  # whole life. Deliberately wider than stop_loss_pct (0.01) - a trailing
+  # stop this tight would ratchet on ordinary intra-trend noise.
+  trailing_stop_pct: 0.03
+  # Partial profit-taking: once a position is up 5%, sell half of it once
+  # (locking in something concrete) and let the remainder keep riding,
+  # protected by whatever stop (including the trailing one above) it
+  # already has.
+  partial_profit_pct: 0.05
+  partial_profit_sell_fraction: 0.5
+  # Hard stop, deliberately deeper than drawdown_tiers' deepest tier
+  # (0.20, which only auto-scales new-position risk to zero and silently
+  # auto-recovers as equity climbs back). Past 30% drawdown the circuit
+  # breaker TRIPS - halting everything until an operator deliberately
+  # reviews and resets. This is the last line of defense the "Emergency
+  # kill switch" / "max drawdown limit" checklist items call for.
+  max_drawdown_pct: 0.30
+  # Volatility-adjusted stop distance: the actual per-trade stop is 2x
+  # that symbol's own recent ATR (as a % of price), clamped to [0.5%, 5%].
+  # A fixed 1% stop_loss_pct treats a barely-moving stablecoin pair
+  # (PAXG/EUR/USDC/FDUSD, all in the tracked universe via symbol
+  # discovery) identically to a volatile altcoin - this calibrates the
+  # stop (and therefore position size, computed FROM stop distance) to
+  # each symbol's own real behavior instead.
+  atr_multiplier: 2.0
+  min_atr_stop_pct: 0.005
+  max_atr_stop_pct: 0.05
+  # Confidence-based sizing via the Kelly criterion: once at least 15 real
+  # trades have closed, position size is additionally capped at what this
+  # system's own actual win rate/payoff ratio statistically justifies -
+  # sizing every trade the same regardless of whether recent real
+  # performance supports it would ignore the most direct evidence
+  # available of whether the deployed strategy actually has an edge.
+  kelly_min_trades: 15
+  kelly_lookback_trades: 30
+  # Small-account floor: a pure risk_per_trade%/stop-distance calculation
+  # produces a position far too small for a real exchange to ever accept
+  # once capital is small (e.g. $7.70 * 2% / 1% stop = $15.40, then capped
+  # at max_position_size*capital = $0.77 - Binance's own minimum order
+  # size is $5+ for most pairs, occasionally lower). Below this floor (or
+  # the specific symbol's real exchange minimum, whichever is larger),
+  # size is bumped up rather than silently attempting a doomed order - but
+  # only when capital can comfortably afford it (5% margin for fees), else
+  # the trade is cleanly refused. A deliberate, auditable departure from
+  # risk_per_trade for tiny accounts, not a silent violation - see
+  # RiskAgent.evaluate_buy's docstring. Once capital grows enough that
+  # risk-based sizing naturally clears this floor, it stops mattering and
+  # sizing "adapts" back to pure risk_per_trade% with no further
+  # intervention.
+  min_stake_usd: 1.0
+  # Crisis correlation override: rolling Pearson correlation above
+  # (correlation_threshold/correlation_lookback_bars) is estimated from
+  # calm-period data and understates how correlated everything becomes in
+  # a genuine market-wide panic. If BTC/USDT drops 15%+ within a 1h
+  # window, treat every held position as perfectly correlated with any
+  # new candidate for 24h (or until BTC recovers back above the
+  # threshold, whichever comes first) - a blunt safety overlay on top of
+  # the correlation model above, not a replacement for it.
+  crisis_drop_threshold: 0.15
+  crisis_symbol: BTC/USDT
+  crisis_window_hours: 1.0
+  crisis_duration_hours: 24.0
+
+# Market-data integrity guard: a fetch can nominally "succeed" while still
+# returning garbage (corrupted OHLC, out-of-order timestamps, an
+# implausible single-bar move, or a feed that's quietly stopped
+# producing new bars). Structural OHLC/timestamp checks always run once
+# enabled; the two thresholds below gate the judgment-based checks.
+market_data:
+  enable_integrity_checks: true
+  max_single_bar_move_pct: 0.5
+  max_staleness_multiple: 3.0
+  # Panic/illiquid market-condition overlay: the orchestrator sits out
+  # entirely (no new BUY/SELL, regardless of regime/signal) when the
+  # latest bar's ATR% >= panic_atr_threshold or relative_volume <=
+  # illiquid_volume_threshold. Always active (harmless under normal
+  # conditions by construction) - these just tune where the line is.
+  panic_atr_threshold: 0.08
+  illiquid_volume_threshold: 0.3
+  # Regime misclassification monitoring: alerts (does not block trading)
+  # when the live regime label changes in >= this fraction of the last
+  # regime_history_window polls - a signal the trend/range classification
+  # is currently borderline/unreliable, worth an operator's attention.
+  regime_history_window: 20
+  regime_churn_alert_threshold: 0.5
+
+portfolio:
+  initial_capital: 1000.0
+  # Real Binance retail spot fee (0.1%/side, no BNB discount) plus the same
+  # slippage assumption BacktestEngineV2 already uses in walk-forward
+  # validation - the real portfolio's equity curve should reflect the same
+  # costs the exchange actually charges, not an optimistic zero-friction
+  # assumption.
+  commission_rate: 0.001
+  slippage_rate: 0.0005
+  # LIVE MODE ONLY: below this real, synced account balance, the main
+  # trading decision paper-trades against a dedicated fake-money portfolio
+  # (still fed genuinely real market data/predictions - only the fill is
+  # simulated) instead of attempting a real order that would just be
+  # rejected for insufficient balance. Real execution resumes automatically
+  # once the synced real balance clears this - no restart needed, checked
+  # every cycle. $5 is a practical floor: Binance enforces its own
+  # per-symbol minimum notional (at least a few dollars for every pair this
+  # system trades), so materially less than that could never place a real
+  # order anyway even with risk approval.
+  min_live_capital_usd: 5.0
+
+# The probability-of-up threshold a live prediction must clear to become a
+# real BUY/SELL signal at all (HOLD otherwise). Previously not configurable
+# here at all - PredictionAgent() was constructed with no overrides in
+# run_system.py, silently always using its hardcoded 0.6/0.4 defaults.
+# Measured live: with that pair, this system generated exactly ONE real BUY
+# signal across 1,163 real trading decisions over multiple days - not
+# because nothing was ever biased up, but because promoted models
+# (validated on testnet's currently-limited history, see learning section
+# below) output real probability_up values ranging only ~0.40-0.59
+# (mean 0.45, stdev ~0.06), essentially never reaching 0.6. 0.54/0.46 is
+# calibrated to that ACTUAL observed distribution - about 5% of real
+# predictions cleared 0.54, still a genuine above-median conviction filter,
+# not "trade on any wobble", but enough to actually generate trading
+# activity and a real track record. Revisit as more promoted models
+# accumulate validation history and their probability spread widens.
+prediction:
+  buy_threshold: 0.54
+  sell_threshold: 0.46
+
+learning:
+  retrain_interval_hours: 24
+  min_sharpe_to_promote: 0.5
+  max_drawdown_to_promote: 0.25
+  # Walk-forward validation instead of one train/test split: rolls a
+  # train_window_bars-sized training window forward across history,
+  # backtesting fresh on each non-overlapping test_window_bars slice.
+  # Promotion is gated on the AGGREGATE across folds (median sharpe,
+  # consistency), not any single fold - see LearningAgent's docstring.
+  train_window_bars: 500
+  test_window_bars: 100
+  # target_folds drives how much history gets fetched per retrain (more
+  # folds = more confidence but proportionally more wall-clock time, since
+  # each fold trains a fresh model - at ~10-15s/fold this is minutes per
+  # symbol, times however many symbols symbol_discovery selects).
+  target_folds: 8
+  # Lowered from 5 - testnet's actual available history for most tracked
+  # symbols only supports 3 folds right now (confirmed live: ~880 hourly
+  # bars, capped at a fixed start date), so 5 was unreachable and blocked
+  # every promotion (0 promotions across 93 real retrain attempts). 3
+  # matches the tournament's own min_folds_required below. Left to rise on
+  # its own as testnet's history naturally grows past ~1000 bars - not
+  # compensated for by shrinking train_window_bars/test_window_bars, which
+  # would trade away validation quality just to force more folds now.
+  min_folds_required: 3
+  # At least this fraction of folds must show a net-positive return, or the
+  # candidate is rejected as too regime-dependent even if its median sharpe
+  # looks fine (a model that's great in trends and terrible ranging, say).
+  min_pct_folds_profitable: 0.5
+  # Live-performance-triggered rollback: once at least 15 real trades have
+  # closed for a symbol since its model was promoted, compare their
+  # actual win rate against what walk-forward validated. If it's decayed
+  # to less than 50% of that AND the recent window is net-losing,
+  # automatically roll back to the previously-promoted model version -
+  # "detect performance deterioration early... before large losses occur."
+  min_live_trades_for_decay_check: 15
+  decay_win_rate_fraction: 0.5
+  decay_lookback_trades: 30
+
+logging:
+  level: INFO
+  file: logs/trading_system.log
+
+# Regime-aware multi-strategy tournament (StrategyManager).
+# `enabled: true` + `drive_live_trading: false` (the default combination
+# below) = OBSERVATION ONLY: runs the ML ensemble plus every rule-based
+# strategy against each symbol on its own cadence, tags performance by
+# market regime, and builds a stability track record (does the same
+# strategy keep winning a given regime across repeated re-runs?) - never
+# influences a live trade.
+#
+# `drive_live_trading: true` is a SEPARATE escalation: the tournament's
+# regime winner (the "champion") then drives real decisions through the
+# normal risk/execution/portfolio pipeline (still testnet by default, same
+# as everywhere else), while every other candidate ("challengers") paper
+# trades the same live data via ChampionChallengerAgent - never touching
+# real execution. Per this system's own validation history: do not flip
+# this on until winner_history/stability_score shows the tournament isn't
+# just flip-flopping, across multiple symbols and regimes, over a
+# meaningful stretch of real time - not something to enable casually.
+tournament:
+  enabled: true
+  drive_live_trading: false
+  train_window_bars: 500
+  test_window_bars: 100
+  target_folds: 10
+  min_folds_required: 3
+  min_sharpe_to_promote: 0.5
+  min_pct_folds_profitable: 0.5
+  allow_short: false
+  # Champion-switching hysteresis: an incumbent that still clears the
+  # promotion bar is only replaced once it's held the position for at
+  # least this many tournament runs (3 runs = at hourly cadence, roughly
+  # 3 hours minimum tenure) AND the challenger beats it by at least this
+  # median-Sharpe margin - not just any positive delta, which would be
+  # noise at this sample size.
+  champion_switch_min_runs: 3
+  champion_switch_margin: 0.1
+  # Matches `timeframe: 1h` above deliberately, not set to 24h: at 1h bars,
+  # re-running the tournament faster than once per new bar just re-validates
+  # an unchanged window and inflates stability_score() with no new
+  # information; slower than that (the old 24h default) meant waiting a full
+  # day per data point, and stability_score() needs >=2 runs before it means
+  # anything - hourly gives a real, once-per-new-bar stability signal in
+  # about a day instead of about a week. A single tournament pass across the
+  # discovered symbol set costs ~30s/symbol (measured against live data),
+  # trivially cheap at this cadence.
+  refresh_interval_hours: 1
+  paper_capital: 1000.0  # matches portfolio.initial_capital - real and paper start from the same baseline
+  min_trades_to_compare: 5
+  # Champion-challenger WITH FRICTION: same rates as portfolio.commission_rate/
+  # slippage_rate above - a challenger must never look better than the
+  # champion purely because its paper trades skip transaction costs the
+  # champion actually pays.
+  paper_commission_rate: 0.001
+  paper_slippage_rate: 0.0005
+
+# Go-live readiness scorecard - turns "are we ready yet" into a computed,
+# auditable answer instead of a recurring judgment call. See
+# ReadinessConfig's docstring in trading_assistant/config.py for why each
+# default is set where it is.
+readiness:
+  min_tournament_runs: 20
+  min_stability_score: 0.8
+  min_real_trades: 10
+  min_real_sharpe: 0.5
+  min_elapsed_days: 7.0
+  # Backtest-vs-live-paper correlation validation: does the walk-forward
+  # backtest actually predict live paper performance? Needs this many
+  # (symbol, candidate) pairs, each with min_live_trades_for_correlation+
+  # live paper trades, before the correlation coefficient means anything.
+  min_records_for_correlation: 5
+  min_live_trades_for_correlation: 5
+
+# Time-based pruning for high-frequency/operational tables (decisions,
+# paper_equity_snapshots, system_heartbeat, execution_quality, drift_events,
+# tournament_events, feature_baselines) - without this, the database grows
+# forever across weeks/months of unattended 24/7 operation. Audit-critical
+# tables (trades, trade_audit, alerts, retrain_events, circuit_breaker_events)
+# are NEVER pruned, regardless of this config - see Journal._PRUNABLE_TABLES.
+retention:
+  enabled: true
+  retention_days: 180
+  run_interval_hours: 24

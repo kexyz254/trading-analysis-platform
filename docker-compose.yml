@@ -1,0 +1,58 @@
+# VPS deployment: two services sharing one SQLite journal file, reusing the
+# existing Dockerfile unchanged (only `command:` differs per service). Both
+# use `restart: unless-stopped` so a VPS reboot or a crashed process comes
+# back on its own, without anyone SSHing in to restart it by hand.
+services:
+  engine:
+    build: .
+    command: python run_system.py
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./logs:/app/logs
+      - ./trading_assistant/models:/app/trading_assistant/models
+      - ./trading_system.db:/app/trading_system.db
+    # Orchestrator.request_shutdown() (wired to SIGTERM in run_system.py)
+    # checks a shutdown flag between symbols in the retrain/tournament
+    # loops, not just at the top of the outer while-loop - bounds the
+    # worst case to roughly one symbol's retrain+tournament pass (~45s
+    # measured against live data, see config.yaml's own comments on
+    # per-symbol timing) rather than the full 15-25 minute universe pass.
+    # 60s gives that a real margin instead of racing Docker's own 30s
+    # default before it escalates to SIGKILL.
+    stop_grace_period: 60s
+
+  dashboard:
+    build: .
+    command: uvicorn webapp.server:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    depends_on:
+      - engine
+    ports:
+      # SECURITY: the dashboard has zero authentication (by design, for
+      # local-machine use). Binding to 127.0.0.1 keeps it reachable only
+      # from the VPS's own loopback - use an SSH tunnel for remote access
+      # (ssh -L 8000:localhost:8000 user@vps), never change this to
+      # "0.0.0.0:8000:8000" or "8000:8000" on a public VPS: that would
+      # publish live trading positions/decisions/model internals to
+      # anyone who finds the port. Remote browser access without a tunnel
+      # needs a reverse proxy (Caddy/nginx) with auth in front of it - a
+      # deliberate future decision, not this file's default.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./trading_system.db:/app/trading_system.db
+    # Visibility only, not automatic remediation - plain `docker compose`
+    # does not restart a container on "unhealthy" status by itself (that
+    # needs Swarm mode or a separate watcher). This makes a hung dashboard
+    # show up as unhealthy in `docker compose ps`/`docker inspect`, and
+    # gives an external uptime monitor (see RUNBOOK.md) the exact same
+    # signal to page on. curl isn't installed on python:3.11-slim, so this
+    # uses the stdlib instead of adding a package just for this.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=5).status == 200 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

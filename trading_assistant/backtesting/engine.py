@@ -34,10 +34,3 @@ class BacktestEngine:
         final_value = capital + (position * bars[-1].close if position > 0 else 0)
         total_return = (final_value - self.initial_capital) / self.initial_capital
         return {"total_return": total_return, "total_trades": trades}
-
-import logging
-logging.basicConfig(level=logging.INFO)
-
-    # Add to run method after buy/sell
-    # logging.info(f"BUY at {bar.close}")
-    # logging.info(f"SELL at {bar.close}")

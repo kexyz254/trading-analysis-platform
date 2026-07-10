@@ -2,6 +2,20 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# Secrets / local runtime state
+.env
+*.db
+*.db-shm
+*.db-wal
+logs/
+trading_assistant/models/*.joblib
+run_system.lock
+
+# Archived databases from deliberate resets - never committed, never deleted
+archive/
+# Rotating database backups (scripts/backup_database.py)
+backups/
+
 # Local archives
 *.zip
 

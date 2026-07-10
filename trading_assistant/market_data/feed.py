@@ -28,22 +28,67 @@ class Candle:
     volume: int
     timestamp: datetime
 
+_TIMEFRAME_UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
+
+
+def _timeframe_to_ms(timeframe: str) -> int:
+    import re
+
+    match = re.match(r"^(\d+)([mhdw])$", timeframe)
+    if not match:
+        raise ValueError(f"unsupported timeframe format: {timeframe!r}")
+    quantity, unit = match.groups()
+    return int(quantity) * _TIMEFRAME_UNIT_MS[unit]
+
+
 class LiveFeed:
     """Fetch OHLCV data from a live source and return it as a pandas DataFrame."""
 
-    def __init__(self, symbol: str = "BTC/USDT", timeframe: str = "1m", data_source: Optional[Callable[..., Any]] = None):
+    def __init__(
+        self,
+        symbol: str = "BTC/USDT",
+        timeframe: str = "1m",
+        data_source: Optional[Callable[..., Any]] = None,
+        exchange: Optional[Any] = None,
+    ):
         self.symbol = symbol
         self.timeframe = timeframe
         self._data_source = data_source
+        # If not injected, a fresh bare ccxt.binance() is built lazily below -
+        # which is ALWAYS mainnet (never sandboxed). Callers running against
+        # testnet (config.mode != "live") MUST inject the same already-
+        # sandboxed exchange instance used for real execution, or this feed
+        # silently trains/monitors/validates on a different order book than
+        # the one it actually trades against. Found via an audit: run_system.py
+        # was constructing MarketMonitorAgent/LearningAgent/StrategyManager
+        # with no `feeds` override, so every one of them defaulted to this
+        # bare mainnet path even while execution correctly ran on testnet.
+        self._exchange = exchange
 
-    def _default_data_source(self, symbol: str, timeframe: str, limit: int) -> List[List[Any]]:
-        try:
-            import ccxt
-        except ImportError as exc:  # pragma: no cover - exercised when ccxt is unavailable
-            raise RuntimeError("ccxt is required to fetch live Binance OHLCV data") from exc
+    def _get_exchange(self):
+        # Reused across calls rather than constructed fresh each time - a
+        # fresh ccxt instance per call would reset ccxt's own client-side
+        # rate-limit pacing, which matters once fetch_ohlcv_history makes
+        # several sequential paginated requests in a row.
+        if self._exchange is None:
+            try:
+                import ccxt
+            except ImportError as exc:  # pragma: no cover - exercised when ccxt is unavailable
+                raise RuntimeError("ccxt is required to fetch live Binance OHLCV data") from exc
+            # 20000ms mirrors ExchangeConfig.timeout_ms's default - this
+            # fallback path has no Config object to read the real value
+            # from (only reached when no exchange was injected at all), so
+            # it hardcodes the same safe default rather than ccxt's own
+            # 10s, which is too eager to time out for some REST calls and,
+            # more importantly, was never a deliberate choice here.
+            self._exchange = ccxt.binance({"enableRateLimit": True, "timeout": 20000})
+        return self._exchange
 
-        exchange = ccxt.binance({"enableRateLimit": True})
-        return exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+    def _default_data_source(
+        self, symbol: str, timeframe: str, limit: int, since: Optional[int] = None
+    ) -> List[List[Any]]:
+        exchange = self._get_exchange()
+        return exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit, since=since)
 
     async def stream_ohlcv(self, limit: int = 100, timeframe: Optional[str] = None, interval: float = 1.0, max_bars: Optional[int] = None):
         """Yield OHLCV DataFrames continuously for a live trading loop."""
@@ -55,10 +100,11 @@ class LiveFeed:
                 break
             await asyncio.sleep(interval)
 
-    def fetch_ohlcv(self, limit: int = 100, timeframe: Optional[str] = None) -> pd.DataFrame:
-        """Fetch the latest OHLCV bars and convert them into a validated DataFrame."""
+    def fetch_ohlcv(self, limit: int = 100, timeframe: Optional[str] = None, since: Optional[int] = None) -> pd.DataFrame:
+        """Fetch the latest OHLCV bars (or bars starting at `since`, in ms) and
+        convert them into a validated DataFrame."""
         source = self._data_source or self._default_data_source
-        rows = source(self.symbol, timeframe or self.timeframe, limit=limit)
+        rows = source(self.symbol, timeframe or self.timeframe, limit=limit, since=since)
 
         if isinstance(rows, pd.DataFrame):
             frame = rows.copy()
@@ -82,6 +128,41 @@ class LiveFeed:
                 frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
         return frame[["timestamp", "open", "high", "low", "close", "volume"]]
+
+    def fetch_ohlcv_history(self, total_bars: int, page_size: int = 1000) -> pd.DataFrame:
+        """Fetch more history than a single request allows, for walk-forward
+        validation. Binance's REST kline endpoint caps a single request at
+        ~1000 bars; this pages backward with `since`, oldest page last,
+        stitching together enough non-overlapping pages to cover
+        `total_bars`. Returns the most recent `total_bars` rows available
+        (fewer if the symbol doesn't have that much history)."""
+        bar_ms = _timeframe_to_ms(self.timeframe)
+        pages: List[pd.DataFrame] = []
+        collected = 0
+        since: Optional[int] = None
+
+        while collected < total_bars:
+            page = self.fetch_ohlcv(limit=page_size, since=since)
+            if page.empty:
+                break
+            pages.append(page)
+            collected += len(page)
+
+            earliest_ms = int(page["timestamp"].iloc[0].value // 1_000_000)
+            next_since = earliest_ms - page_size * bar_ms
+            if since is not None and next_since >= since:
+                break  # not making backward progress - avoid looping forever
+            since = next_since
+
+            if len(page) < page_size:
+                break  # reached the beginning of available history
+
+        if not pages:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        combined = pd.concat(pages, ignore_index=True)
+        combined = combined.drop_duplicates(subset="timestamp").sort_values("timestamp").reset_index(drop=True)
+        return combined.tail(total_bars).reset_index(drop=True)
 
 
 class WebSocketFeed:

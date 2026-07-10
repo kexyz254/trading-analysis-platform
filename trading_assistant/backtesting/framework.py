@@ -80,13 +80,23 @@ class BacktestEngineV2:
         self.equity_curve = [self.initial_capital]
         self.current_index = 0
     
-    def _calculate_position_size(self, capital: float, price: float, 
-                                   risk_pct: float = 0.02, 
+    def _calculate_position_size(self, capital: float, price: float,
+                                   risk_pct: float = 0.02,
                                    stop_loss_pct: float = 0.01) -> float:
         risk_amount = capital * risk_pct
         stop_distance = price * stop_loss_pct
         quantity = risk_amount / stop_distance
-        return quantity
+        if price <= 0:
+            return 0.0
+        # Risk-based sizing alone can exceed available capital whenever
+        # risk_pct > stop_loss_pct (true for the defaults: 0.02/0.01 implies
+        # ~2x capital in notional). This engine has no margin/leverage model -
+        # open_position() rejects any order costing more than self.capital
+        # (price*(1+slippage)*quantity*(1+commission) <= capital) - so
+        # without this clamp, every call using the default risk-based sizing
+        # would silently fail with quantity=None, for any caller.
+        max_affordable_quantity = capital / (price * (1 + self.slippage) * (1 + self.commission))
+        return min(quantity, max_affordable_quantity)
     
     def _apply_commission(self, value: float) -> float:
         return value * self.commission
@@ -149,7 +159,20 @@ class BacktestEngineV2:
         )
         
         self.trades.append(trade)
-        self.capital += proceeds - commission_cost
+        # capital was reduced by (original_cost + open commission) when the
+        # position opened - crediting back (original_cost + net_pnl) here is
+        # what makes the NET capital change over open+close equal net_pnl.
+        # This is algebraically identical to the old "proceeds -
+        # commission_cost" for LONG (proceeds - commission_cost ==
+        # original_cost + net_pnl when gross_pnl isn't sign-flipped), so
+        # LONG behavior is unchanged. For SHORT, the old formula ignored the
+        # sign flip entirely and credited raw proceeds regardless of
+        # direction - a profitable short (price fell) was booked as a
+        # capital LOSS, since a lower proceeds-than-cost was added back
+        # either way. Nothing in this codebase exercised the SHORT path
+        # before the strategy tournament's long/short comparison surfaced it.
+        original_cost = position.entry_price * position.quantity
+        self.capital += original_cost + net_pnl
         self.positions.remove(position)
         return trade
     
@@ -169,8 +192,19 @@ class BacktestEngineV2:
             else:
                 pos.pnl = (pos.entry_price - pos.current_price) * pos.quantity
             pos.pnl_pct = pos.pnl / (pos.entry_price * pos.quantity)
-            positions_value += pos.current_price * pos.quantity
-        
+            # entry_price*quantity + pnl, NOT current_price*quantity: capital
+            # was reduced by entry_price*quantity (not current_price*quantity)
+            # when the position opened, regardless of direction (see
+            # open_position) - so the position's contribution to unrealized
+            # equity must be "what we'd get back if closed right now",
+            # which is the reserved notional plus pnl-so-far. For LONG this
+            # is algebraically identical to current_price*quantity (unchanged
+            # behavior); for SHORT the old formula ignored pos.pnl's
+            # direction-aware sign entirely and used the raw current price,
+            # so a profitable short (price falling) shrank reported equity
+            # instead of growing it.
+            positions_value += (pos.entry_price * pos.quantity) + pos.pnl
+
         total_value = self.capital + positions_value
         self.equity_curve.append(total_value)
         return total_value
