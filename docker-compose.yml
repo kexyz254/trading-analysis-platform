@@ -80,8 +80,13 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./trading_system.db:/app/trading_system.db
     # Read-only, low-traffic web process - far lighter than the engine's
-    # retrain/tournament workload, but still uncapped by default without this.
-    mem_limit: 256m
+    # retrain/tournament workload, but still uncapped by default without
+    # this. 256m was too tight in practice: /api/markets and /api/ohlcv
+    # call ccxt's load_markets(), which pulls in Binance's FULL market
+    # list (thousands of pairs, not just the ~30 tracked symbols) - this
+    # container was observed idling at ~150MB and crash-looping the
+    # moment a real request exercised that path.
+    mem_limit: 450m
     cpus: 0.2
     logging:
       driver: json-file
