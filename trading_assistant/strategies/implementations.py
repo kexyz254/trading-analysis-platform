@@ -190,6 +190,54 @@ class BollingerBandsStrategy(BaseStrategy):
         
         return Signal.HOLD
 
+class TimeSeriesMomentumStrategy(BaseStrategy):
+    """Trailing N-bar momentum - the mechanism most consistently validated
+    for crypto specifically in the academic literature. Han, Kang & Ryu
+    (2023, "Time-Series and Cross-Sectional Momentum in the Cryptocurrency
+    Market") find time-series momentum survives realistic transaction costs
+    where cross-sectional momentum mostly does not once fairly assessed.
+
+    Distinct in MECHANISM from SMACrossoverStrategy, not just a
+    reparameterization of it: this reacts directly to the sign and
+    magnitude of one fixed trailing-window return, not to where two
+    lagging moving averages happen to cross - a different lag profile and
+    a different failure mode (SMA crossover whipsaws on a slow, gradual
+    reversal; this whipsaws on a short, sharp round trip within the
+    lookback window instead).
+
+    min_abs_return is a deliberate dead-zone around a near-flat trailing
+    return: the same literature's own caveat - many momentum portfolios'
+    statistically significant returns turn insignificant after realistic
+    transaction costs - means trading every small sign flip would bleed
+    exactly the costs that caveat warns about. Withholding a signal near
+    zero is the mechanical equivalent of only trading when momentum is
+    unambiguous.
+    """
+
+    def __init__(self, lookback: int = 20, min_abs_return: float = 0.02):
+        super().__init__("Time-Series Momentum")
+        self.lookback = lookback
+        self.min_abs_return = min_abs_return
+
+    def generate_signal(self, data):
+        prices = data.get('prices')
+        if prices is None or len(prices) < self.lookback + 1:
+            return Signal.HOLD
+
+        anchor = prices.iloc[-1 - self.lookback]
+        if pd.isna(anchor) or anchor == 0:
+            return Signal.HOLD
+        trailing_return = prices.iloc[-1] / anchor - 1
+        if pd.isna(trailing_return):
+            return Signal.HOLD
+
+        if trailing_return >= self.min_abs_return:
+            return Signal.BUY
+        if trailing_return <= -self.min_abs_return:
+            return Signal.SELL
+        return Signal.HOLD
+
+
 class GridTradingStrategy(BaseStrategy):
     """Trade within a price grid."""
     

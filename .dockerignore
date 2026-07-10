@@ -7,4 +7,35 @@ venv/
 .vscode/
 .idea/
 *.log
+*.log.*
 .DS_Store
+
+# Version control history has no business inside a build context or image
+# layer - bloats the image and copies full commit history in for no
+# runtime benefit.
+.git/
+.github/
+
+# Real trading state: the docker-compose.yml bind mount overlays these at
+# runtime regardless, but `docker compose build` would otherwise bake
+# whatever real database/trade history exists on disk AT BUILD TIME
+# permanently into an image layer - a real problem the moment that image
+# is ever pushed to a registry, shared, or archived, not something a
+# runtime bind mount retroactively fixes.
+trading_system.db
+trading_system.db-shm
+trading_system.db-wal
+backups/
+archive/
+run_system.lock
+
+# Test/coverage/build artifacts - not needed at runtime, pure bloat.
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Native fuzzing surface (C++) - irrelevant to the Python runtime image.
+native/
+fuzz/
+out/

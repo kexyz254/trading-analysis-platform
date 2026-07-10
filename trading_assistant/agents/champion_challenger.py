@@ -75,6 +75,14 @@ class ChampionChallengerAgent:
         position_stop_loss_pct: float = 0.01,
         max_position_size: float = 0.1,
         alert_manager: Optional[AlertManager] = None,
+        # Periods-per-year for each candidate's paper PortfolioManager
+        # get_sharpe_ratio() (see trading_assistant.annualization) - must
+        # match how often process_cycle() actually runs per symbol (e.g.
+        # trading_assistant.annualization.periods_per_year_from_seconds for
+        # Orchestrator's poll_interval_seconds cadence). Default of 252
+        # preserves prior behavior for any caller that doesn't explicitly
+        # pass the right value.
+        periods_per_year: float = 252,
     ):
         self.strategy_manager = strategy_manager
         self.paper_capital = paper_capital
@@ -92,6 +100,7 @@ class ChampionChallengerAgent:
         # architecture exists to make honest.
         self.commission_rate = commission_rate
         self.slippage_rate = slippage_rate
+        self.periods_per_year = periods_per_year
         # symbol -> candidate_name -> that candidate's dedicated paper portfolio
         self._portfolios: Dict[str, Dict[str, PortfolioManager]] = {}
 
@@ -201,6 +210,7 @@ class ChampionChallengerAgent:
                 initial_capital=self.paper_capital,
                 commission_rate=self.commission_rate,
                 slippage_rate=self.slippage_rate,
+                periods_per_year=self.periods_per_year,
             )
             self._resume_from_journal(portfolio, symbol, candidate_name)
             symbol_portfolios[candidate_name] = portfolio

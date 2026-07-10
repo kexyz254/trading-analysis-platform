@@ -22,6 +22,26 @@ services:
     # 60s gives that a real margin instead of racing Docker's own 30s
     # default before it escalates to SIGKILL.
     stop_grace_period: 60s
+    # Retrain/tournament passes train RandomForest + XGBoost per symbol
+    # across the whole discovered universe (up to ~30 symbols) - with no
+    # cap, a memory spike during that pass can OOM the entire VPS, not
+    # just this container, on a small box. TUNE THESE to your actual VPS's
+    # real RAM/CPU (see docs/production_readiness_audit.md item #2) -
+    # these are conservative starting points for a small ($5-10/mo) box,
+    # not a measured ceiling.
+    mem_limit: 1500m
+    cpus: 1.5
+    # Docker's own json-file log driver has NO size cap by default -
+    # distinct from (and in addition to) this app's own already-rotated
+    # file logging (logging_setup.py's RotatingFileHandler, 50MB max).
+    # Every log line also goes to stdout, which Docker captures
+    # separately - without this, that capture alone can silently fill the
+    # VPS disk over months of real 24/7 operation.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   dashboard:
     build: .
@@ -43,6 +63,15 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./trading_system.db:/app/trading_system.db
+    # Read-only, low-traffic web process - far lighter than the engine's
+    # retrain/tournament workload, but still uncapped by default without this.
+    mem_limit: 512m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     # Visibility only, not automatic remediation - plain `docker compose`
     # does not restart a container on "unhealthy" status by itself (that
     # needs Swarm mode or a separate watcher). This makes a hung dashboard

@@ -1,0 +1,38 @@
+name: Docker Build
+
+# Builds and smoke-tests the actual deployment image, not just `pytest` on
+# GitHub's ubuntu-latest runner - that runner already has libraries
+# (libgomp1 in particular, which xgboost's compiled extension needs)
+# preinstalled that python:3.11-slim does not, so a passing python-tests.yml
+# run has never proven this image actually works. This job builds the same
+# Dockerfile docker-compose.yml uses and runs the full test suite INSIDE it,
+# so an environment mismatch is caught here, before a VPS deploy - not
+# discovered live on the VPS.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build the deployment image
+        run: docker build -t trading-platform:ci .
+
+      - name: Smoke test - import the full agent stack inside the built image
+        run: |
+          docker run --rm trading-platform:ci python -c "
+          import trading_assistant.agents.orchestrator
+          import trading_assistant.ml.predictor
+          import xgboost
+          import sklearn
+          print('import smoke test OK')
+          "
+
+      - name: Run the full test suite inside the built image
+        run: docker run --rm trading-platform:ci pytest tests -q

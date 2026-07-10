@@ -54,6 +54,7 @@ from trading_assistant.strategies.implementations import (
     MACDStrategy,
     RSIMeanReversionStrategy,
     SMACrossoverStrategy,
+    TimeSeriesMomentumStrategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ def default_candidates() -> List[StrategyCandidate]:
         StrategyCandidate("macd", "rule", MACDStrategy),
         StrategyCandidate("bollinger_bands", "rule", BollingerBandsStrategy),
         StrategyCandidate("candlestick_patterns", "rule", CandlestickPatternStrategy),
+        StrategyCandidate("time_series_momentum", "rule", TimeSeriesMomentumStrategy),
     ]
 
 
@@ -226,6 +228,13 @@ class StrategyManager:
         # against a stale friction assumption forever after.
         commission_rate: float = 0.001,
         slippage_rate: float = 0.0005,
+        # Periods-per-year for annualizing each fold's Sharpe (see
+        # trading_assistant.annualization.bars_per_year) - must match the
+        # ACTUAL bar timeframe run_tournament_from_live fetches (e.g. 8760
+        # for hourly 24/7 bars), not the default 252 (only correct for
+        # daily bars). Default of 252 preserves prior behavior for any
+        # caller that doesn't explicitly pass the right value.
+        periods_per_year: float = 252,
     ):
         self.candidates = candidates if candidates is not None else default_candidates()
         self.train_window_bars = train_window_bars
@@ -250,6 +259,7 @@ class StrategyManager:
         self.max_position_size = max_position_size
         self.commission_rate = commission_rate
         self.slippage_rate = slippage_rate
+        self.periods_per_year = periods_per_year
         self.champion_switch_min_runs = champion_switch_min_runs
         self.champion_switch_margin = champion_switch_margin
         self.last_tournament: Dict[str, TournamentResult] = {}
@@ -546,7 +556,8 @@ class StrategyManager:
 
     def _backtest_ml(self, model: Any, symbol: str, test_df: pd.DataFrame) -> dict:
         engine = BacktestEngineV2(
-            initial_capital=10000.0, commission=self.commission_rate, slippage=self.slippage_rate
+            initial_capital=10000.0, commission=self.commission_rate, slippage=self.slippage_rate,
+            periods_per_year=self.periods_per_year,
         )
         predictions = np.clip(model.predict(test_df[FEATURE_COLUMNS]), 0.0, 1.0)
         position: Optional[Position] = None
@@ -585,7 +596,8 @@ class StrategyManager:
         full_low: Optional[pd.Series] = None,
     ) -> dict:
         engine = BacktestEngineV2(
-            initial_capital=10000.0, commission=self.commission_rate, slippage=self.slippage_rate
+            initial_capital=10000.0, commission=self.commission_rate, slippage=self.slippage_rate,
+            periods_per_year=self.periods_per_year,
         )
         position: Optional[Position] = None
 

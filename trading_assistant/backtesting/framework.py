@@ -61,13 +61,22 @@ class BacktestResult:
     equity_curve: List[float] = field(default_factory=list)
 
 class BacktestEngineV2:
-    def __init__(self, initial_capital: float = 100000.0, 
+    def __init__(self, initial_capital: float = 100000.0,
                  commission: float = 0.001,
-                 slippage: float = 0.0005):
+                 slippage: float = 0.0005,
+                 # Periods-per-year for annualizing sharpe_ratio/sortino_ratio
+                 # in get_result() - see trading_assistant.annualization for
+                 # why this must match the ACTUAL spacing of equity_curve
+                 # points (e.g. 8760 for hourly 24/7 bars, not the default
+                 # 252, which is only correct for daily-bar data). Default
+                 # of 252 preserves this engine's original behavior for any
+                 # caller that doesn't explicitly pass the right value.
+                 periods_per_year: float = 252):
         self.initial_capital = initial_capital
         self.capital = initial_capital
         self.commission = commission
         self.slippage = slippage
+        self.periods_per_year = periods_per_year
         self.positions: List[Position] = []
         self.trades: List[Trade] = []
         self.equity_curve = [initial_capital]
@@ -242,10 +251,13 @@ class BacktestEngineV2:
         profit_factor = abs(sum(t.net_pnl for t in winning_trades) / sum(t.net_pnl for t in losing_trades)) if losing_trades else float('inf')
         
         returns = pd.Series(self.equity_curve).pct_change().dropna()
-        sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252) if returns.std() != 0 else 0
-        
+        sharpe_ratio = returns.mean() / returns.std() * np.sqrt(self.periods_per_year) if returns.std() != 0 else 0
+
         downside_returns = returns[returns < 0]
-        sortino_ratio = returns.mean() / downside_returns.std() * np.sqrt(252) if downside_returns.std() != 0 else 0
+        sortino_ratio = (
+            returns.mean() / downside_returns.std() * np.sqrt(self.periods_per_year)
+            if downside_returns.std() != 0 else 0
+        )
         
         rolling_max = pd.Series(self.equity_curve).expanding().max()
         drawdown = (pd.Series(self.equity_curve) - rolling_max) / rolling_max

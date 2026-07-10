@@ -521,6 +521,7 @@ class Orchestrator:
                 initial_capital=real.initial_capital,
                 commission_rate=real.commission_rate,
                 slippage_rate=real.slippage_rate,
+                periods_per_year=real.periods_per_year,
             )
         return self._live_paper_portfolio
 

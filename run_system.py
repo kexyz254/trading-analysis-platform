@@ -30,6 +30,7 @@ from trading_assistant.agents.prediction import PredictionAgent
 from trading_assistant.agents.risk import RiskAgent
 from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.agents.symbol_discovery import SymbolDiscoveryAgent
+from trading_assistant.annualization import bars_per_year, periods_per_year_from_seconds
 from trading_assistant.config import Config, load_config
 from trading_assistant.logging_setup import configure_logging
 from trading_assistant.persistence.journal import Journal
@@ -108,10 +109,22 @@ def build_orchestrator(config: Config) -> Orchestrator:
     exchange = build_exchange(config)
     journal = Journal(db_path="trading_system.db")
     alert_manager = build_alert_manager(journal)
+
+    # See trading_assistant.annualization: a Sharpe ratio's annualization
+    # factor must match how often the underlying equity curve actually gets
+    # a new point, not a hardcoded 252 (daily trading year) - these two
+    # differ because walk-forward validation samples once per OHLCV bar
+    # (config.timeframe, e.g. hourly) while the live/paper portfolio's
+    # equity curve is appended once per Orchestrator poll cycle
+    # (config.poll_interval_seconds, e.g. every 5 minutes).
+    backtest_periods_per_year = bars_per_year(config.timeframe)
+    live_periods_per_year = periods_per_year_from_seconds(config.poll_interval_seconds)
+
     portfolio_manager = PortfolioManager(
         initial_capital=config.portfolio.initial_capital,
         commission_rate=config.portfolio.commission_rate,
         slippage_rate=config.portfolio.slippage_rate,
+        periods_per_year=live_periods_per_year,
     )
     prediction_agent = PredictionAgent(
         buy_threshold=config.prediction.buy_threshold, sell_threshold=config.prediction.sell_threshold
@@ -137,6 +150,7 @@ def build_orchestrator(config: Config) -> Orchestrator:
         max_position_size=config.risk.max_position_size,
         commission_rate=config.portfolio.commission_rate,
         slippage_rate=config.portfolio.slippage_rate,
+        periods_per_year=backtest_periods_per_year,
     )
 
     symbol_discovery_agent = None
@@ -174,6 +188,7 @@ def build_orchestrator(config: Config) -> Orchestrator:
             # a cost-basis mismatch, not real performance.
             commission_rate=config.tournament.paper_commission_rate,
             slippage_rate=config.tournament.paper_slippage_rate,
+            periods_per_year=backtest_periods_per_year,
         )
         # Paper-trading runs whenever the tournament is enabled, independent
         # of drive_live_trading - it never touches real (even testnet)
@@ -192,6 +207,7 @@ def build_orchestrator(config: Config) -> Orchestrator:
             position_stop_loss_pct=config.risk.stop_loss_pct,
             max_position_size=config.risk.max_position_size,
             alert_manager=alert_manager,
+            periods_per_year=live_periods_per_year,
         )
 
     return Orchestrator(

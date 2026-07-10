@@ -156,6 +156,13 @@ class LearningAgent:
         # against a stale friction assumption forever after.
         commission_rate: float = 0.001,
         slippage_rate: float = 0.0005,
+        # Periods-per-year for annualizing each fold's Sharpe (see
+        # trading_assistant.annualization.bars_per_year) - must match the
+        # ACTUAL bar timeframe retrain_from_live fetches (e.g. 8760 for
+        # hourly 24/7 bars), not the default 252 (only correct for daily
+        # bars). Default of 252 preserves prior behavior for any caller
+        # that doesn't explicitly pass the right value for its timeframe.
+        periods_per_year: float = 252,
     ):
         self.prediction_agent = prediction_agent
         self.risk_per_trade = risk_per_trade
@@ -163,6 +170,7 @@ class LearningAgent:
         self.max_position_size = max_position_size
         self.commission_rate = commission_rate
         self.slippage_rate = slippage_rate
+        self.periods_per_year = periods_per_year
         self.min_sharpe_to_promote = min_sharpe_to_promote
         self.max_drawdown_to_promote = max_drawdown_to_promote
         self.train_window_bars = train_window_bars
@@ -376,7 +384,8 @@ class LearningAgent:
 
     def _backtest(self, model: Any, symbol: str, test_df: pd.DataFrame) -> dict:
         engine = BacktestEngineV2(
-            initial_capital=10000.0, commission=self.commission_rate, slippage=self.slippage_rate
+            initial_capital=10000.0, commission=self.commission_rate, slippage=self.slippage_rate,
+            periods_per_year=self.periods_per_year,
         )
         predictions = np.clip(model.predict(test_df[FEATURE_COLUMNS]), 0.0, 1.0)
         position = None

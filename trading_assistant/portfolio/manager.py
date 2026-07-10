@@ -25,9 +25,18 @@ def max_drawdown_from_equity_curve(equity_curve: List[float]) -> float:
     return max_dd
 
 
-def sharpe_ratio_from_equity_curve(equity_curve: List[float], risk_free_rate: float = 0.02) -> float:
+def sharpe_ratio_from_equity_curve(
+    equity_curve: List[float], risk_free_rate: float = 0.02, periods_per_year: float = 252
+) -> float:
     """Pure function version of PortfolioManager.get_sharpe_ratio - see
-    max_drawdown_from_equity_curve's docstring for why this is extracted."""
+    max_drawdown_from_equity_curve's docstring for why this is extracted.
+
+    periods_per_year must match how often `equity_curve` actually gets a
+    new point (e.g. trading_assistant.annualization.periods_per_year_from_seconds
+    for a curve sampled once per Orchestrator poll cycle) - the default of
+    252 (trading DAYS per year) is only correct if that's genuinely a daily
+    curve; using it for a curve sampled every few minutes silently produces
+    a "Sharpe ratio" far smaller than the real annualized figure."""
     if len(equity_curve) < 2:
         return 0.0
     returns = []
@@ -38,7 +47,7 @@ def sharpe_ratio_from_equity_curve(equity_curve: List[float], risk_free_rate: fl
     if len(returns) < 2:
         return 0.0
     returns_array = np.array(returns)
-    excess_returns = returns_array - risk_free_rate / 252
+    excess_returns = returns_array - risk_free_rate / periods_per_year
     mean_return = np.mean(excess_returns)
     std_return = np.std(excess_returns)
     # A genuinely flat (or near-flat) equity curve - e.g. a freshly-started
@@ -53,7 +62,7 @@ def sharpe_ratio_from_equity_curve(equity_curve: List[float], risk_free_rate: fl
     # typically ~0.001-0.1 in magnitude).
     if std_return < 1e-12:
         return 0.0
-    return mean_return / std_return * np.sqrt(252)
+    return mean_return / std_return * np.sqrt(periods_per_year)
 
 
 def wilson_lower_bound(successes: int, n: int, z: float = 1.645) -> float:
@@ -125,7 +134,20 @@ class PortfolioManager:
     # interval, far more than any live metric needs.
     MAX_HISTORY_LENGTH = 10000
 
-    def __init__(self, initial_capital: float = 100000.0, commission_rate: float = 0.0, slippage_rate: float = 0.0):
+    def __init__(
+        self,
+        initial_capital: float = 100000.0,
+        commission_rate: float = 0.0,
+        slippage_rate: float = 0.0,
+        # Periods-per-year for get_sharpe_ratio()/get_calmar_ratio() - see
+        # trading_assistant.annualization. Must match how often
+        # append_equity_point() actually gets called for THIS instance (e.g.
+        # trading_assistant.annualization.periods_per_year_from_seconds for
+        # a curve appended once per Orchestrator poll cycle). Default of 252
+        # (trading days/year) preserves this class's original behavior for
+        # any caller that doesn't explicitly pass the right value.
+        periods_per_year: float = 252,
+    ):
         self.initial_capital = initial_capital
         self.capital = initial_capital
         self.positions: Dict[str, Dict] = {}
@@ -140,6 +162,7 @@ class PortfolioManager:
         # its own assumption.
         self.commission_rate = commission_rate
         self.slippage_rate = slippage_rate
+        self.periods_per_year = periods_per_year
 
     def append_equity_point(self, value: float) -> None:
         """The one path every caller (internal mark-to-market, and
@@ -326,8 +349,8 @@ class PortfolioManager:
         return max_drawdown_from_equity_curve(self.equity_curve)
 
     def get_sharpe_ratio(self, risk_free_rate: float = 0.02) -> float:
-        return sharpe_ratio_from_equity_curve(self.equity_curve, risk_free_rate)
-    
+        return sharpe_ratio_from_equity_curve(self.equity_curve, risk_free_rate, self.periods_per_year)
+
     def get_calmar_ratio(self) -> float:
         max_dd = self.get_max_drawdown()
         if max_dd == 0:
@@ -335,7 +358,7 @@ class PortfolioManager:
         if len(self.equity_curve) < 2:
             return 0.0
         total_return = (self.equity_curve[-1] - self.equity_curve[0]) / self.equity_curve[0]
-        years = len(self.equity_curve) / 252
+        years = len(self.equity_curve) / self.periods_per_year
         annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
         return annual_return / max_dd
 

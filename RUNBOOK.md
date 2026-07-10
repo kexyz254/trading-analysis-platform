@@ -7,6 +7,10 @@ one-time ops setup to actually turn it on.
 
 ## 0. Prerequisites
 
+See `docs/production_readiness_audit.md` for the full brutal audit this
+list is derived from - read it before a first real deploy, not just this
+summary.
+
 - A VPS with Docker and Docker Compose installed (any $5/mo box is enough
   for testnet - this is not compute-heavy).
 - This repo cloned onto it, `.env` populated from `.env.example` (real
@@ -15,6 +19,29 @@ one-time ops setup to actually turn it on.
   `docker-compose.yml` bind-mounts this file, and if it doesn't exist yet
   Docker will silently create it as an empty **directory** instead, which
   breaks SQLite. One-time gotcha, only matters on a fresh clone.
+- **Both containers now run as a non-root user (uid 1000)**, not root -
+  the bind-mounted host paths (`logs/`, `trading_system.db`,
+  `trading_assistant/models/`) must be writable by that uid or the
+  container will get `Permission denied` the first time it tries to write
+  to them. Before the first `docker compose up`, on the host:
+  ```bash
+  touch trading_system.db
+  mkdir -p logs trading_assistant/models
+  sudo chown -R 1000:1000 logs trading_assistant/models trading_system.db
+  ```
+- **`docker compose build` has never been verified against this exact
+  Dockerfile before a real deploy** - CI only builds/smoke-tests it in
+  GitHub Actions (`.github/workflows/docker-build.yml`), which is close to
+  but not identical to your actual VPS. Run `docker compose build` on the
+  VPS itself and read the output before trusting it; see item #1 in the
+  audit doc for exactly why this matters (xgboost's native dependency on
+  `libgomp1`, now installed in the Dockerfile but still worth confirming
+  for real on the actual box).
+- **`mem_limit`/`cpus` in `docker-compose.yml` are conservative placeholders**,
+  not measured against your actual VPS plan - check `free -h` on the VPS
+  and adjust both services' limits before relying on them, especially if
+  your plan has less than ~2GB RAM (retrain trains RandomForest + XGBoost
+  per symbol across the whole discovered universe, up to ~30 symbols).
 
 ## 1. PID lock - already handled, nothing to do here
 

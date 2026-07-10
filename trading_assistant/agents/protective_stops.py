@@ -42,6 +42,37 @@ STOP_LIMIT_BUFFER_PCT = 0.002
 _STOP_ORDER_TYPES = {"STOP_LOSS_LIMIT", "STOP_LOSS", "STOP", "STOP_MARKET"}
 
 
+def _precision_round_quantity(exchange: Any, symbol: str, quantity: float) -> float:
+    """Round `quantity` to the exchange's real lot-size precision before
+    placing an order - ExecutionAgent._buy() already does this for entry
+    orders (see its own comment on a $5.00-exact order rounding to $4.59
+    and getting rejected by Binance's NOTIONAL filter), but this module's
+    stop-order placement previously sent the raw, unrounded float straight
+    to create_order/edit_order every time. A quantity that doesn't match
+    the symbol's LOT_SIZE step can be rejected outright, silently logged as
+    a generic "failed to place protective stop" with no obvious root cause
+    (and retried forever unchanged, since _retry_missing_protective_stop
+    re-derives the same unrounded quantity from the exchange's own free
+    balance every cycle). Falls back to the original quantity on any
+    lookup failure - a precision lookup failing must not block a stop
+    placement RiskAgent/ExecutionAgent already decided should happen."""
+    try:
+        return float(exchange.amount_to_precision(symbol, quantity))
+    except Exception:  # noqa: BLE001 - a failed precision lookup must not block a protective stop
+        return quantity
+
+
+def _min_notional(exchange: Any, symbol: str) -> Optional[float]:
+    """The exchange's real minimum order value for `symbol` (e.g. Binance's
+    NOTIONAL filter), or None if it can't be looked up - same lookup
+    ExecutionAgent._buy() performs for entry orders."""
+    try:
+        market = exchange.market(symbol)
+        return market.get("limits", {}).get("cost", {}).get("min")
+    except Exception:  # noqa: BLE001 - a failed lookup must not block a protective stop
+        return None
+
+
 def place_stop_at_price(exchange: Any, symbol: str, quantity: float, stop_price: float) -> Optional[str]:
     """Place a resting STOP_LOSS_LIMIT sell for `quantity` at an EXPLICIT
     stop_price - the lower-level primitive both place_protective_stop
@@ -55,6 +86,38 @@ def place_stop_at_price(exchange: Any, symbol: str, quantity: float, stop_price:
         return None
 
     limit_price = stop_price * (1 - STOP_LIMIT_BUFFER_PCT)
+    quantity = _precision_round_quantity(exchange, symbol, quantity)
+    if quantity <= 0:
+        # Rounded DOWN to zero by the exchange's own lot-size step - the
+        # held amount is real dust, not a placement failure to retry.
+        logger.warning(
+            "protective stop skipped - held quantity rounds to zero at this symbol's lot-size precision",
+            extra={"context": {"symbol": symbol, "stop_price": stop_price}},
+        )
+        return None
+
+    min_notional = _min_notional(exchange, symbol)
+    if min_notional is not None and limit_price * quantity < min_notional:
+        # Unlike a BUY (which can bump its notional up within budget - see
+        # ExecutionAgent._buy), a protective SELL is bounded by whatever
+        # quantity is actually held: there is no larger amount to bump to.
+        # A held position genuinely below the exchange's own minimum
+        # notional (fee erosion, lot-step rounding, or partial-close
+        # dust) can NEVER clear this filter, so this is a distinct,
+        # diagnosable "no valid stop is possible" case - not a transient
+        # failure worth retrying identically forever.
+        logger.warning(
+            "protective stop skipped - held position value is below the exchange's minimum order value, "
+            "no valid stop order is possible at this quantity",
+            extra={
+                "context": {
+                    "symbol": symbol, "quantity": quantity, "order_value": limit_price * quantity,
+                    "exchange_min_notional": min_notional,
+                }
+            },
+        )
+        return None
+
     try:
         order = exchange.create_order(
             symbol, "STOP_LOSS_LIMIT", "sell", quantity, limit_price, {"stopPrice": stop_price, "timeInForce": "GTC"}
@@ -110,6 +173,17 @@ def replace_protective_stop(
         return place_stop_at_price(exchange, symbol, quantity, new_stop_price)
 
     limit_price = new_stop_price * (1 - STOP_LIMIT_BUFFER_PCT)
+    # Same lot-size rounding place_stop_at_price applies for a fresh
+    # placement - a raised trailing stop or a re-protected post-partial-sell
+    # remainder is a NEW quantity that was never precision-checked before
+    # reaching here, so it's just as exposed to a LOT_SIZE rejection.
+    quantity = _precision_round_quantity(exchange, symbol, quantity)
+    if quantity <= 0:
+        logger.warning(
+            "protective stop replacement skipped - quantity rounds to zero at this symbol's lot-size precision",
+            extra={"context": {"symbol": symbol, "old_order_id": old_order_id}},
+        )
+        return None
     try:
         order = exchange.edit_order(
             old_order_id, symbol, "STOP_LOSS_LIMIT", "sell", quantity, limit_price,
