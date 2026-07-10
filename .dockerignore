@@ -29,11 +29,13 @@ backups/
 archive/
 run_system.lock
 
-# Test/coverage/build artifacts - not needed at runtime, pure bloat.
+# Coverage/build artifacts - not needed at runtime, pure bloat.
+# NOTE: tests/ is NOT excluded - the Dockerfile's own default CMD
+# (`pytest tests`) and the CI docker-build workflow's smoke test both run
+# the suite INSIDE the built image, so it must actually be present there.
 .pytest_cache/
 .coverage
 htmlcov/
-tests/
 
 # Native fuzzing surface (C++) - irrelevant to the Python runtime image.
 native/
