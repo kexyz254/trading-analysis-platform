@@ -2,6 +2,9 @@ __pycache__/
 .pytest_cache/
 *.pyc
 
+# Local Claude Code session state - not part of this application
+.claude/
+
 # Secrets / local runtime state
 .env
 *.db

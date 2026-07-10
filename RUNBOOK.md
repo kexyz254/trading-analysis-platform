@@ -104,23 +104,17 @@ never be exposed publicly), so an external monitor can't hit it directly.
 Two options:
 
 **Option A - a second, tiny process on the same VPS** (simplest): a cron
-job or systemd timer that curls `localhost:8000/api/health` every few
-minutes and pages you (via a webhook, the same `ALERT_WEBHOOK_URL`
-mechanism this system already uses) if it fails or stales out:
+job that curls `localhost:8000/api/health` every few minutes and pages you
+(via a webhook, the same `ALERT_WEBHOOK_URL` mechanism this system already
+uses) if it fails or stales out. `scripts/healthcheck_ping.sh` does exactly
+this - `chmod +x` it once, then add to crontab:
 
-```bash
-#!/usr/bin/env bash
-# /path/to/trading-analysis-platform/scripts/healthcheck_ping.sh (not yet
-# created - a template, adjust to your actual alerting webhook)
-RESPONSE=$(curl -sf http://localhost:8000/api/health) || {
-    curl -X POST "$ALERT_WEBHOOK_URL" -d '{"text":"health endpoint unreachable"}'
-    exit 1
-}
-LABEL=$(echo "$RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['label'])")
-if [ "$LABEL" != "healthy" ]; then
-    curl -X POST "$ALERT_WEBHOOK_URL" -d "{\"text\":\"health check reports: $LABEL\"}"
-fi
+```cron
+*/5 * * * * cd /path/to/trading-analysis-platform && ALERT_WEBHOOK_URL='your-webhook-url-here' scripts/healthcheck_ping.sh >> logs/healthcheck.log 2>&1
 ```
+
+`ALERT_WEBHOOK_URL` must be set in the cron entry itself, not just `.env` -
+cron does not source `.env` files.
 
 **Option B - a free external watcher** (UptimeRobot, Healthchecks.io):
 these need a **publicly reachable** URL, which conflicts with the
