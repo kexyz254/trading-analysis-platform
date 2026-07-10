@@ -104,17 +104,25 @@ never be exposed publicly), so an external monitor can't hit it directly.
 Two options:
 
 **Option A - a second, tiny process on the same VPS** (simplest): a cron
-job that curls `localhost:8000/api/health` every few minutes and pages you
-(via a webhook, the same `ALERT_WEBHOOK_URL` mechanism this system already
-uses) if it fails or stales out. `scripts/healthcheck_ping.sh` does exactly
-this - `chmod +x` it once, then add to crontab:
+job that hits `localhost:8000/api/health` every few minutes and pages you
+if it fails or stales out. Two variants, pick whichever matches your
+already-configured alert channel:
 
-```cron
-*/5 * * * * cd /path/to/trading-analysis-platform && ALERT_WEBHOOK_URL='your-webhook-url-here' scripts/healthcheck_ping.sh >> logs/healthcheck.log 2>&1
-```
-
-`ALERT_WEBHOOK_URL` must be set in the cron entry itself, not just `.env` -
-cron does not source `.env` files.
+- `scripts/healthcheck_ping.py` (recommended if you use SMTP email
+  alerting, like this deployment) - dependency-free (stdlib only), reads
+  SMTP settings straight out of `.env`, needs nothing installed beyond
+  the system Python3 already on the VPS:
+  ```cron
+  */5 * * * * cd /path/to/trading-analysis-platform && python3 scripts/healthcheck_ping.py >> logs/healthcheck.log 2>&1
+  ```
+- `scripts/healthcheck_ping.sh` (if you use `ALERT_WEBHOOK_URL` instead) -
+  `chmod +x` it once, then:
+  ```cron
+  */5 * * * * cd /path/to/trading-analysis-platform && ALERT_WEBHOOK_URL='your-webhook-url-here' scripts/healthcheck_ping.sh >> logs/healthcheck.log 2>&1
+  ```
+  `ALERT_WEBHOOK_URL` must be set in the cron entry itself, not just
+  `.env` - cron does not source `.env` files. `healthcheck_ping.py` reads
+  `.env` directly instead, so it doesn't have this limitation.
 
 **Option B - a free external watcher** (UptimeRobot, Healthchecks.io):
 these need a **publicly reachable** URL, which conflicts with the
