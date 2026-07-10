@@ -49,6 +49,14 @@ services:
     build: .
     command: uvicorn webapp.server:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
+    # Needed even though the dashboard never places an order: /api/markets
+    # and /api/ohlcv construct an exchange client via the same
+    # build_exchange() run_system.py uses, which unconditionally refuses
+    # to build ANY exchange instance in mode: live without real API keys -
+    # even for read-only public ticker/OHLCV calls. Without this, those
+    # two endpoints 502 (confirmed live: "mode: live requires
+    # BINANCE_API_KEY/BINANCE_API_SECRET to be set... refusing to start").
+    env_file: .env
     depends_on:
       - engine
     ports:
