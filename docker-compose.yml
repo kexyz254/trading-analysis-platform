@@ -52,16 +52,22 @@ services:
     depends_on:
       - engine
     ports:
-      # SECURITY: the dashboard has zero authentication (by design, for
-      # local-machine use). Binding to 127.0.0.1 keeps it reachable only
-      # from the VPS's own loopback - use an SSH tunnel for remote access
-      # (ssh -L 8000:localhost:8000 user@vps), never change this to
-      # "0.0.0.0:8000:8000" or "8000:8000" on a public VPS: that would
-      # publish live trading positions/decisions/model internals to
-      # anyone who finds the port. Remote browser access without a tunnel
-      # needs a reverse proxy (Caddy/nginx) with auth in front of it - a
-      # deliberate future decision, not this file's default.
+      # SECURITY: the dashboard has zero authentication (by design). Two
+      # bindings, both explicit host IPs - NEVER "0.0.0.0:8000:8000" or a
+      # bare "8000:8000" on a public VPS, either of which publishes live
+      # trading positions/decisions/model internals to the entire public
+      # internet on this box's real IP.
+      #   - 127.0.0.1: reachable only via an SSH tunnel
+      #     (ssh -L 8000:localhost:8000 user@vps) from the VPS's own loopback.
+      #   - the Tailscale interface IP: reachable only from other devices on
+      #     this same private Tailscale network (e.g. a phone) - still never
+      #     touches the public internet, since Tailscale's interface is a
+      #     private overlay network, not the VPS's public NIC. Update this
+      #     IP if the VPS's Tailscale identity is ever reset (`tailscale ip -4`
+      #     to check) - it's normally stable across reboots, but it IS this
+      #     specific machine's assigned address, not a fixed constant.
       - "127.0.0.1:8000:8000"
+      - "100.93.64.23:8000:8000"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./trading_system.db:/app/trading_system.db
