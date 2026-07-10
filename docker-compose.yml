@@ -26,11 +26,13 @@ services:
     # across the whole discovered universe (up to ~30 symbols) - with no
     # cap, a memory spike during that pass can OOM the entire VPS, not
     # just this container, on a small box. Measured against the actual
-    # deployment VPS (Hetzner, 1.9GB total RAM): 1000m + dashboard's 256m
-    # leaves ~650MB headroom for the OS/Docker daemon - re-tune if you
-    # move to a different plan (check with `free -h` on the host first).
+    # deployment VPS (Hetzner, 1.9GB RAM, 1 vCPU - confirmed via `free -h`/
+    # `nproc`): 1000m + dashboard's 256m leaves ~650MB headroom for the OS/
+    # Docker daemon. cpus is capped at the box's own single core - Docker
+    # rejects any limit above the host's actual CPU count outright, it
+    # doesn't just clamp it. Re-tune both if you move to a different plan.
     mem_limit: 1000m
-    cpus: 1.5
+    cpus: 0.8
     # Docker's own json-file log driver has NO size cap by default -
     # distinct from (and in addition to) this app's own already-rotated
     # file logging (logging_setup.py's RotatingFileHandler, 50MB max).
@@ -66,7 +68,7 @@ services:
     # Read-only, low-traffic web process - far lighter than the engine's
     # retrain/tournament workload, but still uncapped by default without this.
     mem_limit: 256m
-    cpus: 0.5
+    cpus: 0.2
     logging:
       driver: json-file
       options:
