@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from trading_assistant.agents.strategy_manager import StrategyManager
@@ -25,6 +25,25 @@ from trading_assistant.config import load_config
 from webapp import data_access as da
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+_CACHE_BUSTED_ASSETS = ("style.css", "ws.js", "app.js", "chart.js")
+
+
+def _static_asset_version() -> str:
+    """A version string derived from the static assets' own mtimes, not a
+    manually-maintained constant - browsers (mobile especially) can cache
+    JS/CSS aggressively even across a real deploy. Confirmed live: after
+    shipping a new app.js, a phone kept the OLD cached copy while
+    index.html reloaded fresh - new UI elements rendered (from the fresh
+    HTML) but nothing populated them (from the stale JS), which looks
+    exactly like a broken feature rather than a caching issue. Computed
+    once at import time, not per-request - these files don't change while
+    the container is running."""
+    mtimes = [(STATIC_DIR / name).stat().st_mtime for name in _CACHE_BUSTED_ASSETS if (STATIC_DIR / name).exists()]
+    return str(int(max(mtimes))) if mtimes else "0"
+
+
+_ASSET_VERSION = _static_asset_version()
 
 
 def _parse_args() -> argparse.Namespace:
@@ -193,7 +212,13 @@ def survivorship_bias():
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # Inject ?v=<asset-mtime-version> onto every static asset reference so
+    # a real deploy is never masked by a browser serving a stale cached
+    # copy of app.js/style.css/etc. - see _static_asset_version's docstring.
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for asset in _CACHE_BUSTED_ASSETS:
+        html = html.replace(f'/static/{asset}"', f'/static/{asset}?v={_ASSET_VERSION}"')
+    return HTMLResponse(html)
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
