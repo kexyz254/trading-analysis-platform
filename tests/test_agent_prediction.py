@@ -220,7 +220,11 @@ def test_a_model_promoted_on_an_older_smaller_feature_set_survives_new_columns_b
     brand new columns it was never trained on and knows nothing about."""
     from trading_assistant.agents.features import FEATURE_COLUMNS
 
-    old_feature_columns = [c for c in FEATURE_COLUMNS if c not in ("smc_structure_state", "smc_bos", "smc_mss")]
+    old_feature_columns = [
+        c
+        for c in FEATURE_COLUMNS
+        if c not in ("smc_structure_state", "smc_bos", "smc_mss", "price_vs_session_vwap")
+    ]
     trainer = PredictionAgent(model_dir=tmp_path, auto_load=False)
     trainer.promote_model("BTC/USDT", DummyClassifier(up_probability=0.9), feature_columns=old_feature_columns)
 

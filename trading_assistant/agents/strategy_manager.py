@@ -56,6 +56,7 @@ from trading_assistant.strategies.implementations import (
     SMACrossoverStrategy,
     SmartMoneyConceptsStrategy,
     TimeSeriesMomentumStrategy,
+    VWAPReversionStrategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ def default_candidates() -> List[StrategyCandidate]:
         StrategyCandidate("candlestick_patterns", "rule", CandlestickPatternStrategy),
         StrategyCandidate("time_series_momentum", "rule", TimeSeriesMomentumStrategy),
         StrategyCandidate("smart_money_concepts", "rule", SmartMoneyConceptsStrategy),
+        StrategyCandidate("vwap_reversion", "rule", VWAPReversionStrategy),
     ]
 
 
@@ -357,6 +359,8 @@ class StrategyManager:
         full_open = ohlcv["open"]
         full_high = ohlcv["high"]
         full_low = ohlcv["low"]
+        full_volume = ohlcv["volume"]
+        full_timestamp = ohlcv["timestamp"]
 
         featured = build_features(ohlcv)
         featured["target"] = label_next_bar_direction(featured)
@@ -392,6 +396,7 @@ class StrategyManager:
                     metrics = self._backtest_rule(
                         strategy, symbol, full_close, test_slice,
                         full_open=full_open, full_high=full_high, full_low=full_low,
+                        full_volume=full_volume, full_timestamp=full_timestamp,
                     )
 
                 report.folds.append(FoldRecord(fold_index=fold_index, regime=regime, metrics=metrics))
@@ -454,6 +459,8 @@ class StrategyManager:
                 "high": features["high"],
                 "low": features["low"],
                 "close": features["close"],
+                "volume": features["volume"],
+                "timestamp": features["timestamp"],
             }
         )
 
@@ -596,6 +603,8 @@ class StrategyManager:
         full_open: Optional[pd.Series] = None,
         full_high: Optional[pd.Series] = None,
         full_low: Optional[pd.Series] = None,
+        full_volume: Optional[pd.Series] = None,
+        full_timestamp: Optional[pd.Series] = None,
     ) -> dict:
         engine = BacktestEngineV2(
             initial_capital=10000.0, commission=self.commission_rate, slippage=self.slippage_rate,
@@ -618,6 +627,10 @@ class StrategyManager:
                 data["high"] = full_high.iloc[: abs_idx + 1]
             if full_low is not None:
                 data["low"] = full_low.iloc[: abs_idx + 1]
+            if full_volume is not None:
+                data["volume"] = full_volume.iloc[: abs_idx + 1]
+            if full_timestamp is not None:
+                data["timestamp"] = full_timestamp.iloc[: abs_idx + 1]
             signal = strategy.generate_signal(data)
 
             if signal == Signal.BUY:

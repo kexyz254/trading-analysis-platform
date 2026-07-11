@@ -22,6 +22,7 @@ from ..analysis.smart_money_concepts import (
     bullish_order_block_zones,
     compute_market_structure,
 )
+from ..analysis.vwap import session_vwap
 from ..core.indicators import calculate_atr, calculate_macd, calculate_rsi
 from .base import BaseStrategy, Signal
 
@@ -305,6 +306,41 @@ class SmartMoneyConceptsStrategy(BaseStrategy):
         if current_state == "bullish" and (current_bos == 1 or in_bullish_zone):
             return Signal.BUY
         if current_state == "bearish" and (current_bos == -1 or in_bearish_zone):
+            return Signal.SELL
+        return Signal.HOLD
+
+
+class VWAPReversionStrategy(BaseStrategy):
+    """Mean-reversion to the session-anchored VWAP (see
+    trading_assistant.analysis.vwap) - the institutional execution
+    benchmark, distinct from any rolling-window moving average. Buys when
+    price has stretched `threshold_pct` below the current session's VWAP,
+    sells when it's stretched the same amount above - symmetric, same
+    convention as RSIMeanReversionStrategy/BollingerBandsStrategy above.
+    """
+
+    def __init__(self, threshold_pct: float = 0.02, session_hours: int = 24):
+        super().__init__("VWAP Reversion")
+        self.threshold_pct = threshold_pct
+        self.session_hours = session_hours
+
+    def generate_signal(self, data):
+        high, low, close = data.get("high"), data.get("low"), data.get("close")
+        volume, timestamp = data.get("volume"), data.get("timestamp")
+        if high is None or low is None or close is None or volume is None or timestamp is None:
+            return Signal.HOLD
+        if len(close) < 2:
+            return Signal.HOLD
+
+        vwap = session_vwap(high, low, close, volume, timestamp, session_hours=self.session_hours)
+        current_vwap = vwap.iloc[-1]
+        if pd.isna(current_vwap) or current_vwap <= 0:
+            return Signal.HOLD
+
+        deviation = close.iloc[-1] / current_vwap - 1
+        if deviation <= -self.threshold_pct:
+            return Signal.BUY
+        if deviation >= self.threshold_pct:
             return Signal.SELL
         return Signal.HOLD
 

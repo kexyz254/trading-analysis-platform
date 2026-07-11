@@ -41,6 +41,7 @@ from trading_assistant.analysis.smart_money_concepts import (
     compute_market_structure,
 )
 from trading_assistant.analysis.ta_lib import TechnicalIndicators
+from trading_assistant.analysis.vwap import session_vwap
 
 FEATURE_COLUMNS = [
     # trend / moving averages
@@ -94,6 +95,10 @@ FEATURE_COLUMNS = [
     "smc_mss",
     "smc_in_bullish_ob_zone",
     "smc_in_bearish_ob_zone",
+    # Session-anchored VWAP deviation (see trading_assistant.analysis.vwap)
+    # - distinct from price_vs_vwap above, which is a rolling 20-bar
+    # smoothed indicator with no concept of a trading session resetting.
+    "price_vs_session_vwap",
 ]
 
 
@@ -202,6 +207,9 @@ def build_features(
     result["smc_in_bearish_ob_zone"] = (
         (close >= bearish_ob["zone_low"].shift(1)) & (close <= bearish_ob["zone_high"].shift(1))
     ).astype(float)
+
+    vwap = session_vwap(high, low, close, volume, result["timestamp"])
+    result["price_vs_session_vwap"] = close / vwap - 1
 
     result[FEATURE_COLUMNS] = result[FEATURE_COLUMNS].replace([np.inf, -np.inf], np.nan)
 

@@ -116,6 +116,20 @@ def test_smc_features_are_bounded_and_not_trivially_constant():
     assert set(featured["smc_structure_state"].unique()) != {0.0}
 
 
+def test_price_vs_session_vwap_is_not_trivially_constant():
+    """Regression coverage for the session-anchored VWAP feature (see
+    trading_assistant.analysis.vwap) - an oscillating series must
+    produce a genuinely varying deviation from session VWAP, not a
+    constant (which would mean the session-reset grouping silently
+    collapsed to a single group, or vwap computation is broken)."""
+    closes = [100.0 + 20.0 * ((i % 10) - 5) + i * 0.1 for i in range(150)]
+    frame = _ohlcv(closes)
+
+    featured = build_features(frame).dropna(subset=FEATURE_COLUMNS)
+
+    assert featured["price_vs_session_vwap"].nunique() > 1
+
+
 def test_classify_regime_requires_strong_adx_to_call_a_trend():
     # strong ADX (trending market) - direction sign decides up vs down
     assert classify_regime(trend_strength=0.05, adx_strength=0.40) == "trending_up"
