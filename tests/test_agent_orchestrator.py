@@ -1126,18 +1126,23 @@ def test_retrain_all_symbols_stops_early_once_shutdown_is_requested(tmp_path):
     underlying thread keeps running regardless, so a full pass (15-25
     minutes across a large universe) used to be the real worst-case
     shutdown delay. _retrain_all_symbols must check between symbols and
-    stop STARTING new ones once shutdown is requested."""
+    stop STARTING new fetches once shutdown is requested - the fetch phase
+    is per-symbol (see _retrain_all_symbols' own docstring on why:
+    LearningAgent.retrain_all batches the actual promotion decisions
+    together for Benjamini-Hochberg correction, but data-fetching stays
+    isolated per symbol)."""
     orchestrator, _, journal, _ = _build_orchestrator(
         tmp_path, model=DummyClassifier(up_probability=0.5), closes=[100.0] * 20
     )
     orchestrator.market_monitor.symbols = ["A/USDT", "B/USDT", "C/USDT"]
     processed = []
 
-    def fake_retrain_from_live(symbol, timeframe=None):  # sync - called via asyncio.to_thread, like the real one
+    def fake_fetch_ohlcv_for_retrain(symbol, timeframe=None):  # sync - called via asyncio.to_thread, like the real one
         processed.append(symbol)
         orchestrator._shutdown_event.set()  # shutdown requested mid-pass, after the first symbol
+        return None
 
-    orchestrator.learning = types.SimpleNamespace(retrain_from_live=fake_retrain_from_live)
+    orchestrator.learning = types.SimpleNamespace(fetch_ohlcv_for_retrain=fake_fetch_ohlcv_for_retrain)
 
     asyncio.run(orchestrator._retrain_all_symbols())
 

@@ -139,6 +139,7 @@ def build_orchestrator(config: Config) -> Orchestrator:
         target_folds=config.learning.target_folds,
         min_folds_required=config.learning.min_folds_required,
         min_pct_folds_profitable=config.learning.min_pct_folds_profitable,
+        min_trades_per_fold=config.learning.min_trades_per_fold,
         journal=journal,
         exchange=exchange,
         alert_manager=alert_manager,

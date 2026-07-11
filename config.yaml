@@ -307,6 +307,13 @@ learning:
   # candidate is rejected as too regime-dependent even if its median sharpe
   # looks fine (a model that's great in trends and terrible ranging, say).
   min_pct_folds_profitable: 0.5
+  # A fold with 0-2 trades in its 100-bar test window is mostly noise, but
+  # previously counted toward min_folds_required and every promotion
+  # aggregate exactly the same as a fold with real activity - some symbols
+  # had as few as 9-10 TOTAL trades across all 8 folds combined. Folds
+  # below this count are dropped before any aggregate is computed. 0
+  # disables the filter (every fold counts, prior behavior).
+  min_trades_per_fold: 3
   # Live-performance-triggered rollback: once at least 15 real trades have
   # closed for a symbol since its model was promoted, compare their
   # actual win rate against what walk-forward validated. If it's decayed

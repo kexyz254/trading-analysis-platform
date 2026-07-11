@@ -312,6 +312,18 @@ class LearningConfig:
     # grows past ~1000 bars and unlocks a 5th fold on its own.
     min_folds_required: int = 3
     min_pct_folds_profitable: float = 0.5
+    # A fold with 0-2 trades in its 100-bar test window produces a
+    # Sharpe/return number that's mostly noise (a coin-flip's worth of
+    # observations), but previously counted toward min_folds_required and
+    # the median-Sharpe/pct-profitable aggregates exactly the same as a
+    # fold with 20+ trades - a real audit finding: some symbols had as few
+    # as 9-10 TOTAL trades across all 8 folds combined, yet were weighed
+    # identically to symbols with robust per-fold activity. Folds below
+    # this trade count are dropped before any aggregate is computed, so
+    # min_folds_required now means "this many folds that actually
+    # observed enough trades to say something," not just "this many folds
+    # ran." 0 disables the filter (every fold counts, prior behavior).
+    min_trades_per_fold: int = 3
     # Live-performance-triggered rollback: once at least this many real
     # trades have closed for a symbol since its model was promoted,
     # compare their actual win rate against what walk-forward validated -

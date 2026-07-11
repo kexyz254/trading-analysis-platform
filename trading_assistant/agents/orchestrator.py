@@ -1434,6 +1434,17 @@ class Orchestrator:
             )
 
     async def _retrain_all_symbols(self) -> None:
+        # Two phases, not one combined per-symbol retrain_from_live call
+        # per symbol: fetching data stays isolated per-symbol (one
+        # symbol's feed failure must not lose the rest), but the actual
+        # promotion DECISION for every successfully-fetched symbol is
+        # made together in one batched call, so LearningAgent.retrain_all
+        # can correct significance across the whole retrain cycle's
+        # family of tests (Benjamini-Hochberg - see that method and
+        # trading_assistant.validation.significance's module docstring on
+        # why a fixed per-test alpha, applied independently to each
+        # symbol on this recurring cadence, eventually promotes noise).
+        symbols_and_ohlcv = []
         for symbol in self.market_monitor.symbols:
             if self._shutdown_event.is_set():
                 # See _run_tournament_all_symbols' identical guard for why
@@ -1442,16 +1453,25 @@ class Orchestrator:
                 logger.info("retrain pass aborted early: shutdown requested")
                 return
             try:
-                # Offload to a worker thread: retrain_from_live fetches data
-                # and trains real models (RandomForest + XGBoost) plus a
-                # backtest - all blocking, CPU/network-bound work that would
-                # otherwise freeze the live run_cycle loop (including
-                # reacting to a pending SELL) for the entire duration.
-                # Must retrain on the same timeframe MarketMonitorAgent polls
-                # live - otherwise a promoted model gets applied to a bar
-                # size/distribution it was never validated against.
-                await asyncio.to_thread(
-                    self.learning.retrain_from_live, symbol, timeframe=self.market_monitor.timeframe
+                # Offload to a worker thread: fetching real OHLCV history
+                # is blocking network I/O that would otherwise freeze the
+                # live run_cycle loop (including reacting to a pending
+                # SELL). Must fetch on the same timeframe MarketMonitorAgent
+                # polls live - otherwise a promoted model gets applied to a
+                # bar size/distribution it was never validated against.
+                ohlcv = await asyncio.to_thread(
+                    self.learning.fetch_ohlcv_for_retrain, symbol, timeframe=self.market_monitor.timeframe
                 )
-            except Exception:  # noqa: BLE001 - a failed retrain must not kill the live loop
-                logger.exception("retrain failed", extra={"context": {"symbol": symbol}})
+                symbols_and_ohlcv.append((symbol, ohlcv))
+            except Exception:  # noqa: BLE001 - a failed fetch must not kill the rest of the retrain pass
+                logger.exception("could not fetch retrain data", extra={"context": {"symbol": symbol}})
+
+        if not symbols_and_ohlcv:
+            return
+        try:
+            # Offload to a worker thread: trains real models (RandomForest
+            # + XGBoost) plus a backtest for every symbol in the batch -
+            # all blocking, CPU-bound work.
+            await asyncio.to_thread(self.learning.retrain_all, symbols_and_ohlcv)
+        except Exception:  # noqa: BLE001 - a failed retrain batch must not kill the live loop
+            logger.exception("retrain batch failed", extra={"context": {"symbols": [s for s, _ in symbols_and_ohlcv]}})

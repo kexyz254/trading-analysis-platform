@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -43,7 +43,13 @@ from trading_assistant.ml.drift import compute_baseline_distribution, compute_fe
 from trading_assistant.ml.predictor import EnsemblePredictor, RandomForestPredictor, XGBPredictor
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.risk.backtest_sizing import risk_based_quantity
-from trading_assistant.validation.significance import beats_baseline_significantly, clears_threshold_significantly
+from trading_assistant.validation.significance import (
+    baseline_p_value as _baseline_p_value,
+    beats_baseline_significantly,
+    benjamini_hochberg,
+    clears_threshold_significantly,
+    threshold_p_value as _threshold_p_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +116,34 @@ class RetrainOutcome:
     baseline_metrics: Optional[dict] = None
 
 
+@dataclass
+class CandidateEvaluation:
+    """Everything about a retrain candidate that's independent of WHICH
+    significance decision (a single uncorrected test, or a Benjamini-
+    Hochberg-corrected one across a whole retrain batch - see
+    trading_assistant.validation.significance) ultimately gets applied to
+    it. Walk-forward validation (expensive: trains a fresh model per
+    fold) happens exactly once here; retrain_all's batch correction and
+    retrain's single-symbol path both build on this same evaluation
+    rather than re-running it."""
+
+    symbol: str
+    featured: pd.DataFrame
+    walk_forward: WalkForwardSummary
+    fold_sharpes: List[float]
+    baseline_metrics: Optional[dict]
+    min_folds_ok: bool
+    pct_profitable_ok: bool
+    drawdown_ok: bool
+    # None when there aren't enough folds for a real statistical test (see
+    # trading_assistant.validation.significance.MIN_FOLDS_FOR_TEST) -
+    # excluded from Benjamini-Hochberg correction entirely; the caller
+    # falls back to the same point-estimate comparison the uncorrected
+    # single-test functions use.
+    threshold_p_value: Optional[float]
+    baseline_p_value: Optional[float]
+
+
 class LearningAgent:
     def __init__(
         self,
@@ -125,6 +159,11 @@ class LearningAgent:
         # config.yaml default now.
         min_folds_required: int = 3,
         min_pct_folds_profitable: float = 0.5,
+        # See LearningConfig.min_trades_per_fold's docstring - a fold with
+        # 0-2 trades is dropped before num_folds/any aggregate is computed,
+        # rather than counting identically to a fold with real activity.
+        # 0 disables the filter (every fold counts).
+        min_trades_per_fold: int = 0,
         journal: Optional[Journal] = None,
         model_factory: Callable[[], Any] = _default_model_factory,
         feeds: Optional[Dict[str, Any]] = None,
@@ -178,6 +217,7 @@ class LearningAgent:
         self.target_folds = target_folds
         self.min_folds_required = min_folds_required
         self.min_pct_folds_profitable = min_pct_folds_profitable
+        self.min_trades_per_fold = min_trades_per_fold
         self.journal = journal
         self.model_factory = model_factory
         self.min_live_trades_for_decay_check = min_live_trades_for_decay_check
@@ -211,25 +251,136 @@ class LearningAgent:
     def retrain_from_live(
         self, symbol: str, timeframe: str = "1h", total_bars: Optional[int] = None, feed: Any = None
     ) -> RetrainOutcome:
+        ohlcv = self.fetch_ohlcv_for_retrain(symbol, timeframe, total_bars, feed)
+        return self.retrain(symbol, ohlcv)
+
+    def retrain_all_from_live(
+        self, symbols: List[str], timeframe: str = "1h", total_bars: Optional[int] = None
+    ) -> Dict[str, RetrainOutcome]:
+        """Batch equivalent of retrain_from_live, correcting significance
+        across the WHOLE batch via Benjamini-Hochberg (see retrain_all) -
+        this is what Orchestrator._retrain_all_symbols actually calls, so
+        that a real retrain cycle's family of tests (every symbol
+        evaluated together, on the recurring cadence the tournament
+        reruns at) gets corrected as one family, not as N independent
+        single tests each carrying the full per-test false-positive risk
+        on its own."""
+        symbols_and_ohlcv = [
+            (symbol, self.fetch_ohlcv_for_retrain(symbol, timeframe, total_bars, feed=None)) for symbol in symbols
+        ]
+        return self.retrain_all(symbols_and_ohlcv)
+
+    def fetch_ohlcv_for_retrain(
+        self, symbol: str, timeframe: str = "1h", total_bars: Optional[int] = None, feed: Any = None
+    ) -> pd.DataFrame:
         feed = feed or self._feeds.get(symbol) or LiveFeed(symbol=symbol, timeframe=timeframe, exchange=self._exchange)
         if total_bars is None:
             # Enough for target_folds walk-forward folds plus indicator warmup.
             total_bars = self.train_window_bars + self.target_folds * self.test_window_bars + 50
         if hasattr(feed, "fetch_ohlcv_history"):
-            ohlcv = feed.fetch_ohlcv_history(total_bars=total_bars)
-        else:
-            ohlcv = feed.fetch_ohlcv(limit=total_bars)
-        return self.retrain(symbol, ohlcv)
+            return feed.fetch_ohlcv_history(total_bars=total_bars)
+        return feed.fetch_ohlcv(limit=total_bars)
 
     def retrain(self, symbol: str, ohlcv: pd.DataFrame) -> RetrainOutcome:
+        """Single-symbol retrain at a fixed, UNCORRECTED per-test
+        significance level - kept for standalone/backward-compatible use.
+        The live system's real retrain loop instead calls
+        retrain_all_from_live/retrain_all, which corrects across the
+        whole batch of symbols retrained together (see that method and
+        trading_assistant.validation.significance's module docstring on
+        why a fixed per-test alpha, applied independently to every
+        candidate on a recurring cadence, eventually promotes noise)."""
+        evaluation = self._evaluate_candidate(symbol, ohlcv)
+        threshold_significant = clears_threshold_significantly(evaluation.fold_sharpes, self.min_sharpe_to_promote)
+        baseline_significant = self._uncorrected_baseline_significant(evaluation)
+        return self._finalize_candidate(evaluation, threshold_significant, baseline_significant)
+
+    def retrain_all(self, symbols_and_ohlcv: List[Tuple[str, pd.DataFrame]]) -> Dict[str, RetrainOutcome]:
+        """Evaluate every (symbol, ohlcv) pair, then apply Benjamini-
+        Hochberg correction ONCE across the whole batch's p-values before
+        finalizing any individual promotion decision - see
+        trading_assistant.validation.significance.benjamini_hochberg and
+        this module's own docstring for why. Threshold-clearing and
+        beats-baseline are corrected as two SEPARATE families (they're
+        different hypotheses about different things), each only over the
+        candidates that actually produced a real p-value; candidates with
+        too few folds for a real test fall back to the same uncorrected
+        point-estimate comparison retrain()'s single-symbol path uses,
+        since there's no p-value on those to correct in the first place.
+        """
+        evaluations = [self._evaluate_candidate(symbol, ohlcv) for symbol, ohlcv in symbols_and_ohlcv]
+
+        threshold_corrected = benjamini_hochberg([e.threshold_p_value for e in evaluations])
+        baseline_corrected = benjamini_hochberg([e.baseline_p_value for e in evaluations])
+
+        outcomes: Dict[str, RetrainOutcome] = {}
+        for i, evaluation in enumerate(evaluations):
+            if evaluation.threshold_p_value is not None:
+                threshold_significant = threshold_corrected[i]
+            else:
+                threshold_significant = clears_threshold_significantly(
+                    evaluation.fold_sharpes, self.min_sharpe_to_promote
+                )
+
+            if evaluation.baseline_p_value is not None:
+                baseline_significant = baseline_corrected[i]
+            else:
+                baseline_significant = self._uncorrected_baseline_significant(evaluation)
+
+            outcomes[evaluation.symbol] = self._finalize_candidate(
+                evaluation, threshold_significant, baseline_significant
+            )
+        return outcomes
+
+    def _uncorrected_baseline_significant(self, evaluation: "CandidateEvaluation") -> bool:
+        """The exact fallback logic retrain()'s original inline version
+        used: vacuously true with no baseline yet, a real significance
+        test when the baseline has fold-level history, or a plain median
+        comparison for an older baseline recorded before fold-level
+        tracking existed. Also used by retrain_all whenever a candidate's
+        baseline comparison doesn't have a real p-value to correct."""
+        baseline_metrics = evaluation.baseline_metrics
+        if not baseline_metrics:
+            return True
+        baseline_fold_sharpes = baseline_metrics.get("fold_sharpes")
+        if baseline_fold_sharpes:
+            return beats_baseline_significantly(evaluation.fold_sharpes, baseline_fold_sharpes)
+        return evaluation.walk_forward.median_sharpe > baseline_metrics.get("median_sharpe", float("-inf"))
+
+    def _evaluate_candidate(self, symbol: str, ohlcv: pd.DataFrame) -> CandidateEvaluation:
         featured = build_features(ohlcv)
         featured["target"] = label_next_bar_direction(featured)
         featured = featured.dropna().reset_index(drop=True)
 
         walk_forward = self._walk_forward_validate(symbol, featured)
         baseline_metrics = self.last_promoted_metrics.get(symbol)
+        fold_sharpes = [f.metrics["sharpe_ratio"] for f in walk_forward.folds]
+        baseline_fold_sharpes = (baseline_metrics or {}).get("fold_sharpes")
 
-        if walk_forward.num_folds < self.min_folds_required:
+        return CandidateEvaluation(
+            symbol=symbol,
+            featured=featured,
+            walk_forward=walk_forward,
+            fold_sharpes=fold_sharpes,
+            baseline_metrics=baseline_metrics,
+            min_folds_ok=walk_forward.num_folds >= self.min_folds_required,
+            pct_profitable_ok=walk_forward.pct_folds_profitable >= self.min_pct_folds_profitable,
+            drawdown_ok=abs(walk_forward.worst_fold_drawdown_pct) / 100 <= self.max_drawdown_to_promote,
+            threshold_p_value=_threshold_p_value(fold_sharpes, self.min_sharpe_to_promote),
+            baseline_p_value=(
+                _baseline_p_value(fold_sharpes, baseline_fold_sharpes) if baseline_fold_sharpes else None
+            ),
+        )
+
+    def _finalize_candidate(
+        self, evaluation: CandidateEvaluation, threshold_significant: bool, baseline_significant: bool
+    ) -> RetrainOutcome:
+        symbol = evaluation.symbol
+        walk_forward = evaluation.walk_forward
+        baseline_metrics = evaluation.baseline_metrics
+        featured = evaluation.featured
+
+        if not evaluation.min_folds_ok:
             return self._finish(
                 RetrainOutcome(
                     promoted=False,
@@ -243,8 +394,7 @@ class LearningAgent:
                 symbol,
             )
 
-        fold_sharpes = [f.metrics["sharpe_ratio"] for f in walk_forward.folds]
-        if not clears_threshold_significantly(fold_sharpes, self.min_sharpe_to_promote):
+        if not threshold_significant:
             return self._finish(
                 RetrainOutcome(
                     promoted=False,
@@ -259,7 +409,7 @@ class LearningAgent:
                 symbol,
             )
 
-        if walk_forward.pct_folds_profitable < self.min_pct_folds_profitable:
+        if not evaluation.pct_profitable_ok:
             return self._finish(
                 RetrainOutcome(
                     promoted=False,
@@ -273,7 +423,7 @@ class LearningAgent:
                 symbol,
             )
 
-        if abs(walk_forward.worst_fold_drawdown_pct) / 100 > self.max_drawdown_to_promote:
+        if not evaluation.drawdown_ok:
             return self._finish(
                 RetrainOutcome(
                     promoted=False,
@@ -284,28 +434,19 @@ class LearningAgent:
                 symbol,
             )
 
-        if baseline_metrics:
-            baseline_fold_sharpes = baseline_metrics.get("fold_sharpes")
-            if baseline_fold_sharpes:
-                beats_baseline = beats_baseline_significantly(fold_sharpes, baseline_fold_sharpes)
-            else:
-                # A baseline recorded before fold-level history was tracked -
-                # fall back to the old point-estimate comparison rather than
-                # refusing to ever promote again just because of a missing key.
-                beats_baseline = walk_forward.median_sharpe > baseline_metrics.get("median_sharpe", float("-inf"))
-            if not beats_baseline:
-                return self._finish(
-                    RetrainOutcome(
-                        promoted=False,
-                        reason=(
-                            "candidate did not SIGNIFICANTLY beat the currently live model's "
-                            "walk-forward performance (not just a higher point-estimate median)"
-                        ),
-                        candidate_metrics=walk_forward.to_dict(),
-                        baseline_metrics=baseline_metrics,
+        if baseline_metrics and not baseline_significant:
+            return self._finish(
+                RetrainOutcome(
+                    promoted=False,
+                    reason=(
+                        "candidate did not SIGNIFICANTLY beat the currently live model's "
+                        "walk-forward performance (not just a higher point-estimate median)"
                     ),
-                    symbol,
-                )
+                    candidate_metrics=walk_forward.to_dict(),
+                    baseline_metrics=baseline_metrics,
+                ),
+                symbol,
+            )
 
         # Promote: train the model actually deployed live on ALL available
         # data (every fold's train+test rows), not just the last fold's
@@ -353,6 +494,18 @@ class LearningAgent:
 
             fold_index += 1
             start += self.test_window_bars  # non-overlapping test windows; rolling (not expanding) train window
+
+        # See LearningConfig.min_trades_per_fold's docstring: a fold with
+        # 0-2 trades produces a Sharpe/return number that's mostly noise,
+        # but previously counted toward num_folds/min_folds_required and
+        # every aggregate exactly the same as a fold with real activity -
+        # a real audit finding (some symbols had as few as 9-10 TOTAL
+        # trades across all 8 folds combined). Dropped BEFORE any
+        # aggregate is computed, not just flagged after the fact, so
+        # min_folds_required means "this many folds that actually
+        # observed enough trades," not just "this many folds ran."
+        if self.min_trades_per_fold > 0:
+            folds = [f for f in folds if f.metrics["num_trades"] >= self.min_trades_per_fold]
 
         if not folds:
             return WalkForwardSummary()

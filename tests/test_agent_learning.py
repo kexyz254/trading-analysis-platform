@@ -156,6 +156,100 @@ def test_retrain_rejects_when_not_enough_history(tmp_path):
     assert "not enough history" in outcome.reason
 
 
+class TestMinTradesPerFold:
+    """Regression coverage for a real audit finding: some symbols had as
+    few as 9-10 TOTAL trades across all 8 walk-forward folds combined,
+    yet those folds counted toward min_folds_required and every
+    promotion aggregate exactly the same as a fold with real activity -
+    thin, mostly-noise samples getting the same weight as robust ones."""
+
+    def test_folds_below_the_trade_count_are_dropped_before_any_aggregate(self, tmp_path, monkeypatch):
+        agent, _ = _agent(
+            0.9, tmp_path, min_folds_required=2, min_trades_per_fold=5, target_folds=4
+        )
+        # 4 folds worth of data at the configured window sizes.
+        ohlcv = _uptrend_ohlcv(n=100 + 4 * 20)
+
+        # Alternate thin (2 trades) and robust (10 trades) folds - real
+        # sharpe/return/drawdown values reused across calls since this
+        # test is only about which folds get COUNTED, not their content.
+        fold_call_count = {"n": 0}
+        real_backtest = agent._backtest
+
+        def fake_backtest(model, symbol, test_df):
+            result = real_backtest(model, symbol, test_df)
+            fold_call_count["n"] += 1
+            result["num_trades"] = 2 if fold_call_count["n"] % 2 == 1 else 10
+            return result
+
+        monkeypatch.setattr(agent, "_backtest", fake_backtest)
+
+        walk_forward = agent._walk_forward_validate("BTC/USDT", _featured(ohlcv))
+
+        # Only the even-numbered (10-trade) folds survive the filter.
+        assert walk_forward.num_folds == fold_call_count["n"] // 2
+        assert all(f.metrics["num_trades"] == 10 for f in walk_forward.folds)
+
+    def test_zero_disables_the_filter_entirely(self, tmp_path, monkeypatch):
+        agent, _ = _agent(0.9, tmp_path, min_folds_required=2, min_trades_per_fold=0, target_folds=4)
+        ohlcv = _uptrend_ohlcv(n=100 + 4 * 20)
+
+        real_backtest = agent._backtest
+
+        def fake_backtest(model, symbol, test_df):
+            result = real_backtest(model, symbol, test_df)
+            result["num_trades"] = 0  # even zero-trade folds must all still count
+            return result
+
+        monkeypatch.setattr(agent, "_backtest", fake_backtest)
+
+        walk_forward = agent._walk_forward_validate("BTC/USDT", _featured(ohlcv))
+
+        assert walk_forward.num_folds >= 2
+
+    def test_a_symbol_that_only_clears_min_folds_thanks_to_thin_folds_is_now_rejected(self, tmp_path, monkeypatch):
+        """Direct before/after: the same data that used to promote (thin
+        folds counted) must now be rejected (they don't) once
+        min_trades_per_fold is enabled."""
+        real_backtest_agent, _ = _agent(
+            0.9, tmp_path, min_sharpe_to_promote=0.1, max_drawdown_to_promote=0.5,
+            min_folds_required=3, min_trades_per_fold=0,
+        )
+        ohlcv = _uptrend_ohlcv()  # default n=300, comfortably enough for 3+ folds after feature warmup
+
+        def make_fake_backtest(agent):
+            real_backtest = agent._backtest
+
+            def fake_backtest(model, symbol, test_df):
+                result = real_backtest(model, symbol, test_df)
+                result["num_trades"] = 1  # every fold is thin
+                return result
+
+            return fake_backtest
+
+        monkeypatch.setattr(real_backtest_agent, "_backtest", make_fake_backtest(real_backtest_agent))
+        before = real_backtest_agent.retrain("BTC/USDT", ohlcv)
+
+        filtered_agent, _ = _agent(
+            0.9, tmp_path, min_sharpe_to_promote=0.1, max_drawdown_to_promote=0.5,
+            min_folds_required=3, min_trades_per_fold=5,
+        )
+        monkeypatch.setattr(filtered_agent, "_backtest", make_fake_backtest(filtered_agent))
+        after = filtered_agent.retrain("BTC/USDT", ohlcv)
+
+        assert before.promoted is True
+        assert after.promoted is False
+        assert "not enough history" in after.reason
+
+
+def _featured(ohlcv):
+    from trading_assistant.agents.features import build_features, label_next_bar_direction
+
+    featured = build_features(ohlcv)
+    featured["target"] = label_next_bar_direction(featured)
+    return featured.dropna().reset_index(drop=True)
+
+
 def test_retrain_promotes_a_consistently_profitable_candidate(tmp_path):
     agent, prediction_agent = _agent(0.9, tmp_path, min_sharpe_to_promote=0.1, max_drawdown_to_promote=0.5)
     ohlcv = _uptrend_ohlcv()
@@ -174,6 +268,88 @@ def test_retrain_promotes_a_consistently_profitable_candidate(tmp_path):
     # a different, untrained symbol must be unaffected
     other_strategy = prediction_agent._get_or_create_strategy("ETH/USDT")
     assert other_strategy.model is None
+
+
+class TestRetrainAllMultipleTestingCorrection:
+    """Regression coverage for the exposure this module's significance
+    docstring has always warned about: a fixed per-test alpha, applied
+    independently to every symbol a retrain cycle evaluates, will
+    eventually promote something on pure sampling noise as the number of
+    tests grows. retrain_all corrects the whole batch via
+    Benjamini-Hochberg before any individual promotion decision is made."""
+
+    def test_matches_single_symbol_retrain_for_a_batch_of_exactly_one(self, tmp_path):
+        """With only one candidate in the family, BH's own rank-1
+        threshold (1/1)*alpha = alpha is identical to the raw per-test
+        alpha retrain() uses - a batch of one must be a complete no-op."""
+        agent, _ = _agent(0.9, tmp_path, min_sharpe_to_promote=0.1, max_drawdown_to_promote=0.5)
+        ohlcv = _uptrend_ohlcv()
+
+        single_outcome = agent.retrain("BTC/USDT", ohlcv)
+        agent.last_promoted_metrics.clear()  # reset so the batch call starts from the same clean state
+        batch_outcomes = agent.retrain_all([("BTC/USDT", ohlcv)])
+
+        assert batch_outcomes["BTC/USDT"].promoted == single_outcome.promoted
+        assert batch_outcomes["BTC/USDT"].candidate_metrics == single_outcome.candidate_metrics
+
+    def test_corrects_significance_across_the_whole_batch(self, tmp_path, monkeypatch):
+        """Direct test of the actual regression: a borderline candidate
+        that would individually pass an uncorrected per-test check must
+        be REJECTED once evaluated alongside several genuinely-noisy
+        candidates in the same retrain batch, while a genuinely strong
+        candidate still gets promoted. Evaluation itself is monkeypatched
+        to inject controlled p-values (see tests/test_significance.py for
+        the underlying BH math already proven correct in isolation) -
+        real walk-forward numbers are hard to steer to an exact p-value,
+        and that's not what this test is about."""
+        from trading_assistant.agents.learning import CandidateEvaluation
+
+        agent, _ = _agent(0.9, tmp_path, min_pct_folds_profitable=0.0, max_drawdown_to_promote=1.0)
+
+        def fake_evaluation(symbol, p_value):
+            walk_forward = agent._walk_forward_validate(symbol, agent_featured)
+            return CandidateEvaluation(
+                symbol=symbol,
+                featured=agent_featured,
+                walk_forward=walk_forward,
+                fold_sharpes=[1.0] * 6,  # arbitrary - p_value below is what actually drives the decision
+                baseline_metrics=None,
+                min_folds_ok=True,
+                pct_profitable_ok=True,
+                drawdown_ok=True,
+                threshold_p_value=p_value,
+                baseline_p_value=None,
+            )
+
+        from trading_assistant.agents.features import build_features, label_next_bar_direction
+
+        agent_featured = build_features(_uptrend_ohlcv(n=300))
+        agent_featured["target"] = label_next_bar_direction(agent_featured)
+        agent_featured = agent_featured.dropna().reset_index(drop=True)
+
+        # Same shape already proven in test_significance.py's BH tests:
+        # two genuine signals (tiny p-values) plus three noise-level
+        # candidates that would each individually clear a naive
+        # alpha=0.10 check but must not survive correction as a batch.
+        p_values = {
+            "STRONG1/USDT": 0.001,
+            "STRONG2/USDT": 0.001,
+            "NOISE1/USDT": 0.08,
+            "NOISE2/USDT": 0.09,
+            "NOISE3/USDT": 0.15,
+        }
+
+        monkeypatch.setattr(
+            agent, "_evaluate_candidate", lambda symbol, ohlcv: fake_evaluation(symbol, p_values[symbol])
+        )
+
+        outcomes = agent.retrain_all([(symbol, None) for symbol in p_values])
+
+        assert outcomes["STRONG1/USDT"].promoted is True
+        assert outcomes["STRONG2/USDT"].promoted is True
+        assert outcomes["NOISE1/USDT"].promoted is False
+        assert outcomes["NOISE2/USDT"].promoted is False
+        assert outcomes["NOISE3/USDT"].promoted is False
 
 
 def test_walk_forward_backtest_reflects_configured_commission_rate(tmp_path):
