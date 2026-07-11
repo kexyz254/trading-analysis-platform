@@ -1,7 +1,7 @@
 """Correlation-aware concentration risk.
 
 A per-symbol dollar/weight cap alone (RiskAgent's existing
-max_position_weight / max_gross_exposure / max_net_exposure) can't see that
+max_position_weight / max_gross_exposure_pct / max_net_exposure_pct) can't see that
 20 "different" positions might really be one leveraged bet on the same
 underlying market factor. Crypto altcoins are typically 70-90%+ correlated
 to BTC, especially during risk-off moves - exactly the moments a risk

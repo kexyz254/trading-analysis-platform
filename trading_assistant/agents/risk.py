@@ -95,13 +95,16 @@ class RiskAgent:
         risk_per_trade: float = 0.02,
         stop_loss_pct: float = 0.01,
         max_position_weight: Optional[float] = 0.25,
-        # NOTE: these are absolute quote-currency caps (see portfolio.limits),
-        # not ratios - default to a large "effectively unlimited unless you
-        # configure it" value. Now that evaluate_buy always runs this check
-        # (see the fix removing the empty-portfolio skip), a small default
-        # here would reject every trade regardless of actual capital.
-        max_gross_exposure: Optional[float] = 100000.0,
-        max_net_exposure: Optional[float] = 100000.0,
+        # Ratios of LIVE capital (evaluate_buy's own `capital` param),
+        # converted to the absolute quote-currency caps portfolio.limits.
+        # check_portfolio_limits actually checks against, freshly computed
+        # every call - a fixed dollar cap tied to some earlier capital
+        # figure would silently stop tracking reality the moment real
+        # capital diverged from it (too loose once capital grew past it,
+        # too tight if it never got updated after a withdrawal). None
+        # disables the respective check entirely.
+        max_gross_exposure_pct: Optional[float] = None,
+        max_net_exposure_pct: Optional[float] = None,
         circuit_breaker: Optional[CircuitBreaker] = None,
         max_consecutive_errors: int = 3,
         journal: Optional[Journal] = None,
@@ -226,8 +229,8 @@ class RiskAgent:
         self.kelly_min_trades = kelly_min_trades
         self._trade_pnl_fractions: Deque[float] = deque(maxlen=kelly_lookback_trades)
         self.max_position_weight = max_position_weight
-        self.max_gross_exposure = max_gross_exposure
-        self.max_net_exposure = max_net_exposure
+        self.max_gross_exposure_pct = max_gross_exposure_pct
+        self.max_net_exposure_pct = max_net_exposure_pct
         self.max_correlated_exposure_pct = max_correlated_exposure_pct
         self.correlation_threshold = correlation_threshold
         self.correlation_lookback_bars = correlation_lookback_bars
@@ -492,11 +495,20 @@ class RiskAgent:
             # book (position value / total position value) - for a symbol's
             # very first position that's trivially ~100% no matter how small
             # the trade is, so it's only a meaningful check once there's
-            # something to be concentrated relative to. max_gross_exposure/
-            # max_net_exposure (absolute dollar caps) remain meaningful even
-            # for a first trade.
+            # something to be concentrated relative to. max_gross_exposure_pct/
+            # max_net_exposure_pct (a ratio of live capital) remain meaningful
+            # even for a first trade.
             position_weight_limit = self.max_position_weight if not positions_df.empty else None
-            active_limits = (position_weight_limit, self.max_gross_exposure, self.max_net_exposure)
+            # Computed fresh from THIS call's live capital, not cached at
+            # construction time - the whole point of switching from a fixed
+            # dollar cap to a ratio is that it tracks capital as it changes.
+            gross_exposure_limit = (
+                self.max_gross_exposure_pct * capital if self.max_gross_exposure_pct is not None else None
+            )
+            net_exposure_limit = (
+                self.max_net_exposure_pct * capital if self.max_net_exposure_pct is not None else None
+            )
+            active_limits = (position_weight_limit, gross_exposure_limit, net_exposure_limit)
             if any(limit is not None for limit in active_limits):
                 projected_positions = self._project_positions(
                     symbol, price, quantity_notional / price, positions_df
@@ -504,8 +516,8 @@ class RiskAgent:
                 report = check_portfolio_limits(
                     projected_positions,
                     max_position_weight=position_weight_limit,
-                    max_gross_exposure=self.max_gross_exposure,
-                    max_net_exposure=self.max_net_exposure,
+                    max_gross_exposure=gross_exposure_limit,
+                    max_net_exposure=net_exposure_limit,
                 )
                 if not report.is_within_limits:
                     reasons = "; ".join(

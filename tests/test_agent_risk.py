@@ -39,7 +39,9 @@ def test_evaluate_buy_rejects_after_daily_loss_limit_breached():
 
 
 def test_evaluate_buy_rejects_when_gross_exposure_limit_already_breached():
-    agent = RiskAgent(max_position_weight=None, max_gross_exposure=1000.0, max_net_exposure=None)
+    # capital=10000, pct=0.1 -> $1000 effective cap, same as the old
+    # fixed-$1000 test this replaces.
+    agent = RiskAgent(max_position_weight=None, max_gross_exposure_pct=0.1, max_net_exposure_pct=None)
     existing_positions = pd.DataFrame([{"symbol": "ETH/USDT", "quantity": 1.0, "price": 5000.0}])
 
     verdict = agent.evaluate_buy("BTC/USDT", price=100.0, capital=10000.0, positions_df=existing_positions)
@@ -52,14 +54,49 @@ def test_evaluate_buy_rejects_on_first_trade_when_proposed_size_alone_breaches_g
     """Regression test: the exposure check used to be skipped entirely when
     there were no existing positions, so a first trade could never be
     rejected on exposure grounds no matter how large."""
+    # capital=10000, pct=0.05 -> $500 effective cap, same as the old
+    # fixed-$500 test this replaces.
     agent = RiskAgent(
-        max_position_size=0.9, max_position_weight=None, max_gross_exposure=500.0, max_net_exposure=None
+        max_position_size=0.9, max_position_weight=None, max_gross_exposure_pct=0.05, max_net_exposure_pct=None
     )
 
     verdict = agent.evaluate_buy("BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions())
 
     assert verdict.approved is False
     assert "max_gross_exposure" in verdict.reason
+
+
+def test_gross_exposure_cap_tracks_live_capital_not_a_fixed_dollar_amount():
+    """Regression: max_gross_exposure/max_net_exposure used to be fixed
+    dollar caps tied to whatever capital happened to be true when the
+    config was written - silently wrong the moment real capital diverged
+    (a deposit made the cap too loose to matter; a withdrawal made it too
+    tight). A ratio of live capital must scale automatically with no
+    config change needed."""
+    # max_position_size capped low so the CANDIDATE trade alone stays well
+    # under the exposure cap, leaving headroom to isolate what this test is
+    # actually about: whether the $50 existing position measured against
+    # that cap moves with capital.
+    agent = RiskAgent(
+        max_position_size=0.05, max_position_weight=None, max_gross_exposure_pct=0.1, max_net_exposure_pct=None
+    )
+    existing_positions = pd.DataFrame([{"symbol": "ETH/USDT", "quantity": 1.0, "price": 50.0}])
+
+    # $50 held plus a <=$500 candidate (5% of $10,000), 10% of $10,000
+    # capital = $1000 cap - comfortably clear.
+    small_capital_verdict = agent.evaluate_buy(
+        "BTC/USDT", price=1.0, capital=10000.0, positions_df=existing_positions
+    )
+    # The SAME $50 held is trivially over a 10% cap of a much smaller
+    # $100 capital ($10 cap) - the identical portfolio must now be
+    # rejected, proving the effective cap moved with capital.
+    large_relative_exposure_verdict = agent.evaluate_buy(
+        "BTC/USDT", price=1.0, capital=100.0, positions_df=existing_positions
+    )
+
+    assert small_capital_verdict.approved is True
+    assert large_relative_exposure_verdict.approved is False
+    assert "max_gross_exposure" in large_relative_exposure_verdict.reason
 
 
 def test_evaluate_sell_always_approved():
@@ -127,8 +164,8 @@ def test_evaluate_buy_rejects_when_correlated_cluster_exposure_too_high():
     lockstep amount to one concentrated bet, not two independent ones."""
     agent = RiskAgent(
         max_position_size=0.5,
-        max_gross_exposure=None,
-        max_net_exposure=None,
+        max_gross_exposure_pct=None,
+        max_net_exposure_pct=None,
         max_position_weight=None,
         max_correlated_exposure_pct=0.3,
         correlation_threshold=0.6,
@@ -146,8 +183,8 @@ def test_evaluate_buy_rejects_when_correlated_cluster_exposure_too_high():
 def test_evaluate_buy_approves_when_correlated_cluster_exposure_within_cap():
     agent = RiskAgent(
         max_position_size=0.05,  # small trade size keeps combined exposure under the cap
-        max_gross_exposure=None,
-        max_net_exposure=None,
+        max_gross_exposure_pct=None,
+        max_net_exposure_pct=None,
         max_position_weight=None,
         max_correlated_exposure_pct=0.9,
         correlation_threshold=0.6,
@@ -165,7 +202,7 @@ def test_evaluate_buy_skips_correlation_check_when_not_configured():
     """Backward compatible: existing callers that never opt in (no
     max_correlated_exposure_pct, no price_history) keep the original
     behavior, even with a heavily-correlated existing book."""
-    agent = RiskAgent(max_position_size=0.5, max_gross_exposure=None, max_net_exposure=None, max_position_weight=None)
+    agent = RiskAgent(max_position_size=0.5, max_gross_exposure_pct=None, max_net_exposure_pct=None, max_position_weight=None)
     held = pd.DataFrame([{"symbol": "BTC/USDT", "quantity": 100.0, "price": 100.0}])
 
     verdict = agent.evaluate_buy("ETH/USDT", price=2000.0, capital=1000.0, positions_df=held)
@@ -176,8 +213,8 @@ def test_evaluate_buy_skips_correlation_check_when_not_configured():
 def test_evaluate_buy_ignores_uncorrelated_held_positions_for_the_cluster_cap():
     agent = RiskAgent(
         max_position_size=0.5,
-        max_gross_exposure=None,
-        max_net_exposure=None,
+        max_gross_exposure_pct=None,
+        max_net_exposure_pct=None,
         max_position_weight=None,
         max_correlated_exposure_pct=0.15,
         correlation_threshold=0.9,  # high bar an independent random walk won't clear
@@ -207,7 +244,7 @@ class TestCrisisCorrelationOverride:
         treated as fully correlated once the crisis override is active -
         that's the entire point of the override."""
         agent = RiskAgent(
-            max_position_size=0.5, max_gross_exposure=None, max_net_exposure=None, max_position_weight=None,
+            max_position_size=0.5, max_gross_exposure_pct=None, max_net_exposure_pct=None, max_position_weight=None,
             max_correlated_exposure_pct=0.15, correlation_threshold=0.9,
             crisis_drop_threshold=0.15,
         )
@@ -235,7 +272,7 @@ class TestCrisisCorrelationOverride:
         """Backward compatible: crisis_drop_threshold=None (the default)
         means the override never engages, regardless of _crisis_state."""
         agent = RiskAgent(
-            max_position_size=0.5, max_gross_exposure=None, max_net_exposure=None, max_position_weight=None,
+            max_position_size=0.5, max_gross_exposure_pct=None, max_net_exposure_pct=None, max_position_weight=None,
             max_correlated_exposure_pct=0.9, correlation_threshold=0.9,
         )
         held = pd.DataFrame([{"symbol": "BTC/USDT", "quantity": 1.0, "price": 100.0}])
@@ -251,7 +288,7 @@ class TestCrisisCorrelationOverride:
         frame, as the orchestrator would every cycle) actually triggers
         the override that evaluate_buy then enforces."""
         agent = RiskAgent(
-            max_position_size=0.5, max_gross_exposure=None, max_net_exposure=None, max_position_weight=None,
+            max_position_size=0.5, max_gross_exposure_pct=None, max_net_exposure_pct=None, max_position_weight=None,
             max_correlated_exposure_pct=0.15, correlation_threshold=0.9,
             crisis_drop_threshold=0.15, crisis_window_hours=1.0,
         )

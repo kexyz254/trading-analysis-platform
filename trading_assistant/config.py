@@ -63,14 +63,17 @@ class RiskConfig:
     # stops mattering at all - sizing "adapts" back to pure risk_per_trade%
     # with no further intervention.
     min_stake_usd: float = 1.0
-    # NOTE: portfolio.limits.check_portfolio_limits treats these as absolute
-    # quote-currency caps, not ratios - tune relative to your capital. These
-    # defaults are set to 80% of PortfolioConfig.initial_capital's default
-    # (10000.0) so the two dataclasses' defaults are consistent with each
-    # other even if a config file omits one section entirely; if you change
-    # portfolio.initial_capital, update these to match.
-    max_gross_exposure: float = 8000.0
-    max_net_exposure: float = 8000.0
+    # Ratios of LIVE capital (RiskAgent.evaluate_buy already has `capital`
+    # in scope - see its own docstring), not fixed dollar amounts. These
+    # used to be absolute quote-currency caps tied to a fixed
+    # PortfolioConfig.initial_capital, which meant they silently stopped
+    # tracking reality the moment live capital diverged from that number
+    # (too loose once real capital grew past it, too tight if it never
+    # got updated) - self-adjusting instead, so a deposit or withdrawal
+    # never requires revisiting this file. None disables the respective
+    # check entirely.
+    max_gross_exposure_pct: Optional[float] = 0.8
+    max_net_exposure_pct: Optional[float] = 0.8
     max_consecutive_errors: int = 3
     # Correlation-aware concentration cap: per-symbol caps alone can't see
     # that many "different" symbols may really be one leveraged bet on the
