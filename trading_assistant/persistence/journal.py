@@ -772,12 +772,34 @@ class Journal:
         records.reverse()
         return records
 
-    def recent_decisions(self, limit: int = 50, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+    def recent_decisions(
+        self, limit: int = 50, symbol: Optional[str] = None, exclude_paper: bool = False
+    ) -> List[Dict[str, Any]]:
+        """exclude_paper filters at the SQL level, not after fetching -
+        this matters a lot in practice. ChampionChallengerAgent logs one
+        paper-trading decision per candidate per symbol per cycle into
+        this SAME table; a real incident found paper volume had grown to
+        ~110x real volume (991 paper vs 9 real in the most recent 1000
+        rows, across an 8+ candidate pool and ~30 symbols), meaning a
+        real decision for an actively-trading symbol could be MUCH older
+        than paper noise from the last few cycles alone - fetch-a-batch-
+        then-filter-in-Python silently returns fewer and fewer real rows
+        as paper volume grows, no matter how large the batch is, and can
+        drop to "no real decisions visible at all" for many symbols with
+        no error or warning anywhere. Filtering with the paper flag
+        directly in the query has no such failure mode - it always
+        returns the most recent `limit` REAL rows, regardless of how
+        much paper volume exists between them."""
         query = "SELECT * FROM decisions"
+        conditions: List[str] = []
         params: List[Any] = []
         if symbol is not None:
-            query += " WHERE symbol = ?"
+            conditions.append("symbol = ?")
             params.append(symbol)
+        if exclude_paper:
+            conditions.append("json_extract(details, '$.paper') IS NOT 1")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
         with closing(self._connect()) as conn:

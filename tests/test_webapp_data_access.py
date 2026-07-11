@@ -48,6 +48,34 @@ def test_journal_snapshot_real_decisions_survive_heavy_paper_volume(tmp_path):
     assert all(not d["details"].get("paper") for d in snapshot["decisions"])
 
 
+def test_journal_snapshot_real_decisions_survive_paper_volume_exceeding_the_old_fixed_batch_size(tmp_path):
+    """Regression for a real incident: with an 8+ candidate tournament
+    pool across ~30 symbols running for hours, paper volume reached
+    ~110x real volume (991 paper vs 9 real in the most recent 1000 rows)
+    - a fetch-a-fixed-batch-then-filter-in-Python approach silently
+    returned almost no real decisions for actively-trading symbols, no
+    matter how large that fixed batch was, since paper volume alone can
+    always grow to exceed it. Real decisions must survive regardless of
+    how much paper volume was written AFTER them - proven here by writing
+    real decisions FIRST, then more paper noise than the old fixed
+    fetch-size (1000) alone, which would have pushed every real row out
+    of that window entirely under the old code."""
+    db_path = str(tmp_path / "journal.db")
+    journal = Journal(db_path=db_path)
+
+    for i in range(30):
+        journal.record_decision(symbol=f"SYM{i}/USDT", signal="HOLD", risk_approved=True, details={})
+    for _ in range(1100):  # more than the old fixed fetch size (1000)
+        journal.record_decision(
+            symbol="SYM0/USDT", signal="HOLD", risk_approved=True, details={"paper": True, "candidate": "macd"}
+        )
+
+    snapshot = da.journal_snapshot(db_path, False)
+
+    assert len(snapshot["decisions"]) == 30
+    assert all(not d["details"].get("paper") for d in snapshot["decisions"])
+
+
 def test_journal_snapshot_equity_uses_the_same_window_as_readiness_and_performance(tmp_path):
     """Regression: journal_snapshot's equity (feeds the dashboard's chart
     and 'PnL today'/'Return since first snapshot' stats) used to pass

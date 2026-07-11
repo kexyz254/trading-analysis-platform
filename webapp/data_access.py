@@ -356,15 +356,18 @@ def trade_audit_records(db_path: str, limit: int = 200) -> List[Dict[str, Any]]:
 def journal_snapshot(db_path: str, is_live: bool) -> Dict[str, Any]:
     def _fetch():
         journal = Journal(db_path=db_path)
-        # Paper trading logs 5 candidate decisions per symbol per cycle
-        # (ChampionChallengerAgent) into the SAME decisions table as the one
-        # real decision - at 22 symbols that's ~132 rows/cycle, enough to
-        # push real decisions out of a plain limit=200 window entirely.
-        # Fetch a much larger raw batch, filter to real-only (paper trading
-        # already has its own dedicated leaderboard/equity endpoints), then
-        # cap at 200 for display.
-        raw_decisions = journal.recent_decisions(limit=1000)
-        real_decisions = [d for d in raw_decisions if not (d.get("details") or {}).get("paper")][:200]
+        # Paper trading logs one candidate decision per candidate per
+        # symbol per cycle (ChampionChallengerAgent) into the SAME
+        # decisions table as the one real decision - a real incident
+        # found this had grown to ~110x real volume (991 paper vs 9 real
+        # in the most recent 1000 rows), meaning a fetch-1000-then-
+        # filter-in-Python approach silently returned almost no real
+        # decisions for most actively-trading symbols, with no error
+        # anywhere. Filtering at the SQL level (see
+        # Journal.recent_decisions' exclude_paper docstring) has no such
+        # failure mode - it always returns the most recent 200 REAL rows
+        # regardless of how much paper volume exists between them.
+        real_decisions = journal.recent_decisions(limit=200, exclude_paper=True)
         # Same is_live filter as _clean_real_equity_curve/_clean_trade_pnls
         # (see their docstrings) - a real testnet trade must never appear
         # in what's supposed to be "your real live trading history" once

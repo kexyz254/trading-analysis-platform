@@ -63,6 +63,38 @@ def test_recent_decisions_respects_limit_and_order(tmp_path):
     assert latest_two[1]["action"] == "cycle_3"
 
 
+def test_recent_decisions_exclude_paper_filters_at_the_sql_level(tmp_path):
+    """exclude_paper must filter BEFORE applying limit, not after - a
+    real incident found the opposite (fetch-then-filter-in-Python)
+    silently returns fewer and fewer real rows as paper volume grows,
+    with no error anywhere. Interleave real and paper rows so a
+    fetch-then-filter approach with a small limit would visibly miss
+    real rows this test asserts on."""
+    journal = _make_journal(tmp_path)
+    journal.record_decision(symbol="BTC/USDT", risk_approved=True, action="real_1", details={})
+    for _ in range(5):
+        journal.record_decision(
+            symbol="BTC/USDT", risk_approved=True, action="paper", details={"paper": True, "candidate": "macd"}
+        )
+    journal.record_decision(symbol="BTC/USDT", risk_approved=True, action="real_2", details={})
+
+    real_only = journal.recent_decisions(limit=2, exclude_paper=True)
+
+    assert len(real_only) == 2
+    assert {d["action"] for d in real_only} == {"real_1", "real_2"}
+    assert all(not d["details"].get("paper") for d in real_only)
+
+
+def test_recent_decisions_exclude_paper_treats_missing_or_null_details_as_real(tmp_path):
+    journal = _make_journal(tmp_path)
+    journal.record_decision(symbol="BTC/USDT", risk_approved=True, action="no_details_arg")
+    journal.record_decision(symbol="BTC/USDT", risk_approved=True, action="empty_details", details={})
+
+    real_only = journal.recent_decisions(exclude_paper=True)
+
+    assert len(real_only) == 2
+
+
 def test_record_retrain_event(tmp_path):
     journal = _make_journal(tmp_path)
     journal.record_retrain_event(
