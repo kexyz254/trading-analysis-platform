@@ -59,35 +59,31 @@ not the full 15-25 minute universe pass. `docker-compose.yml`'s
 `stop_grace_period: 60s` on the engine service gives that a real margin
 before Docker escalates to SIGKILL.
 
-## 3. Database backup automation
+## 3. Database backup automation - DONE on the current VPS deployment
 
-The script (`scripts/backup_database.py`) exists and is tested - online
-backup via SQLite's own backup API (safe under WAL mode, unlike a raw file
-copy), with rotation. What's missing is a scheduler to actually run it.
-
-**Recommended: a host-level cron entry** (not inside the Docker Compose
-stack - keeps backup/retention policy, which is an ops concern, separate
-from the trading containers, the same way this repo already keeps
-`scripts/emergency_flatten.py` and `scripts/backup_database.py`
-standalone rather than folding them into the engine process):
+The script (`scripts/backup_database.py`) - online backup via SQLite's own
+backup API (safe under WAL mode, unlike a raw file copy), with rotation -
+is scheduled via host-level cron, daily at 02:00 UTC, 14-day retention:
 
 ```cron
-# /etc/cron.d/trading-backup (as root, or crontab -e as the deploy user)
-0 2 * * * cd /path/to/trading-analysis-platform && PYTHONPATH=. python3 scripts/backup_database.py --keep 14 >> logs/backup.log 2>&1
+0 2 * * * cd /root/trading-analysis-platform && python3 scripts/backup_database.py --keep 14 >> logs/backup.log 2>&1
 ```
 
-Runs daily at 02:00, keeps the most recent 14 backups in `backups/`
-(gitignored). **This alone is not enough** - a backup on the same disk as
-what it's backing up doesn't survive a disk failure. Add an off-server
-sync as a second cron line once you've picked a destination (rclone to
-S3/B2/etc., or a simple `rsync` to a second machine):
+**Off-server sync is also done** - a local-disk-only backup doesn't
+survive a disk failure. Backups sync to Google Drive (via `rclone`, remote
+name `gdrive_backup`, folder `trading-platform-backups`) 15 minutes after
+the local backup runs:
 
 ```cron
-30 2 * * * rclone sync /path/to/trading-analysis-platform/backups remote:trading-backups
+15 2 * * * rclone sync /root/trading-analysis-platform/backups gdrive_backup:trading-platform-backups >> /root/trading-analysis-platform/logs/backup_sync.log 2>&1
 ```
 
-Deliberately not chosen for you - `scripts/backup_database.py` doesn't
-assume a specific remote target.
+**Known caveat**: this uses rclone's shared Google Drive `client_id`,
+which rclone's own docs say is being retired sometime in 2026 and will
+stop working when that happens. Not urgent, but before it breaks
+silently, create a dedicated client_id (see
+https://rclone.org/drive/#making-your-own-client-id) and update the
+`gdrive_backup` remote's config (`rclone config`) to use it.
 
 ## 4. External health monitoring
 

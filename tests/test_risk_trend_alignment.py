@@ -1,7 +1,16 @@
 import numpy as np
 import pandas as pd
 
-from trading_assistant.risk.trend_alignment import compute_trend_alignment, trend_alignment_blocks_buy
+from trading_assistant.risk.trend_alignment import (
+    adx_blocks_buy,
+    adx_confirms_trend,
+    compute_sma_slope_rising,
+    compute_trend_alignment,
+    sma_slope_blocks_buy,
+    trend_alignment_blocks_buy,
+    volume_blocks_buy,
+    volume_confirms_breakout,
+)
 
 
 def _close(values):
@@ -45,3 +54,63 @@ def test_none_with_insufficient_history_does_not_block():
 
 def test_none_when_close_series_is_none():
     assert compute_trend_alignment(None) is None
+
+
+# ---- SMA slope ----
+
+def test_slope_rising_when_sma_has_climbed_over_the_lookback():
+    closes = _close(np.linspace(80.0, 100.0, 60))
+    rising = compute_sma_slope_rising(closes, period=20, lookback=3)
+    assert rising is True
+    assert sma_slope_blocks_buy(rising) is False
+
+
+def test_slope_not_rising_on_a_flat_average():
+    closes = _close([100.0] * 60)
+    rising = compute_sma_slope_rising(closes, period=20, lookback=3)
+    assert rising is False
+    assert sma_slope_blocks_buy(rising) is True
+
+
+def test_slope_none_with_insufficient_history_does_not_block():
+    rising = compute_sma_slope_rising(_close([100.0] * 10), period=20, lookback=3)
+    assert rising is None
+    assert sma_slope_blocks_buy(rising) is False
+
+
+# ---- ADX confirmation ----
+
+def test_adx_confirms_when_above_threshold():
+    confirms = adx_confirms_trend(30.0, threshold=25.0)
+    assert confirms is True
+    assert adx_blocks_buy(confirms) is False
+
+
+def test_adx_does_not_confirm_below_threshold():
+    confirms = adx_confirms_trend(15.0, threshold=25.0)
+    assert confirms is False
+    assert adx_blocks_buy(confirms) is True
+
+
+def test_adx_none_does_not_block():
+    assert adx_confirms_trend(None) is None
+    assert adx_blocks_buy(None) is False
+
+
+# ---- Volume confirmation ----
+
+def test_volume_confirms_at_or_above_average():
+    confirms = volume_confirms_breakout(1.5, threshold=1.0)
+    assert confirms is True
+    assert volume_blocks_buy(confirms) is False
+
+
+def test_volume_does_not_confirm_below_average():
+    confirms = volume_confirms_breakout(0.5, threshold=1.0)
+    assert confirms is False
+    assert volume_blocks_buy(confirms) is True
+
+
+def test_volume_none_does_not_block():
+    assert volume_confirms_breakout(None) is None
+    assert volume_blocks_buy(None) is False

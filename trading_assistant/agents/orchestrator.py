@@ -29,7 +29,7 @@ from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.agents.symbol_discovery import SymbolDiscoveryAgent
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.portfolio.manager import PortfolioManager
-from trading_assistant.risk.partial_profit import should_take_partial_profit
+from trading_assistant.risk.partial_profit import should_take_partial_profit, unrealized_pnl_pct
 from trading_assistant.risk.trailing_stop import compute_trailing_stop_price, should_raise_stop, update_high_water_mark
 from trading_assistant.strategies.base import Signal
 
@@ -86,6 +86,30 @@ class Orchestrator:
         trailing_stop_pct: Optional[float] = None,
         partial_profit_pct: Optional[float] = None,
         partial_profit_sell_fraction: float = 0.5,
+        # Trailing stop ACTIVATION threshold: the stop only starts trailing
+        # once unrealized profit reaches this level (e.g. 0.02 = +2%) -
+        # without this, should_raise_stop's own "only move up" guard means
+        # trailing behavior emerges only incidentally, whenever the
+        # trailing-implied level happens to exceed the original stop,
+        # rather than at a deliberate, legible threshold. None means
+        # trailing is active from the moment a position opens (the
+        # previous, implicit behavior) - opt-in, backward compatible.
+        trailing_stop_activation_pct: Optional[float] = None,
+        # Trend exit: close a position if price falls below its own fast
+        # SMA (same period as RiskAgent's trend_alignment_fast_period, by
+        # convention - the entry structure this position was bought under
+        # has broken). None disables entirely.
+        trend_exit_sma_period: Optional[int] = None,
+        # How often the FAST position-monitoring loop runs (see
+        # _position_monitor_loop) - independent of, and much faster than,
+        # poll_interval_seconds (the main decision cycle's cadence, 5 min
+        # by default). Only touches symbols with an OPEN position, and
+        # only re-evaluates trailing-stop/partial-profit/trend-exit - never
+        # generates a new BUY signal or retrains anything. None disables
+        # it entirely (the position management checks then only run once
+        # per poll_interval_seconds, inside the main cycle, same as before
+        # this existed).
+        position_monitor_interval_seconds: Optional[float] = None,
         # Retention/pruning (opt-in via retention_interval_seconds, same
         # convention as retrain/discovery/tournament above): None disables
         # it entirely, matching every existing deployment's behavior before
@@ -126,6 +150,17 @@ class Orchestrator:
         self.trailing_stop_pct = trailing_stop_pct
         self.partial_profit_pct = partial_profit_pct
         self.partial_profit_sell_fraction = partial_profit_sell_fraction
+        self.trailing_stop_activation_pct = trailing_stop_activation_pct
+        self.trend_exit_sma_period = trend_exit_sma_period
+        self.position_monitor_interval_seconds = position_monitor_interval_seconds
+        # The most recent OHLCV frame per symbol from the main cycle's own
+        # market_monitor.poll() - the fast position-monitor loop reuses
+        # this for SMA-based checks (trend_exit) rather than fetching a
+        # fresh candle history every ~15-30s just to recompute an
+        # indicator that doesn't meaningfully change within that window;
+        # it still fetches a FRESH real-time price for the actual
+        # trigger comparison (see _monitor_open_positions).
+        self._last_snapshots: Dict[str, Any] = {}
         self.retention_days = retention_days
         self.retention_interval_seconds = retention_interval_seconds
         # Set by request_shutdown() (called from a SIGTERM/SIGINT handler
@@ -153,6 +188,13 @@ class Orchestrator:
             self.portfolio.sync_capital_with_exchange(self.execution.exchange, self.quote_currency)
 
         snapshots = self.market_monitor.poll()
+        # Cached for the fast position-monitor loop (see
+        # _monitor_open_positions) - a plain dict assignment is atomic
+        # enough not to need locking against that loop reading it from a
+        # different thread (asyncio.to_thread), and a slightly-stale
+        # snapshot is fine for an indicator (SMA) that doesn't move
+        # meaningfully within one poll_interval_seconds anyway.
+        self._last_snapshots = snapshots
 
         # A persistent market-data outage must be able to trip the breaker
         # just like execution failures do - otherwise the system silently
@@ -353,12 +395,17 @@ class Orchestrator:
         # Position management on whatever's still open, BEFORE evaluating a
         # new signal this cycle: retry a protective stop that failed to
         # place initially, raise the trailing stop if price has advanced,
-        # and take partial profit if the threshold has been crossed. All
-        # three are no-ops when a position isn't open or the relevant
-        # feature isn't configured (opt-in).
+        # take partial profit if the threshold has been crossed, and exit
+        # entirely if the entry trend structure has broken. All four are
+        # no-ops when a position isn't open or the relevant feature isn't
+        # configured (opt-in). Trend exit is checked LAST and returns early
+        # if it fired - nothing else this cycle should act on a symbol that
+        # was just fully closed.
         self._retry_missing_protective_stop(symbol)
         self._update_trailing_stop(symbol, price)
         self._maybe_take_partial_profit(symbol, price)
+        if self._maybe_trend_exit(symbol, price, snapshot.frame["close"]):
+            return
 
         # Live prediction must see the exact same engineered features the model
         # was trained on (see agents.features) - passing raw OHLCV here would
@@ -763,6 +810,17 @@ class Orchestrator:
         if not stop_order_id:
             return
 
+        # Activation threshold: don't start trailing at all until unrealized
+        # profit clears this level - without it, trailing only emerged
+        # incidentally whenever the trailing-implied level happened to
+        # exceed the original stop (an accident of should_raise_stop's
+        # "only move up" guard), not at a deliberate, legible threshold.
+        # None (disabled) preserves that original "always trail" behavior.
+        if self.trailing_stop_activation_pct is not None:
+            entry_price = position.get("price")
+            if entry_price and unrealized_pnl_pct(entry_price, current_price) < self.trailing_stop_activation_pct:
+                return
+
         high_water_mark = update_high_water_mark(position.get("high_water_mark"), current_price)
         position["high_water_mark"] = high_water_mark
         candidate_stop_price = compute_trailing_stop_price(high_water_mark, self.trailing_stop_pct)
@@ -902,6 +960,64 @@ class Orchestrator:
                 quantity=result.quantity,
                 details={"pnl": result.pnl},
             )
+
+    def _maybe_trend_exit(self, symbol: str, current_price: float, close_series: Optional[pd.Series]) -> bool:
+        """Close an open real position if price has fallen below its own
+        fast SMA (same period as RiskAgent's trend_alignment_fast_period,
+        by convention) - the entry structure (price > SMA_fast > SMA_slow)
+        this position was bought under has broken, independent of whatever
+        the model/champion strategy's own signal says this cycle. A full
+        close, not a partial one (see _maybe_take_partial_profit for that) -
+        this is specifically the "get out, the trend that justified being
+        in this trade is gone" rule, not a profit-locking mechanism.
+
+        Returns True if this closed the position - the caller (both the
+        main cycle and the fast position-monitor loop) should treat the
+        symbol as done for this pass, the same convention
+        _reconcile_triggered_stop already uses."""
+        if self.trend_exit_sma_period is None or self.execution.exchange is None or close_series is None:
+            return False
+        position = self.portfolio.portfolio.positions.get(symbol)
+        if position is None:
+            return False
+        if len(close_series) < self.trend_exit_sma_period:
+            return False
+        sma = close_series.rolling(self.trend_exit_sma_period).mean().iloc[-1]
+        if pd.isna(sma) or current_price >= sma:
+            return False
+
+        capital_before_trade = self.portfolio.capital
+        result = self.execution.execute(symbol, Signal.SELL, current_price, 0.0)
+        if result.action in _ATTEMPTED_ACTIONS:
+            self.risk.circuit_breaker.record_result(symbol, success=result.action != "error")
+        self._maybe_alert_unprotected_position(symbol, result)
+        if result.action != "closed_position":
+            return False
+
+        self.portfolio.record_trade(symbol, "sell", current_price, result.quantity, pnl=result.pnl)
+        self._record_execution_quality(symbol, "sell", current_price, result)
+        if result.pnl is not None:
+            self.risk.record_realized_pnl(result.pnl, capital_before_trade)
+        exit_reason = f"trend exit: price closed below SMA{self.trend_exit_sma_period} (was {sma:.6g})"
+        self._record_trade_audit_close(symbol, current_price, result.quantity, exit_reason=exit_reason, realized_pnl=result.pnl)
+
+        logger.info(
+            "trend exit - position closed",
+            extra={"context": {"symbol": symbol, "price": current_price, "sma": sma, "pnl": result.pnl}},
+        )
+        if self.journal is not None:
+            self.journal.record_decision(
+                symbol=symbol,
+                signal="TREND_EXIT",
+                confidence=None,
+                risk_approved=True,
+                risk_reason=exit_reason,
+                action="closed_position",
+                price=current_price,
+                quantity=result.quantity,
+                details={"pnl": result.pnl, "sma": sma},
+            )
+        return True
 
     def _reconstruct_entry_context(self, symbol: str) -> Optional[Dict[str, Any]]:
         """The immutable trade_audit trail is written once, at close time,
@@ -1067,6 +1183,10 @@ class Orchestrator:
         if self.journal is not None and self.retention_interval_seconds:
             retention_task = asyncio.create_task(self._retention_loop())
 
+        position_monitor_task: Optional[asyncio.Task] = None
+        if self.position_monitor_interval_seconds:
+            position_monitor_task = asyncio.create_task(self._position_monitor_loop())
+
         if self.journal is not None:
             # Written once, right before the live loop begins - this is what
             # the dashboard's uptime is measured from (see trading_assistant/
@@ -1120,6 +1240,8 @@ class Orchestrator:
                 tournament_task.cancel()
             if retention_task is not None:
                 retention_task.cancel()
+            if position_monitor_task is not None:
+                position_monitor_task.cancel()
 
     async def _run_supervised(self, loop_name: str, fn) -> None:
         """Shields one iteration of a background loop's body with the same
@@ -1194,6 +1316,50 @@ class Orchestrator:
         total = sum(deleted.values())
         if total:
             logger.info(f"retention pruning deleted {total} old rows: {deleted}")
+
+    async def _position_monitor_loop(self) -> None:
+        """Runs on a much faster cadence than the main decision cycle
+        (poll_interval_seconds, 5 min by default) - trailing stop,
+        partial profit, and trend exit all react to real intrabar price
+        moves, not just once every full cycle. Real exchange-side
+        protective stops already react instantly regardless of this
+        loop's cadence (they're resting orders Binance itself fills) -
+        this closes the gap for everything only checked FROM this
+        process. Touches ONLY symbols with an open position, via a cheap
+        ticker fetch each - never generates a new BUY signal, never
+        retrains anything, never re-runs symbol discovery."""
+        while True:
+            await asyncio.sleep(self.position_monitor_interval_seconds)
+            await self._run_supervised("position_monitor", lambda: asyncio.to_thread(self._monitor_open_positions))
+
+    def _monitor_open_positions(self) -> None:
+        if self.execution.exchange is None:
+            return
+        open_symbols = list(self.portfolio.portfolio.positions.keys())
+        for symbol in open_symbols:
+            if self._shutdown_event.is_set():
+                return
+            try:
+                ticker = self.execution.exchange.fetch_ticker(symbol)
+                current_price = float(ticker["last"])
+            except Exception:  # noqa: BLE001 - one symbol's ticker failure must not skip the rest
+                logger.exception("position monitor: could not fetch ticker", extra={"context": {"symbol": symbol}})
+                continue
+
+            if self._reconcile_triggered_stop(symbol, current_price):
+                continue
+            self._update_trailing_stop(symbol, current_price)
+            self._maybe_take_partial_profit(symbol, current_price)
+            # Reuses the main cycle's own last-fetched OHLCV frame (cached
+            # in run_cycle) for the SMA - a 1h-timeframe indicator doesn't
+            # meaningfully change within this loop's ~15-30s cadence, so
+            # recomputing it from a fresh candle fetch every tick would
+            # cost an extra API call for no real signal benefit. The PRICE
+            # side of the check is still fully real-time (the ticker
+            # fetched just above).
+            snapshot = self._last_snapshots.get(symbol)
+            close_series = snapshot.frame["close"] if snapshot is not None else None
+            self._maybe_trend_exit(symbol, current_price, close_series)
 
     async def _run_tournament_all_symbols(self) -> None:
         for symbol in self.market_monitor.symbols:

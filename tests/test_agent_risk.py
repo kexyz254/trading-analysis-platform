@@ -540,6 +540,117 @@ def test_evaluate_buy_skips_trend_alignment_check_when_not_configured():
     assert verdict.approved is True
 
 
+def test_evaluate_buy_rejects_when_sma_slope_is_not_rising():
+    """A climb, then a decline, then a partial bounce: price > SMA20 >
+    SMA50 can be satisfied by the bounce alone while SMA20's own trailing
+    window is still dominated by the preceding decline - "aligned" alone
+    doesn't mean the average itself has turned back upward yet."""
+    agent = RiskAgent(
+        max_position_size=0.5, trend_alignment_fast_period=20, trend_alignment_slow_period=50,
+        require_sma_slope_rising=True,
+    )
+    climb = list(np.linspace(80.0, 110.0, 40))
+    decline = list(np.linspace(110.0, 100.0, 20))
+    bounce = [106.0, 108.0]
+    closes = climb + decline + bounce
+    frame = _trending_ohlcv(n=len(closes))
+    frame["close"] = closes
+    frame["open"] = closes
+    frame["high"] = [c + 1 for c in closes]
+    frame["low"] = [c - 1 for c in closes]
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=108.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=frame
+    )
+
+    assert verdict.approved is False
+    assert "sloping upward" in verdict.reason
+
+
+def test_evaluate_buy_approves_with_slope_check_on_a_genuine_uptrend():
+    agent = RiskAgent(
+        max_position_size=0.5, trend_alignment_fast_period=20, trend_alignment_slow_period=50,
+        require_sma_slope_rising=True,
+    )
+    rising = _trending_ohlcv(n=100, start=100.0, step=1.0)
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=rising
+    )
+
+    assert verdict.approved is True
+
+
+def test_evaluate_buy_rejects_below_adx_threshold_on_a_choppy_market():
+    agent = RiskAgent(max_position_size=0.5, adx_threshold=25.0)
+    # An oscillating, directionless series - low ADX (no sustained trend).
+    n = 100
+    closes = [100.0 + (5.0 if i % 2 == 0 else -5.0) for i in range(n)]
+    frame = _trending_ohlcv(n=n)
+    frame["close"] = closes
+    frame["open"] = closes
+    frame["high"] = [c + 1 for c in closes]
+    frame["low"] = [c - 1 for c in closes]
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=frame
+    )
+
+    assert verdict.approved is False
+    assert "ADX confirmation" in verdict.reason
+
+
+def test_evaluate_buy_approves_above_adx_threshold_on_a_strong_trend():
+    agent = RiskAgent(max_position_size=0.5, adx_threshold=25.0)
+    strong_trend = _trending_ohlcv(n=100, start=50.0, step=2.0)
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=strong_trend
+    )
+
+    assert verdict.approved is True
+
+
+def test_evaluate_buy_rejects_below_volume_confirmation_threshold():
+    agent = RiskAgent(max_position_size=0.5, volume_confirmation_threshold=1.0)
+    frame = _trending_ohlcv(n=100, start=100.0, step=1.0)
+    frame["volume"] = [100.0] * 99 + [10.0]  # last bar's volume far below its own rolling average
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=frame
+    )
+
+    assert verdict.approved is False
+    assert "volume confirmation" in verdict.reason
+
+
+def test_evaluate_buy_approves_above_volume_confirmation_threshold():
+    agent = RiskAgent(max_position_size=0.5, volume_confirmation_threshold=1.0)
+    frame = _trending_ohlcv(n=100, start=100.0, step=1.0)
+    frame["volume"] = [100.0] * 100  # flat volume, exactly at its own average
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=frame
+    )
+
+    assert verdict.approved is True
+
+
+def test_evaluate_buy_skips_new_confluence_checks_when_not_configured():
+    """Backward compatible: none of the three new checks (slope/ADX/volume)
+    fire unless explicitly opted into."""
+    agent = RiskAgent(max_position_size=0.5)
+    choppy = _trending_ohlcv(n=100)
+    choppy["close"] = [100.0 + (5.0 if i % 2 == 0 else -5.0) for i in range(100)]
+    choppy["volume"] = [100.0] * 99 + [1.0]
+
+    verdict = agent.evaluate_buy(
+        "BTC/USDT", price=100.0, capital=10000.0, positions_df=_empty_positions(), ohlcv_frame=choppy
+    )
+
+    assert verdict.approved is True
+
+
 def test_circuit_breaker_tracks_consecutive_errors_per_symbol():
     """Regression test: a shared counter would let one symbol's success
     reset another symbol's failures, so a permanently broken symbol could

@@ -1661,6 +1661,106 @@ class TestTrailingStop:
         assert portfolio_manager.positions["BTC/USDT"]["stop_price"] == pytest.approx(121.0 * 0.95)
 
 
+class TestTrailingStopActivationThreshold:
+    def test_does_not_trail_before_profit_clears_the_activation_threshold(self, tmp_path):
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, _ = _build_position_orchestrator(
+            tmp_path, exchange, trailing_stop_pct=0.05, trailing_stop_activation_pct=0.10,
+        )
+        # Entry at 100.0 (see _build_position_orchestrator) - +5% profit is
+        # below the 10% activation threshold, so trailing should not
+        # engage at all, even though 105*(1-0.05)=99.75 is technically
+        # below current price and would otherwise be a valid candidate.
+        orchestrator._update_trailing_stop("BTC/USDT", current_price=105.0)
+
+        assert portfolio_manager.positions["BTC/USDT"]["stop_price"] == 98.0  # unchanged
+        assert exchange.edit_calls == []
+
+    def test_trails_once_profit_clears_the_activation_threshold(self, tmp_path):
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, _ = _build_position_orchestrator(
+            tmp_path, exchange, trailing_stop_pct=0.05, trailing_stop_activation_pct=0.10,
+        )
+
+        orchestrator._update_trailing_stop("BTC/USDT", current_price=115.0)  # +15%, clears the 10% threshold
+
+        assert portfolio_manager.positions["BTC/USDT"]["stop_price"] == pytest.approx(115.0 * 0.95)
+
+    def test_none_preserves_the_original_always_trail_behavior(self, tmp_path):
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, _ = _build_position_orchestrator(
+            tmp_path, exchange, trailing_stop_pct=0.05,  # trailing_stop_activation_pct defaults to None
+        )
+
+        orchestrator._update_trailing_stop("BTC/USDT", current_price=105.0)
+
+        assert portfolio_manager.positions["BTC/USDT"]["stop_price"] == pytest.approx(105.0 * 0.95)
+
+
+class TestTrendExit:
+    def test_closes_the_position_when_price_falls_below_the_sma(self, tmp_path):
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, journal = _build_position_orchestrator(
+            tmp_path, exchange, trend_exit_sma_period=5,
+        )
+        close_series = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])  # sma5 of last 5 = 103.0
+
+        closed = orchestrator._maybe_trend_exit("BTC/USDT", current_price=100.0, close_series=close_series)
+
+        assert closed is True
+        assert "BTC/USDT" not in portfolio_manager.positions
+        assert exchange.sell_orders == [("BTC/USDT", 10.0)]
+        decisions = journal.recent_decisions(symbol="BTC/USDT", limit=5)
+        assert any(d["signal"] == "TREND_EXIT" for d in decisions)
+
+    def test_does_not_exit_when_price_is_still_above_the_sma(self, tmp_path):
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, _ = _build_position_orchestrator(
+            tmp_path, exchange, trend_exit_sma_period=5,
+        )
+        close_series = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
+
+        closed = orchestrator._maybe_trend_exit("BTC/USDT", current_price=110.0, close_series=close_series)
+
+        assert closed is False
+        assert "BTC/USDT" in portfolio_manager.positions
+        assert exchange.sell_orders == []
+
+    def test_disabled_by_default(self, tmp_path):
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, _ = _build_position_orchestrator(tmp_path, exchange)  # trend_exit_sma_period=None
+        close_series = pd.Series([105.0, 104.0, 103.0, 102.0, 101.0, 100.0])
+
+        closed = orchestrator._maybe_trend_exit("BTC/USDT", current_price=50.0, close_series=close_series)
+
+        assert closed is False
+        assert exchange.sell_orders == []
+
+    def test_no_open_position_is_a_noop(self, tmp_path):
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, _ = _build_position_orchestrator(
+            tmp_path, exchange, trend_exit_sma_period=5,
+        )
+        portfolio_manager.positions.clear()
+        close_series = pd.Series([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
+
+        closed = orchestrator._maybe_trend_exit("BTC/USDT", current_price=50.0, close_series=close_series)
+
+        assert closed is False
+
+    def test_none_close_series_is_a_noop(self, tmp_path):
+        """The fast position-monitor loop may not have a cached snapshot
+        yet for a symbol (e.g. right after warm start) - must not crash."""
+        exchange = StopCapableExchange()
+        orchestrator, portfolio_manager, _ = _build_position_orchestrator(
+            tmp_path, exchange, trend_exit_sma_period=5,
+        )
+
+        closed = orchestrator._maybe_trend_exit("BTC/USDT", current_price=50.0, close_series=None)
+
+        assert closed is False
+
+
 class TestPartialProfitTaking:
     def test_sells_the_configured_fraction_once_threshold_crossed(self, tmp_path):
         exchange = StopCapableExchange()

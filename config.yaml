@@ -47,6 +47,14 @@ symbol_discovery:
 # any change here should be re-validated with a fresh retrain before going live.
 timeframe: 1h
 poll_interval_seconds: 300
+# The FAST position-monitor loop's cadence - independent of, and much
+# faster than, poll_interval_seconds above. Only touches symbols with an
+# open position (trailing stop / partial profit / trend exit checks via a
+# cheap ticker fetch each), never generates a new signal or retrains
+# anything. Real exchange-side protective stops already react instantly
+# regardless of this cadence; this closes the gap for everything only
+# checked FROM this process.
+position_monitor_interval_seconds: 20
 
 risk:
   max_position_size: 0.1
@@ -106,6 +114,18 @@ risk:
   # the check entirely.
   trend_alignment_fast_period: 20
   trend_alignment_slow_period: 50
+  # Require SMA20 to itself be sloping upward, not just sit above SMA50 -
+  # "aligned" alone can be true right after a sharp spike that hasn't yet
+  # turned the average's own direction back up.
+  require_sma_slope_rising: true
+  # ADX trend-strength confirmation - below this, a same-timeframe SMA
+  # alignment could just be noise in a ranging market. 25 is the standard
+  # technical-analysis "genuinely trending" bar.
+  adx_threshold: 25.0
+  # Volume confirmation: current bar's volume must be at least this
+  # multiple of its own 20-bar rolling average - a "breakout" on thin
+  # volume is far more likely to fail than one with real participation.
+  volume_confirmation_threshold: 1.0
   # Pre-trade execution quality: a market order fired during a moment of
   # abnormally wide bid-ask spread can fill far worse than the price
   # risk-sizing assumed - checked immediately before every real buy order.
@@ -123,6 +143,17 @@ risk:
   # whole life. Deliberately wider than stop_loss_pct (0.01) - a trailing
   # stop this tight would ratchet on ordinary intra-trend noise.
   trailing_stop_pct: 0.03
+  # Trailing stop ACTIVATION threshold: don't start trailing at all until
+  # unrealized profit clears this level - a deliberate, legible "lock in
+  # gains once we're actually up meaningfully" trigger, rather than
+  # trailing emerging only incidentally whenever the trailing-implied
+  # level happens to exceed the original stop.
+  trailing_stop_activation_pct: 0.02
+  # Trend exit: close a position entirely if price closes below its own
+  # SMA20 (same period as trend_alignment_fast_period) - the entry
+  # structure this position was bought under has broken, independent of
+  # whatever the model/champion strategy's own signal says this cycle.
+  trend_exit_sma_period: 20
   # Partial profit-taking: once a position is up 5%, sell half of it once
   # (locking in something concrete) and let the remainder keep riding,
   # protected by whatever stop (including the trailing one above) it

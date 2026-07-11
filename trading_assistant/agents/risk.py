@@ -21,27 +21,48 @@ from trading_assistant.risk.correlation import compute_returns, correlated_expos
 from trading_assistant.risk.crisis import CrisisState
 from trading_assistant.risk.timeframe_confluence import higher_timeframe_blocks_buy, higher_timeframe_regime
 from trading_assistant.risk.atr_stop import DEFAULT_MAX_STOP_PCT, DEFAULT_MIN_STOP_PCT, compute_atr_stop_pct
-from trading_assistant.risk.trend_alignment import compute_trend_alignment, trend_alignment_blocks_buy
+from trading_assistant.risk.trend_alignment import (
+    adx_blocks_buy,
+    adx_confirms_trend,
+    compute_sma_slope_rising,
+    compute_trend_alignment,
+    sma_slope_blocks_buy,
+    trend_alignment_blocks_buy,
+    volume_blocks_buy,
+    volume_confirms_breakout,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def latest_atr_pct(ohlcv_frame: Optional[pd.DataFrame]) -> Optional[float]:
-    """The most recent bar's atr_pct (ATR as a fraction of price) from raw
-    OHLCV - computed via the same build_features every other consumer
-    uses so it can never drift out of sync with a separately-maintained
-    indicator implementation. Lives here (not in risk.atr_stop, which
-    stays a pure function module with no agents.features dependency) to
-    avoid a circular import: agents.__init__ eagerly imports Orchestrator
-    -> RiskAgent, so a risk.* submodule importing agents.features would
-    create risk -> agents -> risk."""
+def latest_feature_row(ohlcv_frame: Optional[pd.DataFrame]) -> Optional[pd.Series]:
+    """The most recent bar's full engineered feature row from raw OHLCV -
+    computed via the same build_features every other consumer uses, so
+    every derived check (ATR-based stop distance, ADX trend strength,
+    relative volume) reads from ONE indicator computation per evaluate_buy
+    call, not a separately re-run one per check. Lives here (not in a
+    risk.* submodule, which stays free of an agents.features dependency)
+    to avoid a circular import: agents.__init__ eagerly imports
+    Orchestrator -> RiskAgent, so a risk.* submodule importing
+    agents.features would create risk -> agents -> risk."""
     if ohlcv_frame is None or ohlcv_frame.empty:
         return None
     featured = build_features(ohlcv_frame)
-    if featured.empty or "atr_pct" not in featured.columns:
+    if featured.empty:
         return None
-    value = featured["atr_pct"].iloc[-1]
+    return featured.iloc[-1]
+
+
+def _feature_value(row: Optional[pd.Series], column: str) -> Optional[float]:
+    if row is None or column not in row:
+        return None
+    value = row[column]
     return None if pd.isna(value) else float(value)
+
+
+def latest_atr_pct(ohlcv_frame: Optional[pd.DataFrame]) -> Optional[float]:
+    """The most recent bar's atr_pct (ATR as a fraction of price)."""
+    return _feature_value(latest_feature_row(ohlcv_frame), "atr_pct")
 
 
 @dataclass
@@ -173,9 +194,27 @@ class RiskAgent:
         # that leave this None, get exactly the old behavior).
         trend_alignment_fast_period: Optional[int] = None,
         trend_alignment_slow_period: int = 50,
+        # Require the fast SMA to itself be sloping upward, not just sit
+        # above the slow SMA - see trend_alignment.compute_sma_slope_rising's
+        # docstring. Only applies when trend_alignment_fast_period is also
+        # set (opt-in on top of an opt-in check).
+        require_sma_slope_rising: bool = False,
+        # ADX trend-strength confirmation (0-100 scale, the standard
+        # technical-analysis convention - 25 is the common "genuinely
+        # trending, not just drifting" bar). None disables entirely
+        # (opt-in, backward compatible).
+        adx_threshold: Optional[float] = None,
+        # Volume confirmation: current bar's volume must be at least this
+        # multiple of its own rolling average (1.0 = at least the recent
+        # average) to confirm real participation behind a move. None
+        # disables entirely (opt-in, backward compatible).
+        volume_confirmation_threshold: Optional[float] = None,
     ):
         self.trend_alignment_fast_period = trend_alignment_fast_period
         self.trend_alignment_slow_period = trend_alignment_slow_period
+        self.require_sma_slope_rising = require_sma_slope_rising
+        self.adx_threshold = adx_threshold
+        self.volume_confirmation_threshold = volume_confirmation_threshold
         self.risk_manager = risk_manager or RiskManager(
             max_position_size=max_position_size, max_daily_loss=max_daily_loss
         )
@@ -295,6 +334,12 @@ class RiskAgent:
                     ),
                 )
 
+        # Computed once (if ohlcv_frame is available) and reused by every
+        # feature-derived check below (ADX, volume, ATR stop distance) -
+        # build_features runs the full indicator suite, so this avoids
+        # re-running it once per check for the same symbol/cycle.
+        feature_row = latest_feature_row(ohlcv_frame) if ohlcv_frame is not None else None
+
         if self.trend_alignment_fast_period is not None and ohlcv_frame is not None:
             alignment = compute_trend_alignment(
                 ohlcv_frame["close"], self.trend_alignment_fast_period, self.trend_alignment_slow_period
@@ -314,6 +359,42 @@ class RiskAgent:
                     ),
                 )
 
+            if self.require_sma_slope_rising:
+                is_rising = compute_sma_slope_rising(ohlcv_frame["close"], self.trend_alignment_fast_period)
+                if sma_slope_blocks_buy(is_rising):
+                    return RiskVerdict(
+                        approved=False,
+                        reason=(
+                            f"trend alignment: {symbol}'s SMA{self.trend_alignment_fast_period} is above "
+                            f"SMA{self.trend_alignment_slow_period} but not itself sloping upward - too "
+                            "weak a claim to a real uptrend yet"
+                        ),
+                    )
+
+        if self.adx_threshold is not None:
+            adx_value = _feature_value(feature_row, "adx_strength")
+            adx_value_pct = adx_value * 100.0 if adx_value is not None else None
+            if adx_blocks_buy(adx_confirms_trend(adx_value_pct, self.adx_threshold)):
+                return RiskVerdict(
+                    approved=False,
+                    reason=(
+                        f"ADX confirmation: {symbol}'s ADX ({adx_value_pct:.1f}) is below the "
+                        f"{self.adx_threshold:.0f} trend-strength threshold - too weak/ranging a trend to buy into"
+                    ),
+                )
+
+        if self.volume_confirmation_threshold is not None:
+            relative_volume = _feature_value(feature_row, "relative_volume")
+            if volume_blocks_buy(volume_confirms_breakout(relative_volume, self.volume_confirmation_threshold)):
+                return RiskVerdict(
+                    approved=False,
+                    reason=(
+                        f"volume confirmation: {symbol}'s current volume ({relative_volume:.2f}x its own "
+                        f"20-bar average) is below the {self.volume_confirmation_threshold:.1f}x threshold - "
+                        "not enough real participation behind this move"
+                    ),
+                )
+
         # A stop distance calibrated to THIS symbol's own recent volatility,
         # not one fixed value borrowed across every symbol regardless of
         # how much it typically moves - see volatility_sizing's docstring.
@@ -323,7 +404,7 @@ class RiskAgent:
         effective_stop_pct = self.stop_loss_pct
         if self.atr_multiplier is not None and ohlcv_frame is not None:
             effective_stop_pct = compute_atr_stop_pct(
-                latest_atr_pct(ohlcv_frame),
+                _feature_value(feature_row, "atr_pct"),
                 fallback_stop_pct=self.stop_loss_pct,
                 atr_multiplier=self.atr_multiplier,
                 min_stop_pct=self.min_atr_stop_pct,

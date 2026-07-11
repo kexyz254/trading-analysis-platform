@@ -108,6 +108,20 @@ class RiskConfig:
     # regime). None disables the check entirely.
     trend_alignment_fast_period: Optional[int] = 20
     trend_alignment_slow_period: int = 50
+    # Require the fast SMA to itself be sloping upward, not just sit above
+    # the slow SMA - "aligned" alone can be true right after a sharp spike
+    # that hasn't yet turned the average's own direction. Only applies
+    # when trend_alignment_fast_period is also set.
+    require_sma_slope_rising: bool = True
+    # ADX trend-strength confirmation (0-100 scale, standard convention -
+    # 25 is the common "genuinely trending, not just drifting" bar). None
+    # disables the check entirely.
+    adx_threshold: Optional[float] = 25.0
+    # Volume confirmation: current bar's volume must be at least this
+    # multiple of its own rolling average (1.0 = at least the recent
+    # average) to confirm real participation behind a move. None disables
+    # the check entirely.
+    volume_confirmation_threshold: Optional[float] = 1.0
     # Pre-trade execution quality: a market order fired during a moment of
     # abnormally wide bid-ask spread can fill far worse than the price
     # risk-sizing assumed. 0.01 = reject a real buy if the current spread
@@ -125,6 +139,16 @@ class RiskConfig:
     # life. None disables it - a real position keeps its original fixed
     # stop_loss_pct-based stop forever, exactly as before this existed.
     trailing_stop_pct: Optional[float] = None
+    # Trailing stop ACTIVATION threshold: the stop only starts trailing
+    # once unrealized profit reaches this level (e.g. 0.02 = +2%) - below
+    # it, the position keeps its original fixed stop untouched. None means
+    # trailing is active from the moment a position opens.
+    trailing_stop_activation_pct: Optional[float] = None
+    # Trend exit: close a position entirely if price falls below its own
+    # fast SMA (same period as trend_alignment_fast_period, by convention -
+    # the entry structure this position was bought under has broken).
+    # None disables it entirely.
+    trend_exit_sma_period: Optional[int] = None
     # Partial profit-taking: once a position's unrealized gain crosses this
     # threshold, sell partial_profit_sell_fraction of it once (locking in
     # something concrete) and keep the remainder open, protected by
@@ -436,6 +460,14 @@ class Config:
     # re-validate with a fresh retrain before changing.
     timeframe: str = "1h"
     poll_interval_seconds: float = 300.0
+    # The FAST position-monitor loop's cadence (see Orchestrator.
+    # _position_monitor_loop) - independent of, and much faster than,
+    # poll_interval_seconds above. Only touches symbols with an open
+    # position (trailing stop / partial profit / trend exit), never
+    # generates a new signal or retrains anything. None disables it
+    # entirely (those checks then only run once per poll_interval_seconds,
+    # inside the main cycle, same as before this existed).
+    position_monitor_interval_seconds: Optional[float] = 20.0
     risk: RiskConfig = field(default_factory=RiskConfig)
     market_data: MarketDataConfig = field(default_factory=MarketDataConfig)
     portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
@@ -498,6 +530,9 @@ def load_config(path: Optional[os.PathLike] = None, *, env_file: Optional[os.Pat
         symbols=data.get("symbols") or defaults.symbols,
         timeframe=data.get("timeframe", defaults.timeframe),
         poll_interval_seconds=data.get("poll_interval_seconds", defaults.poll_interval_seconds),
+        position_monitor_interval_seconds=data.get(
+            "position_monitor_interval_seconds", defaults.position_monitor_interval_seconds
+        ),
         risk=RiskConfig(**data.get("risk", {})),
         market_data=MarketDataConfig(**data.get("market_data", {})),
         portfolio=PortfolioConfig(**data.get("portfolio", {})),
