@@ -2414,3 +2414,77 @@ class TestLivePaperFallback:
         # is_live=False just means nothing here ever touches fetch_balance.
         assert "BTC/USDT" in portfolio_manager.positions
         assert orchestrator._live_paper_portfolio is None
+
+
+class TestExternalCapitalFlowEndToEnd:
+    """Regression coverage for a real incident: moving funds into Binance's
+    Predictions feature (unrelated manual account activity) dropped free
+    balance by 99.6% in one cycle, and the drawdown circuit breaker
+    correctly-by-its-own-logic treated that as a catastrophic trading loss
+    and halted all new trading. End-to-end proof that an external flow no
+    longer trips the breaker, while a genuine trading-driven drawdown
+    still does."""
+
+    def _build(self, tmp_path, free_balance, **risk_kwargs):
+        from trading_assistant.agents.alerting import AlertManager
+
+        portfolio_manager = PortfolioManager(initial_capital=10000.0)
+        journal = Journal(db_path=str(tmp_path / "journal.db"))
+        alert_manager = AlertManager(journal=journal)
+
+        class LiveExchange(DummyExchange):
+            def __init__(self):
+                super().__init__()
+                self.free_balance = free_balance
+
+            def fetch_balance(self):
+                return {"USDT": {"free": self.free_balance, "total": self.free_balance}}
+
+        exchange = LiveExchange()
+        prediction_agent = PredictionAgent(model_dir=tmp_path, auto_load=False)
+        prediction_agent.set_model("BTC/USDT", DummyClassifier(up_probability=0.5), feature_columns=["close"])
+
+        orchestrator = Orchestrator(
+            market_monitor=MarketMonitorAgent(symbols=["BTC/USDT"], feeds={"BTC/USDT": FakeFeed([100.0] * 20)}),
+            prediction=prediction_agent,
+            risk=RiskAgent(max_position_size=0.5, max_drawdown_pct=0.30, alert_manager=alert_manager, **risk_kwargs),
+            execution=ExecutionAgent(portfolio=portfolio_manager, exchange=exchange),
+            portfolio=PortfolioAgent(portfolio=portfolio_manager, journal=journal),
+            journal=journal,
+            alert_manager=alert_manager,
+            is_live=True,
+            min_live_capital_usd=0.0,
+        )
+        return orchestrator, portfolio_manager, journal, exchange
+
+    def test_a_manual_withdrawal_does_not_trip_the_circuit_breaker(self, tmp_path):
+        orchestrator, portfolio_manager, journal, exchange = self._build(tmp_path, free_balance=2.91)
+        orchestrator.run_cycle()  # establishes the baseline/peak at 2.91
+        assert orchestrator.risk.circuit_breaker.tripped is False
+
+        exchange.free_balance = 0.01  # the Predictions bet - zero trading activity
+        orchestrator.run_cycle()
+
+        assert orchestrator.risk.circuit_breaker.tripped is False
+        assert portfolio_manager.capital == 0.01  # capital sync itself is unaffected - still real
+
+        alerts = journal.recent_alerts()
+        assert any(a["category"] == "external_capital_flow" for a in alerts)
+
+    def test_a_genuine_trading_driven_drawdown_still_trips_the_circuit_breaker(self, tmp_path):
+        orchestrator, portfolio_manager, journal, exchange = self._build(tmp_path, free_balance=100.0)
+        orchestrator.run_cycle()  # establishes the baseline/peak at 100.0
+        assert orchestrator.risk.circuit_breaker.tripped is False
+
+        # A real, large trading loss: the balance drop is fully explained by
+        # a recorded sell, not an unexplained external gap.
+        portfolio_manager.open_position("BTC/USDT", price=100.0, quantity=0.5)
+        orchestrator.portfolio.record_trade("BTC/USDT", "buy", price=100.0, quantity=0.5)
+        portfolio_manager.close_position("BTC/USDT", price=40.0, quantity=0.5)
+        orchestrator.portfolio.record_trade("BTC/USDT", "sell", price=40.0, quantity=0.5, pnl=-30.0)
+        exchange.free_balance = 70.0  # 100 - 50 + 20 = 70, matches trading exactly
+
+        orchestrator.run_cycle()
+
+        assert orchestrator.risk.circuit_breaker.tripped is True
+        assert "max drawdown breached" in orchestrator.risk.circuit_breaker.trip_reason

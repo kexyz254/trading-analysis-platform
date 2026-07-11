@@ -28,6 +28,7 @@ from trading_assistant.agents.risk import RiskAgent
 from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.agents.symbol_discovery import SymbolDiscoveryAgent
 from trading_assistant.persistence.journal import Journal
+from trading_assistant.portfolio.cash_flows import CashFlowClassification
 from trading_assistant.portfolio.manager import PortfolioManager
 from trading_assistant.risk.partial_profit import should_take_partial_profit, unrealized_pnl_pct
 from trading_assistant.risk.trailing_stop import compute_trailing_stop_price, should_raise_stop, update_high_water_mark
@@ -185,7 +186,8 @@ class Orchestrator:
             # automatically" would actually require a manual restart every
             # time. Cheap: one fetch_balance call per cycle (every
             # poll_interval_seconds, default 300s), negligible API load.
-            self.portfolio.sync_capital_with_exchange(self.execution.exchange, self.quote_currency)
+            classification = self.portfolio.sync_capital_with_exchange(self.execution.exchange, self.quote_currency)
+            self._maybe_handle_external_capital_flow(classification)
 
         snapshots = self.market_monitor.poll()
         # Cached for the fast position-monitor loop (see
@@ -877,6 +879,34 @@ class Orchestrator:
                     },
                     dedupe_key=f"trailing_stop_raise_failed:{symbol}",
                 )
+
+    def _maybe_handle_external_capital_flow(self, classification: Optional[CashFlowClassification]) -> None:
+        """A real incident this exists for: moving funds into Binance's
+        Predictions feature dropped free balance by 99.6% with zero trading
+        activity, and the drawdown circuit breaker correctly (by its own
+        logic) treated that as a catastrophic loss and halted trading. It
+        had no way to know the difference between "the bot lost the money"
+        and "the account holder moved it elsewhere" - this closes that gap.
+        Rebases RiskAgent's drawdown peak by the unexplained amount (so a
+        withdrawal/deposit/transfer never registers as trading performance)
+        and raises a low-severity alert so it's never silently invisible."""
+        if classification is None or not classification.is_external_flow:
+            return
+        self.risk.adjust_peak_equity_for_external_flow(classification.unexplained_delta)
+        if self.alert_manager is not None:
+            direction = "increased" if classification.unexplained_delta > 0 else "decreased"
+            self.alert_manager.raise_alert(
+                "external_capital_flow",
+                "info",
+                f"Free balance {direction} by ${abs(classification.unexplained_delta):.2f} in a way this "
+                f"bot's own trading doesn't explain - likely a deposit, withdrawal, or transfer to another "
+                f"product. Adjusted the drawdown baseline so this isn't mistaken for a trading loss.",
+                context={
+                    "unexplained_delta": classification.unexplained_delta,
+                    "raw_delta": classification.raw_delta,
+                    "trading_delta": classification.trading_delta,
+                },
+            )
 
     def _maybe_alert_unprotected_position(self, symbol: str, result: ExecutionResult) -> None:
         """A real, currently-open position with no resting protective stop

@@ -278,6 +278,19 @@ class RiskAgent:
                 f"(peak equity {self._peak_equity:.2f}, current {current_equity:.2f})"
             )
 
+    def adjust_peak_equity_for_external_flow(self, unexplained_delta: float) -> None:
+        """Shift peak equity by the same amount as a detected external
+        capital flow (deposit, withdrawal, transfer to another product -
+        see PortfolioAgent.sync_capital_with_exchange / portfolio.cash_flows)
+        so it never registers as trading performance. A withdrawal on its
+        own must never look like a drawdown; a deposit must never create an
+        artificial cushion above the real trading peak. A no-op before any
+        peak has been established yet (a flow before the first
+        update_equity call is naturally absorbed into that first
+        baseline)."""
+        if self._peak_equity is not None:
+            self._peak_equity += unexplained_delta
+
     def update_crisis_state(self, crisis_symbol_frame: Optional[pd.DataFrame], now: Optional[datetime] = None) -> None:
         """Feed the orchestrator's freshly-fetched OHLCV frame for
         crisis_symbol every cycle (not just when a BUY is being evaluated)

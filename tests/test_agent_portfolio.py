@@ -512,3 +512,88 @@ class TestSyncCapitalWithExchange:
         agent.sync_capital_with_exchange(BrokenExchange(), "USDT")  # must not raise
 
         assert portfolio.capital == 1000.0  # unchanged, not silently zeroed by a failed fetch
+
+
+class TestSyncCapitalCashFlowClassification:
+    """Regression coverage for a real incident: moving funds into Binance's
+    Predictions feature dropped free balance by 99.6% with zero trading
+    activity, and the drawdown circuit breaker (correctly, by its own
+    logic) treated that as a catastrophic loss. sync_capital_with_exchange
+    now classifies each balance change against this agent's own recorded
+    trades so the caller (Orchestrator) can tell the two apart."""
+
+    def test_first_sync_is_never_classified_as_an_external_flow(self, tmp_path):
+        # The first sync compares against initial_capital, a deliberately
+        # fictional starting number on a fresh live account - not a real
+        # prior balance, so it must never be flagged as an external flow.
+        portfolio = PortfolioManager(initial_capital=1000.0)
+        agent = PortfolioAgent(portfolio=portfolio, journal=Journal(db_path=str(tmp_path / "journal.db")))
+        exchange = FakeCapitalExchange({"USDT": {"free": 2.91}})
+
+        result = agent.sync_capital_with_exchange(exchange, "USDT")
+
+        assert result is None
+
+    def test_a_balance_drop_with_no_trading_is_classified_as_external(self, tmp_path):
+        portfolio = PortfolioManager(initial_capital=2.91)
+        agent = PortfolioAgent(portfolio=portfolio, journal=Journal(db_path=str(tmp_path / "journal.db")))
+        exchange = FakeCapitalExchange({"USDT": {"free": 2.91}})
+        agent.sync_capital_with_exchange(exchange, "USDT")  # baseline sync
+
+        exchange = FakeCapitalExchange({"USDT": {"free": 0.01}})  # Predictions bet placed, no trading
+        result = agent.sync_capital_with_exchange(exchange, "USDT")
+
+        assert result is not None
+        assert result.is_external_flow is True
+        assert result.unexplained_delta == pytest.approx(-2.90, abs=0.001)
+
+    def test_a_balance_drop_fully_explained_by_a_recorded_sell_is_not_external(self, tmp_path):
+        portfolio = PortfolioManager(initial_capital=100.0)
+        agent = PortfolioAgent(portfolio=portfolio, journal=Journal(db_path=str(tmp_path / "journal.db")))
+        exchange = FakeCapitalExchange({"USDT": {"free": 100.0}})
+        agent.sync_capital_with_exchange(exchange, "USDT")  # baseline sync
+
+        agent.record_trade("BTC/USDT", "buy", price=100.0, quantity=0.5)  # spends 50
+        agent.record_trade("BTC/USDT", "sell", price=40.0, quantity=0.5, pnl=-30.0)  # returns 20, real loss
+
+        exchange = FakeCapitalExchange({"USDT": {"free": 70.0}})  # 100 - 50 + 20 = 70, matches trading exactly
+        result = agent.sync_capital_with_exchange(exchange, "USDT")
+
+        assert result is not None
+        assert result.is_external_flow is False
+
+    def test_a_deposit_with_no_trading_is_classified_as_external(self, tmp_path):
+        portfolio = PortfolioManager(initial_capital=10.0)
+        agent = PortfolioAgent(portfolio=portfolio, journal=Journal(db_path=str(tmp_path / "journal.db")))
+        exchange = FakeCapitalExchange({"USDT": {"free": 10.0}})
+        agent.sync_capital_with_exchange(exchange, "USDT")  # baseline sync
+
+        exchange = FakeCapitalExchange({"USDT": {"free": 110.0}})  # deposited 100
+        result = agent.sync_capital_with_exchange(exchange, "USDT")
+
+        assert result is not None
+        assert result.is_external_flow is True
+        assert result.unexplained_delta == pytest.approx(100.0)
+
+    def test_a_failed_sync_does_not_advance_the_trading_cash_flow_baseline(self, tmp_path):
+        # If the exchange call fails, the classification baseline must stay
+        # exactly where it was - otherwise a trade recorded during the
+        # outage window would be silently dropped from the next real
+        # comparison once the exchange call starts succeeding again.
+        portfolio = PortfolioManager(initial_capital=100.0)
+        agent = PortfolioAgent(portfolio=portfolio, journal=Journal(db_path=str(tmp_path / "journal.db")))
+        agent.sync_capital_with_exchange(FakeCapitalExchange({"USDT": {"free": 100.0}}), "USDT")
+
+        agent.record_trade("BTC/USDT", "buy", price=100.0, quantity=0.5)  # spends 50, during an outage below
+
+        class BrokenExchange:
+            def fetch_balance(self):
+                raise ConnectionError("simulated outage")
+
+        assert agent.sync_capital_with_exchange(BrokenExchange(), "USDT") is None
+
+        exchange = FakeCapitalExchange({"USDT": {"free": 50.0}})  # 100 - 50, matches the buy exactly
+        result = agent.sync_capital_with_exchange(exchange, "USDT")
+
+        assert result is not None
+        assert result.is_external_flow is False

@@ -9,6 +9,7 @@ import pandas as pd
 
 from trading_assistant.agents.protective_stops import find_open_protective_stop, place_protective_stop
 from trading_assistant.persistence.journal import Journal
+from trading_assistant.portfolio.cash_flows import CashFlowClassification, classify_balance_change
 from trading_assistant.portfolio.exposure import PortfolioExposureSummary, summarize_portfolio_exposure
 from trading_assistant.portfolio.manager import PortfolioManager
 
@@ -35,6 +36,20 @@ class PortfolioAgent:
         # lifetime as Orchestrator.is_live - this process is either live
         # or it isn't, for its whole run.
         self.is_live = is_live
+        # Cumulative net cash effect of every buy/sell THIS agent has
+        # recorded (negative for buys, positive for sell proceeds) - the
+        # running baseline sync_capital_with_exchange compares each new
+        # exchange balance against, to tell "the bot traded" apart from
+        # "the account holder moved money" (deposit, withdrawal, a transfer
+        # to another product entirely). See portfolio.cash_flows.
+        self._net_trading_cash_flow: float = 0.0
+        self._net_trading_cash_flow_at_last_sync: float = 0.0
+        # The first sync compares the real exchange balance against
+        # initial_capital - a deliberately fictional starting number on a
+        # fresh live account (see sync_capital_with_exchange's docstring),
+        # not a real prior balance. That first correction is never a real
+        # external flow and must not be classified as one.
+        self._has_synced_before: bool = False
 
     @property
     def capital(self) -> float:
@@ -77,6 +92,14 @@ class PortfolioAgent:
     def record_trade(
         self, symbol: str, side: str, price: float, quantity: float, pnl: Optional[float] = None
     ) -> None:
+        # Tracked regardless of whether journal is configured - this is the
+        # baseline sync_capital_with_exchange needs to tell trading-driven
+        # capital changes apart from external ones, not just an audit record.
+        notional = price * quantity
+        if side == "buy":
+            self._net_trading_cash_flow -= notional
+        elif side == "sell":
+            self._net_trading_cash_flow += notional
         if self.journal is not None:
             self.journal.record_trade(
                 symbol=symbol, side=side, price=price, quantity=quantity, pnl=pnl, is_live=self.is_live
@@ -264,9 +287,20 @@ class PortfolioAgent:
             if symbol in self.portfolio.positions and self.portfolio.positions[symbol].get("stop_order_id") is None
         ]
 
-    def sync_capital_with_exchange(self, exchange: Any, quote_currency: str = "USDT") -> None:
+    def sync_capital_with_exchange(
+        self, exchange: Any, quote_currency: str = "USDT"
+    ) -> Optional[CashFlowClassification]:
         """LIVE MODE ONLY - set tradable cash capital from the exchange's
         own real FREE balance, never from config's initial_capital.
+
+        Returns a CashFlowClassification comparing the raw balance change
+        since the last sync against the cash effect of this agent's OWN
+        recorded trades in that window - the caller (Orchestrator) uses
+        `is_external_flow` to alert and to rebase RiskAgent's drawdown peak,
+        so a withdrawal/deposit/transfer to another product never registers
+        as trading performance. None when the exchange call itself failed
+        (nothing to classify) or on the very first sync (no prior capital
+        to compare against).
 
         reconcile_with_exchange (above) already rebuilds real POSITIONS
         (crypto currently held) from the exchange, replacing whatever the
@@ -299,19 +333,35 @@ class PortfolioAgent:
             balance = exchange.fetch_balance()
         except Exception:  # noqa: BLE001 - a failed sync must not crash startup; capital stays whatever it was
             logger.exception("could not fetch exchange balance for live capital sync - capital left unchanged")
-            return
+            return None
         free_balance = float((balance.get(quote_currency) or {}).get("free", 0.0) or 0.0)
+        previous_capital = self.portfolio.capital
         logger.info(
             "live capital synced from real exchange balance",
             extra={
                 "context": {
                     "quote_currency": quote_currency,
                     "free_balance": free_balance,
-                    "previous_capital": self.portfolio.capital,
+                    "previous_capital": previous_capital,
                 }
             },
         )
+
+        classification: Optional[CashFlowClassification] = None
+        if self._has_synced_before:
+            trading_delta = self._net_trading_cash_flow - self._net_trading_cash_flow_at_last_sync
+            classification = classify_balance_change(previous_capital, free_balance, trading_delta)
+            if classification.is_external_flow:
+                logger.warning(
+                    "detected a balance change not explained by this bot's own trading - "
+                    "likely a deposit, withdrawal, or transfer to another product",
+                    extra={"context": {"unexplained_delta": classification.unexplained_delta}},
+                )
+        self._net_trading_cash_flow_at_last_sync = self._net_trading_cash_flow
+        self._has_synced_before = True
+
         self.portfolio.capital = free_balance
+        return classification
 
     def _reverify_after_failed_stop(self, exchange: Any, symbol: str, base_asset: str) -> None:
         try:

@@ -191,6 +191,21 @@ _CATEGORY_INFO: Dict[str, Dict[str, Any]] = {
         "action_detail": "No, not urgent - worth a look out of curiosity, not something that needs a quick "
         "response.",
     },
+    "external_capital_flow": {
+        "icon": "\U0001F4B8",
+        "title": "Account Balance Changed Outside Of Trading",
+        "what_happened": "The real account's balance changed by an amount this system's own buying and "
+        "selling doesn't explain - most likely a deposit, a withdrawal, or money moved to a different "
+        "product on the exchange (like a prediction market or staking).",
+        "why_it_matters": "Without tracking this separately, that kind of balance change could be "
+        "mistaken for a trading loss (or gain) and skew performance tracking, or even pause trading "
+        "over something that was never actually a loss.",
+        "system_action": "Adjusted the internal baseline so this change is not counted as trading "
+        "performance, and kept trading going normally.",
+        "needs_action": False,
+        "action_detail": "No action needed - this is purely informational, so you know why the balance "
+        "moved.",
+    },
     "dust_position_unsellable": {
         "icon": "\U0001FA99",
         "title": "A Position Is Too Small To Sell",

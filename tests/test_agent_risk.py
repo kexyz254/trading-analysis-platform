@@ -455,6 +455,56 @@ class TestMaxDrawdownCircuitBreakerTrip:
         assert agent.circuit_breaker.tripped is True
 
 
+class TestAdjustPeakEquityForExternalFlow:
+    """Regression coverage for a real incident: moving funds into Binance's
+    Predictions feature (a manual, non-trading account action) dropped free
+    balance by 99.6%, and the drawdown circuit breaker correctly-by-its-own-
+    logic treated that as a catastrophic loss. This is the other half of the
+    fix (see PortfolioAgent.sync_capital_with_exchange / cash_flows.py for
+    the detection side) - rebasing the peak so a detected external flow
+    never registers as trading performance."""
+
+    def test_a_withdrawal_rebases_the_peak_so_it_does_not_look_like_a_drawdown(self):
+        agent = RiskAgent(max_drawdown_pct=0.30)
+        agent.update_equity(2.91)
+
+        agent.adjust_peak_equity_for_external_flow(-2.90)  # the Predictions bet
+        agent.update_equity(0.01)  # the real, now-lower balance
+
+        assert agent.circuit_breaker.tripped is False
+
+    def test_a_deposit_rebases_the_peak_up_so_it_is_not_read_as_a_windfall(self):
+        agent = RiskAgent(max_drawdown_pct=0.30)
+        agent.update_equity(100.0)
+
+        agent.adjust_peak_equity_for_external_flow(400.0)  # a deposit
+        agent.update_equity(500.0)
+
+        assert agent._peak_equity == pytest.approx(500.0)
+        assert agent.circuit_breaker.tripped is False
+
+    def test_a_real_trading_loss_after_a_withdrawal_still_trips_correctly(self):
+        # The withdrawal itself must not trip anything, but real trading
+        # losses afterward - measured against the REBASED peak - still must.
+        agent = RiskAgent(max_drawdown_pct=0.30)
+        agent.update_equity(100.0)
+
+        agent.adjust_peak_equity_for_external_flow(-50.0)  # withdrew half
+        agent.update_equity(50.0)
+        assert agent.circuit_breaker.tripped is False
+
+        agent.update_equity(30.0)  # a genuine 40% loss on what's left
+
+        assert agent.circuit_breaker.tripped is True
+
+    def test_is_a_no_op_before_any_peak_has_been_established(self):
+        agent = RiskAgent(max_drawdown_pct=0.30)
+
+        agent.adjust_peak_equity_for_external_flow(-100.0)  # must not raise
+
+        assert agent._peak_equity is None
+
+
 def _trending_ohlcv(n=200, start=100.0, step=1.0):
     closes = [start + i * step for i in range(n)]
     return pd.DataFrame(
