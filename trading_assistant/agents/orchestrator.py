@@ -274,6 +274,7 @@ class Orchestrator:
             result = self.execution.execute(symbol, Signal.SELL, price, 0.0)
             results[symbol] = result
             self._maybe_alert_unprotected_position(symbol, result)
+            self._maybe_alert_unsellable_dust_position(symbol, result)
             if result.action == "closed_position":
                 self.portfolio.record_trade(symbol, "sell", price, result.quantity, pnl=result.pnl)
                 self._record_execution_quality(symbol, "sell", price, result)
@@ -352,6 +353,7 @@ class Orchestrator:
             result = self.execution.execute(symbol, Signal.SELL, price, 0.0)
             results[symbol] = result
             self._maybe_alert_unprotected_position(symbol, result)
+            self._maybe_alert_unsellable_dust_position(symbol, result)
             if result.action == "closed_position":
                 self.portfolio.record_trade(symbol, "sell", price, result.quantity, pnl=result.pnl)
                 self._record_execution_quality(symbol, "sell", price, result)
@@ -540,6 +542,7 @@ class Orchestrator:
                         realized_pnl=pnl,
                     )
                 self._maybe_alert_unprotected_position(symbol, result)
+                self._maybe_alert_unsellable_dust_position(symbol, result)
 
         if self.journal is not None:
             self.journal.record_decision(
@@ -897,6 +900,29 @@ class Orchestrator:
                 dedupe_key=f"position_unprotected:{symbol}",
             )
 
+    def _maybe_alert_unsellable_dust_position(self, symbol: str, result: ExecutionResult) -> None:
+        """ExecutionAgent._sell/_execute_partial_sell refuse to even attempt
+        a sell once a held position's value has drifted below the
+        exchange's real minimum order value (see execution.py) - the only
+        way either method returns "no_action" for a symbol that's actually
+        held. Silent is the right default for the circuit breaker (this
+        must never count as an error), but a human should still hear about
+        it once: the position is real, stuck, and won't close on its own
+        until it grows back above the minimum or someone handles it
+        manually."""
+        # result.error is None for the OTHER "no_action" case (nothing was
+        # actually held to sell) - only the dust-skip path sets it.
+        if result.action != "no_action" or result.error is None:
+            return
+        if self.alert_manager is not None:
+            self.alert_manager.raise_alert(
+                "dust_position_unsellable",
+                "warning",
+                f"{symbol}: {result.error}",
+                context={"symbol": symbol},
+                dedupe_key=f"dust_position_unsellable:{symbol}",
+            )
+
     def _maybe_take_partial_profit(self, symbol: str, current_price: float) -> None:
         """Sell a configured fraction of an open real position once it's
         moved favorably enough (see trading_assistant.risk.partial_profit),
@@ -925,6 +951,7 @@ class Orchestrator:
         capital_before_trade = self.portfolio.capital
         result = self.execution.execute_partial_sell(symbol, sell_quantity, current_price)
         self._maybe_alert_unprotected_position(symbol, result)
+        self._maybe_alert_unsellable_dust_position(symbol, result)
         if result.action != "partial_close":
             return
 
@@ -991,6 +1018,7 @@ class Orchestrator:
         if result.action in _ATTEMPTED_ACTIONS:
             self.risk.circuit_breaker.record_result(symbol, success=result.action != "error")
         self._maybe_alert_unprotected_position(symbol, result)
+        self._maybe_alert_unsellable_dust_position(symbol, result)
         if result.action != "closed_position":
             return False
 

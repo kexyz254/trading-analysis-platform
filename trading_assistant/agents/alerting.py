@@ -191,6 +191,21 @@ _CATEGORY_INFO: Dict[str, Dict[str, Any]] = {
         "action_detail": "No, not urgent - worth a look out of curiosity, not something that needs a quick "
         "response.",
     },
+    "dust_position_unsellable": {
+        "icon": "\U0001FA99",
+        "title": "A Position Is Too Small To Sell",
+        "what_happened": "A coin the system holds has shrunk in dollar value below the exchange's own "
+        "minimum order size for that coin, so a normal sell order for it would simply be rejected.",
+        "why_it_matters": "This position can't be closed through a normal sell right now, and usually "
+        "can't be protected with a stop-loss either at this size - it's a small, stuck remainder rather "
+        "than an active risk to the rest of your capital.",
+        "system_action": "Stopped trying to sell this position automatically, so it doesn't keep failing "
+        "and repeatedly pausing all trading. Left the position exactly as it is.",
+        "needs_action": True,
+        "action_detail": "Not urgent given the small size involved. If you want it resolved, you'd need "
+        "to either add a bit more of this coin to clear the exchange's minimum order size, or handle it "
+        "manually on the exchange.",
+    },
     "challenger_underperforming": {
         "icon": "\U0001F4C9",
         "title": "A Backup Strategy Is Falling Behind",

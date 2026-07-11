@@ -2152,6 +2152,130 @@ class TestUnprotectedPositionAlert:
         assert journal.recent_alerts() == []
 
 
+class TestUnsellableDustPositionAlert:
+    """Regression coverage for a real incident: a held BTC/USDT position
+    shrank below Binance's minimum order value, the sell was attempted
+    anyway, was rejected 3 times in a row, and the circuit breaker tripped
+    on a sizing mismatch instead of a genuine execution failure. See
+    ExecutionAgent._sell's identical defensive check - this covers the
+    alert half of the fix."""
+
+    def test_raises_a_warning_alert_when_a_sell_is_skipped_for_being_below_minimum(self, tmp_path):
+        from trading_assistant.agents.alerting import AlertManager
+        from trading_assistant.agents.execution import ExecutionResult
+
+        exchange = StopCapableExchange()
+        journal = Journal(db_path=str(tmp_path / "journal.db"))
+        alert_manager = AlertManager(journal=journal)
+        orchestrator, _, _ = _build_position_orchestrator(tmp_path, exchange, alert_manager=alert_manager)
+        result = ExecutionResult(
+            symbol="BTC/USDT", action="no_action", price=100.0, quantity=0.0,
+            error="position value $4.41 below exchange minimum $5.00 - cannot be sold at this size",
+        )
+
+        orchestrator._maybe_alert_unsellable_dust_position("BTC/USDT", result)
+
+        alerts = journal.recent_alerts()
+        assert len(alerts) == 1
+        assert alerts[0]["category"] == "dust_position_unsellable"
+        assert alerts[0]["severity"] == "warning"
+        assert "BTC/USDT" in alerts[0]["message"]
+
+    def test_does_not_alert_on_the_unrelated_nothing_to_sell_no_action(self, tmp_path):
+        # "no_action" also covers the ordinary case of nothing actually
+        # held to sell - that path leaves result.error as None, and must
+        # never be confused with a genuine dust-skip.
+        from trading_assistant.agents.alerting import AlertManager
+        from trading_assistant.agents.execution import ExecutionResult
+
+        exchange = StopCapableExchange()
+        journal = Journal(db_path=str(tmp_path / "journal.db"))
+        alert_manager = AlertManager(journal=journal)
+        orchestrator, _, _ = _build_position_orchestrator(tmp_path, exchange, alert_manager=alert_manager)
+        result = ExecutionResult(symbol="BTC/USDT", action="no_action", price=100.0, quantity=0.0)
+
+        orchestrator._maybe_alert_unsellable_dust_position("BTC/USDT", result)
+
+        assert journal.recent_alerts() == []
+
+    def test_does_not_alert_on_a_successful_close(self, tmp_path):
+        from trading_assistant.agents.alerting import AlertManager
+        from trading_assistant.agents.execution import ExecutionResult
+
+        exchange = StopCapableExchange()
+        journal = Journal(db_path=str(tmp_path / "journal.db"))
+        alert_manager = AlertManager(journal=journal)
+        orchestrator, _, _ = _build_position_orchestrator(tmp_path, exchange, alert_manager=alert_manager)
+        result = ExecutionResult(symbol="BTC/USDT", action="closed_position", price=100.0, quantity=10.0, pnl=5.0)
+
+        orchestrator._maybe_alert_unsellable_dust_position("BTC/USDT", result)
+
+        assert journal.recent_alerts() == []
+
+    def test_does_nothing_without_an_alert_manager_configured(self, tmp_path):
+        from trading_assistant.agents.execution import ExecutionResult
+
+        exchange = StopCapableExchange()
+        orchestrator, _, _ = _build_position_orchestrator(tmp_path, exchange)  # no alert_manager
+        result = ExecutionResult(
+            symbol="BTC/USDT", action="no_action", price=100.0, quantity=0.0,
+            error="position value $4.41 below exchange minimum $5.00 - cannot be sold at this size",
+        )
+
+        orchestrator._maybe_alert_unsellable_dust_position("BTC/USDT", result)  # must not raise
+
+
+class DustExchange(DummyExchange):
+    """Reports a real exchange minimum order value, like MinNotionalExchange
+    in test_agent_execution.py, and raises loudly if a sell is ever
+    actually attempted - proving the fix stops the attempt before it
+    reaches the exchange, not just handles the rejection gracefully."""
+
+    def __init__(self, min_notional):
+        super().__init__()
+        self._min_notional = min_notional
+
+    def market(self, symbol):
+        return {"limits": {"cost": {"min": self._min_notional}}}
+
+    def create_market_sell_order(self, symbol, quantity):
+        raise AssertionError("a sell must never be attempted for a position below the exchange minimum")
+
+
+def test_repeated_sell_signals_on_a_dust_position_no_longer_trip_the_circuit_breaker(tmp_path):
+    """End-to-end reproduction of the real incident: a held position worth
+    less than the exchange's minimum order value gets a SELL signal 3
+    cycles in a row. Before the fix, each cycle's sell attempt was rejected
+    by the exchange and counted as a circuit-breaker error, tripping it on
+    the 3rd cycle. After the fix, the sell is never attempted at all, so it
+    never counts against the circuit breaker's error budget."""
+    closes = [100.0] * 20
+    portfolio_manager = PortfolioManager(initial_capital=10000.0)
+    journal = Journal(db_path=str(tmp_path / "journal.db"))
+    exchange = DustExchange(min_notional=5.0)
+
+    prediction_agent = PredictionAgent(model_dir=tmp_path, auto_load=False)
+    prediction_agent.set_model("BTC/USDT", DummyClassifier(up_probability=0.1), feature_columns=["close"])
+
+    risk_agent = RiskAgent(max_position_size=0.5, max_consecutive_errors=3)
+    orchestrator = Orchestrator(
+        market_monitor=MarketMonitorAgent(symbols=["BTC/USDT"], feeds={"BTC/USDT": FakeFeed(closes)}),
+        prediction=prediction_agent,
+        risk=risk_agent,
+        execution=ExecutionAgent(portfolio=portfolio_manager, exchange=exchange, max_retries=1, backoff_seconds=0),
+        portfolio=PortfolioAgent(portfolio=portfolio_manager, journal=journal),
+        journal=journal,
+    )
+    # A dust-sized position: 0.00007 * 100.0 = $0.007, well below the $5 minimum.
+    portfolio_manager.open_position("BTC/USDT", price=100.0, quantity=0.00007)
+
+    for _ in range(3):
+        orchestrator.run_cycle()
+
+    assert risk_agent.circuit_breaker.tripped is False
+    assert "BTC/USDT" in portfolio_manager.positions  # never closed - still stuck, as expected
+
+
 class TestLivePaperFallback:
     """Regression coverage for the exact scenario a real user hit: real
     Binance API keys set, mode: live, but $0 (or below Binance's practical

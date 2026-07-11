@@ -300,9 +300,43 @@ class ExecutionAgent:
             logger.error("buy order failed", extra={"context": {"symbol": symbol, "error": str(exc)}})
             return ExecutionResult(symbol=symbol, action="error", price=price, quantity=0.0, error=str(exc))
 
+    def _min_notional(self, symbol: str) -> Optional[float]:
+        if self.exchange is None:
+            return None
+        try:
+            market = self.exchange.market(symbol)
+            return market.get("limits", {}).get("cost", {}).get("min")
+        except Exception:  # noqa: BLE001 - a failed lookup must not block a trade
+            return None
+
     def _sell(self, symbol: str, price: float) -> ExecutionResult:
         quantity = self.portfolio.positions[symbol]["quantity"]
         stop_order_id = self.portfolio.positions[symbol].get("stop_order_id")
+
+        # A held position can shrink (price drift, partial fills) below the
+        # exchange's own minimum order value - a real incident hit this for
+        # BTC/USDT (a ~$4.44 remainder against a $5.00 minimum): the sell
+        # was attempted anyway, Binance's NOTIONAL filter rejected it 3
+        # times in a row, and the circuit breaker tripped on a sizing
+        # mismatch this system could have known about in advance, not a
+        # genuine execution failure. Checked BEFORE cancelling the resting
+        # protective stop below - if we're not going to sell, the position
+        # must keep whatever protection it already has, not lose it for
+        # nothing. Mirrors _buy's identical defensive check above.
+        min_notional = self._min_notional(symbol)
+        if min_notional is not None and price * quantity < min_notional:
+            logger.warning(
+                "skipping sell - held position value is below the exchange's real minimum for this "
+                "symbol, a sell order would just be rejected",
+                extra={
+                    "context": {"symbol": symbol, "order_value": price * quantity, "exchange_min_notional": min_notional}
+                },
+            )
+            return ExecutionResult(
+                symbol=symbol, action="no_action", price=price, quantity=0.0,
+                error=f"position value ${price * quantity:.2f} below exchange minimum ${min_notional:.2f} - cannot be sold at this size",
+            )
+
         try:
             order = None
             latency_ms = None
@@ -353,6 +387,22 @@ class ExecutionAgent:
 
         sell_quantity = min(sell_quantity, position["quantity"])
         stop_order_id = position.get("stop_order_id")
+
+        min_notional = self._min_notional(symbol)
+        if min_notional is not None and price * sell_quantity < min_notional:
+            logger.warning(
+                "skipping partial sell - the requested slice's value is below the exchange's real "
+                "minimum for this symbol, a sell order would just be rejected",
+                extra={
+                    "context": {
+                        "symbol": symbol, "order_value": price * sell_quantity, "exchange_min_notional": min_notional,
+                    }
+                },
+            )
+            return ExecutionResult(
+                symbol=symbol, action="no_action", price=price, quantity=0.0,
+                error=f"position value ${price * sell_quantity:.2f} below exchange minimum ${min_notional:.2f} - cannot be sold at this size",
+            )
 
         try:
             order = None

@@ -691,6 +691,68 @@ class TestExchangeMinNotionalDefensiveCheck:
         assert result.action == "opened_position"
 
 
+class TestSellExchangeMinNotionalDefensiveCheck:
+    """Regression coverage for a real incident: a held BTC/USDT position
+    shrank to ~$4.44 against Binance's $5.00 minimum, the sell was
+    attempted anyway, Binance's NOTIONAL filter rejected it 3 times in a
+    row, and the circuit breaker tripped on a sizing mismatch this system
+    could have known about in advance - not a genuine execution failure.
+    Mirrors TestExchangeMinNotionalDefensiveCheck's buy-side coverage."""
+
+    def test_sell_skips_below_the_real_exchange_minimum_without_touching_the_exchange(self):
+        portfolio = PortfolioManager(initial_capital=10000.0)
+        portfolio.open_position("BTC/USDT", price=63000.0, quantity=0.00007)  # ~$4.41
+        exchange = MinNotionalExchange(min_notional=5.0)
+        agent = ExecutionAgent(portfolio=portfolio, exchange=exchange)
+
+        result = agent.execute("BTC/USDT", Signal.SELL, price=63000.0, quantity=0.0)
+
+        assert result.action == "no_action"  # not "error" - must never touch circuit-breaker budget
+        assert "below exchange minimum" in result.error
+        assert exchange.sell_orders == []  # the real exchange was never actually called
+        assert "BTC/USDT" in portfolio.positions  # still held - nothing was closed
+
+    def test_sell_does_not_cancel_the_resting_stop_when_skipped(self):
+        # If the sell is never actually attempted, the position must keep
+        # whatever protective stop it already has - cancelling it first and
+        # then not selling would leave a real position with NO protection
+        # at all, for nothing.
+        portfolio = PortfolioManager(initial_capital=10000.0)
+        portfolio.open_position("BTC/USDT", price=63000.0, quantity=0.00007)
+        portfolio.positions["BTC/USDT"]["stop_order_id"] = "existing-stop-1"
+        exchange = MinNotionalExchange(min_notional=5.0)
+        agent = ExecutionAgent(portfolio=portfolio, exchange=exchange)
+
+        agent.execute("BTC/USDT", Signal.SELL, price=63000.0, quantity=0.0)
+
+        assert exchange.cancelled_orders == []
+
+    def test_sell_allows_a_position_at_or_above_the_real_exchange_minimum(self):
+        portfolio = PortfolioManager(initial_capital=10000.0)
+        portfolio.open_position("BTC/USDT", price=63000.0, quantity=0.001)  # $63, clears $5 minimum
+        exchange = MinNotionalExchange(min_notional=5.0)
+        agent = ExecutionAgent(portfolio=portfolio, exchange=exchange)
+
+        result = agent.execute("BTC/USDT", Signal.SELL, price=63000.0, quantity=0.0)
+
+        assert result.action == "closed_position"
+        assert exchange.sell_orders == [("BTC/USDT", 0.001)]
+
+    def test_partial_sell_skips_below_the_real_exchange_minimum(self):
+        portfolio = PortfolioManager(initial_capital=10000.0)
+        portfolio.open_position("BTC/USDT", price=63000.0, quantity=0.001)  # $63, affordable and well above $5
+        exchange = MinNotionalExchange(min_notional=5.0)
+        agent = ExecutionAgent(portfolio=portfolio, exchange=exchange)
+
+        # Requesting a slice worth only ~$4.41, even though the full position clears the minimum.
+        result = agent.execute_partial_sell("BTC/USDT", sell_quantity=0.00007, price=63000.0)
+
+        assert result.action == "no_action"
+        assert "below exchange minimum" in result.error
+        assert exchange.sell_orders == []
+        assert portfolio.positions["BTC/USDT"]["quantity"] == pytest.approx(0.001)  # untouched
+
+
 class LotSizeExchange(MinNotionalExchange):
     """A real exchange rounds the executed quantity DOWN to a lot-size step
     before filling - mimics that via floor-to-step amount_to_precision,
