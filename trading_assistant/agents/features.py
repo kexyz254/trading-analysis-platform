@@ -35,6 +35,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from trading_assistant.analysis.smart_money_concepts import (
+    bearish_order_block_zones,
+    bullish_order_block_zones,
+    compute_market_structure,
+)
 from trading_assistant.analysis.ta_lib import TechnicalIndicators
 
 FEATURE_COLUMNS = [
@@ -79,6 +84,16 @@ FEATURE_COLUMNS = [
     # session / cyclical
     "hour_sin",
     "hour_cos",
+    # Smart Money Concepts / market structure (see
+    # trading_assistant.analysis.smart_money_concepts) - signed/bounded
+    # like adx_directional and vortex_diff above, not one-hot, for the
+    # same reason: a directional +1/-1/0 scale is directly comparable
+    # across symbols and price regimes.
+    "smc_structure_state",
+    "smc_bos",
+    "smc_mss",
+    "smc_in_bullish_ob_zone",
+    "smc_in_bearish_ob_zone",
 ]
 
 
@@ -163,6 +178,30 @@ def build_features(
     hour = pd.to_datetime(result["timestamp"]).dt.hour
     result["hour_sin"] = np.sin(2 * np.pi * hour / 24)
     result["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+
+    structure = compute_market_structure(high, low, close)
+    result["smc_structure_state"] = structure["structure_state"].map(
+        {"bullish": 1.0, "bearish": -1.0, "ranging": 0.0}
+    )
+    result["smc_bos"] = structure["bos"].astype(float)
+    result["smc_mss"] = structure["mss"].astype(float)
+
+    bullish_ob = bullish_order_block_zones(result["open"], high, low, close, atr)
+    bearish_ob = bearish_order_block_zones(result["open"], high, low, close, atr)
+    # Compared against the PREVIOUS bar's zone bounds, not this same row's -
+    # a zone that's actively being retested this bar is also mitigated
+    # (cleared) by this same bar's own price action in the zone-tracking
+    # output above, so checking this row's own zone_low/zone_high can
+    # never catch the retest that just consumed it. The previous row's
+    # bounds reflect the zone as it stood BEFORE this bar's action, which
+    # is what "does this bar's close land inside a zone established
+    # earlier" actually means.
+    result["smc_in_bullish_ob_zone"] = (
+        (close >= bullish_ob["zone_low"].shift(1)) & (close <= bullish_ob["zone_high"].shift(1))
+    ).astype(float)
+    result["smc_in_bearish_ob_zone"] = (
+        (close >= bearish_ob["zone_low"].shift(1)) & (close <= bearish_ob["zone_high"].shift(1))
+    ).astype(float)
 
     result[FEATURE_COLUMNS] = result[FEATURE_COLUMNS].replace([np.inf, -np.inf], np.nan)
 

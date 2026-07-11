@@ -208,6 +208,32 @@ def test_auto_loaded_model_retains_feature_columns_from_promotion(tmp_path):
     assert fresh_agent._get_or_create_strategy("BTC/USDT").feature_columns == ["close"]
 
 
+def test_a_model_promoted_on_an_older_smaller_feature_set_survives_new_columns_being_added(tmp_path):
+    """The critical safety property behind ever adding new columns to
+    agents.features.FEATURE_COLUMNS (e.g. the Smart Money Concepts
+    features): a model promoted BEFORE the new columns existed stores
+    its OWN feature_columns list at promotion time (see save_model's
+    bundling), and AIStrategy slices the live features DataFrame down to
+    exactly that list before predicting - so a real, currently-live model
+    trained on the smaller, older feature set must keep predicting
+    correctly even once the live feature DataFrame grows to include
+    brand new columns it was never trained on and knows nothing about."""
+    from trading_assistant.agents.features import FEATURE_COLUMNS
+
+    old_feature_columns = [c for c in FEATURE_COLUMNS if c not in ("smc_structure_state", "smc_bos", "smc_mss")]
+    trainer = PredictionAgent(model_dir=tmp_path, auto_load=False)
+    trainer.promote_model("BTC/USDT", DummyClassifier(up_probability=0.9), feature_columns=old_feature_columns)
+
+    # The CURRENT, full-width live feature frame - as if a live cycle ran
+    # build_features() today, well after the model above was promoted.
+    live_features = pd.DataFrame({col: [1.0, 2.0, 3.0] for col in FEATURE_COLUMNS})
+
+    fresh_agent = PredictionAgent(model_dir=tmp_path, auto_load=True)
+    result = fresh_agent.predict("BTC/USDT", live_features)
+
+    assert result.signal == Signal.BUY  # never raised, never silently misfired
+
+
 def test_load_model_restores_feature_columns_too(tmp_path):
     trainer = PredictionAgent(model_dir=tmp_path, auto_load=False)
     trainer.promote_model("BTC/USDT", DummyClassifier(up_probability=0.9), feature_columns=["close"])

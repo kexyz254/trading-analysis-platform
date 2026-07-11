@@ -17,7 +17,12 @@ from ..analysis.candlestick_patterns import (
     morning_star,
     shooting_star,
 )
-from ..core.indicators import calculate_macd, calculate_rsi
+from ..analysis.smart_money_concepts import (
+    bearish_order_block_zones,
+    bullish_order_block_zones,
+    compute_market_structure,
+)
+from ..core.indicators import calculate_atr, calculate_macd, calculate_rsi
 from .base import BaseStrategy, Signal
 
 
@@ -234,6 +239,72 @@ class TimeSeriesMomentumStrategy(BaseStrategy):
         if trailing_return >= self.min_abs_return:
             return Signal.BUY
         if trailing_return <= -self.min_abs_return:
+            return Signal.SELL
+        return Signal.HOLD
+
+
+class SmartMoneyConceptsStrategy(BaseStrategy):
+    """ICT-style Smart Money Concepts: market structure (swing highs/lows,
+    bullish/bearish structure state), break of structure (BOS), market
+    structure shift (MSS), and order block zones - see
+    trading_assistant.analysis.smart_money_concepts for the underlying,
+    independently-tested detection logic.
+
+    Two DISTINCT entry triggers, both requiring structure to already
+    confirm the trade's direction (never fights the prevailing structure):
+      1. A fresh BOS in the confirmed direction - the classic "structure
+         just proved itself, join the continuation" entry.
+      2. Price currently sitting inside an active (unmitigated) order
+         block zone in the confirmed direction - the classic "wait for
+         the pullback into the zone smart money originated the move
+         from" entry, rather than chasing price that's already moved.
+    A fresh MSS (structure reversing) is deliberately NOT a trade trigger
+    here - it's a warning the prior structure just broke, not yet
+    evidence of a new one to trade with; that would need its own
+    subsequent BOS/OB confirmation in the NEW direction first, which the
+    normal path above already captures once enough new swings form.
+    """
+
+    def __init__(self, swing_lookback: int = 2, displacement_atr_multiple: float = 2.0, atr_period: int = 14):
+        super().__init__("Smart Money Concepts")
+        self.swing_lookback = swing_lookback
+        self.displacement_atr_multiple = displacement_atr_multiple
+        self.atr_period = atr_period
+
+    def generate_signal(self, data):
+        open_, high, low, close = data.get("open"), data.get("high"), data.get("low"), data.get("close")
+        if open_ is None or high is None or low is None or close is None:
+            return Signal.HOLD
+        min_bars = max(self.swing_lookback * 2 + 2, self.atr_period + 2)
+        if len(close) < min_bars:
+            return Signal.HOLD
+
+        structure = compute_market_structure(high, low, close, lookback=self.swing_lookback)
+        current_state = structure["structure_state"].iloc[-1]
+        current_bos = structure["bos"].iloc[-1]
+
+        atr = calculate_atr(high, low, close, period=self.atr_period)
+        bullish_ob = bullish_order_block_zones(
+            open_, high, low, close, atr, displacement_atr_multiple=self.displacement_atr_multiple
+        )
+        bearish_ob = bearish_order_block_zones(
+            open_, high, low, close, atr, displacement_atr_multiple=self.displacement_atr_multiple
+        )
+        # Compared against the PREVIOUS bar's zone bounds, not this same
+        # row's - a retest this bar also mitigates (clears) the zone in
+        # this same row's own output, so checking this row's own bounds
+        # can never catch the retest that just consumed it. See
+        # agents.features' identical smc_in_bullish/bearish_ob_zone
+        # comparison for the full reasoning.
+        current_close = close.iloc[-1]
+        prev_bullish_low, prev_bullish_high = bullish_ob["zone_low"].iloc[-2], bullish_ob["zone_high"].iloc[-2]
+        prev_bearish_low, prev_bearish_high = bearish_ob["zone_low"].iloc[-2], bearish_ob["zone_high"].iloc[-2]
+        in_bullish_zone = not pd.isna(prev_bullish_low) and prev_bullish_low <= current_close <= prev_bullish_high
+        in_bearish_zone = not pd.isna(prev_bearish_low) and prev_bearish_low <= current_close <= prev_bearish_high
+
+        if current_state == "bullish" and (current_bos == 1 or in_bullish_zone):
+            return Signal.BUY
+        if current_state == "bearish" and (current_bos == -1 or in_bearish_zone):
             return Signal.SELL
         return Signal.HOLD
 

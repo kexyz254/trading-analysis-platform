@@ -91,6 +91,31 @@ def test_new_indicator_features_are_finite_on_a_realistic_series():
         assert abs(value) != float("inf"), f"{column} is inf"
 
 
+def test_smc_features_are_bounded_and_not_trivially_constant():
+    """Regression coverage for the Smart Money Concepts feature block
+    (smc_structure_state, smc_bos, smc_mss, smc_in_bullish_ob_zone,
+    smc_in_bearish_ob_zone) - a genuinely oscillating series (not the
+    monotonic fixture other tests use, which would never actually form
+    a swing point) must produce values within each feature's documented
+    range, and the signed/directional ones must not be silently stuck at
+    zero throughout - that would mean the whole block quietly never
+    fires on real data despite computing without error."""
+    closes = [100.0 + 20.0 * ((i % 10) - 5) + i * 0.1 for i in range(150)]
+    frame = _ohlcv(closes)
+
+    featured = build_features(frame).dropna(subset=FEATURE_COLUMNS)
+
+    assert featured["smc_structure_state"].isin([-1.0, 0.0, 1.0]).all()
+    assert featured["smc_bos"].isin([-1.0, 0.0, 1.0]).all()
+    assert featured["smc_mss"].isin([-1.0, 0.0, 1.0]).all()
+    assert featured["smc_in_bullish_ob_zone"].isin([0.0, 1.0]).all()
+    assert featured["smc_in_bearish_ob_zone"].isin([0.0, 1.0]).all()
+    # An oscillating 150-bar series must actually reach a non-ranging
+    # structure state at some point - otherwise swing detection itself
+    # is silently broken on real data.
+    assert set(featured["smc_structure_state"].unique()) != {0.0}
+
+
 def test_classify_regime_requires_strong_adx_to_call_a_trend():
     # strong ADX (trending market) - direction sign decides up vs down
     assert classify_regime(trend_strength=0.05, adx_strength=0.40) == "trending_up"

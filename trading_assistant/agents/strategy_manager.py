@@ -54,6 +54,7 @@ from trading_assistant.strategies.implementations import (
     MACDStrategy,
     RSIMeanReversionStrategy,
     SMACrossoverStrategy,
+    SmartMoneyConceptsStrategy,
     TimeSeriesMomentumStrategy,
 )
 
@@ -90,6 +91,7 @@ def default_candidates() -> List[StrategyCandidate]:
         StrategyCandidate("bollinger_bands", "rule", BollingerBandsStrategy),
         StrategyCandidate("candlestick_patterns", "rule", CandlestickPatternStrategy),
         StrategyCandidate("time_series_momentum", "rule", TimeSeriesMomentumStrategy),
+        StrategyCandidate("smart_money_concepts", "rule", SmartMoneyConceptsStrategy),
     ]
 
 
