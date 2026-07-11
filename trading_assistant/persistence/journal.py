@@ -132,6 +132,21 @@ CREATE TABLE IF NOT EXISTS feature_baselines (
     boundaries TEXT NOT NULL
 );
 
+-- One row per promotion: mean absolute SHAP value per feature for the
+-- newly-promoted model (see trading_assistant.ml.shap_importance) - a
+-- diagnostic/QA record of which of the ~30 engineered features the model
+-- actually relies on, never consulted by any live trading or promotion
+-- decision. Deliberately NOT in _PRUNABLE_TABLES, unlike its sibling
+-- feature_baselines (which only ever needs the latest row) - this one
+-- exists specifically to accumulate as a research record of how feature
+-- importance evolves across retrains over time.
+CREATE TABLE IF NOT EXISTS feature_importance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    importance TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS drift_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -604,6 +619,34 @@ class Journal:
             return None
         record = dict(row)
         record["boundaries"] = json.loads(record["boundaries"])
+        return record
+
+    def record_feature_importance(
+        self, *, symbol: str, importance: Dict[str, float], timestamp: Optional[str] = None
+    ) -> int:
+        """Persists one promotion's mean-absolute-SHAP-value-per-feature
+        (see trading_assistant.ml.shap_importance) - a diagnostic/QA
+        record of which engineered features a promoted model actually
+        relies on, accumulating one row per promotion so it can be
+        tracked over time as models get retrained. Never read by any
+        live trading or promotion decision."""
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                "INSERT INTO feature_importance (timestamp, symbol, importance) VALUES (?, ?, ?)",
+                (timestamp or self._now(), symbol, json.dumps(importance)),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def latest_feature_importance(self, symbol: str) -> Optional[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM feature_importance WHERE symbol = ? ORDER BY id DESC LIMIT 1", (symbol,)
+            ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        record["importance"] = json.loads(record["importance"])
         return record
 
     def record_drift_event(

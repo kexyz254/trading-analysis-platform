@@ -41,6 +41,7 @@ from trading_assistant.backtesting.framework import BacktestEngineV2, OrderDirec
 from trading_assistant.market_data.feed import LiveFeed
 from trading_assistant.ml.drift import compute_baseline_distribution, compute_feature_drift_from_baseline, summarize_drift
 from trading_assistant.ml.predictor import EnsemblePredictor, RandomForestPredictor, XGBPredictor
+from trading_assistant.ml.shap_importance import compute_ensemble_feature_importance
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.risk.backtest_sizing import risk_based_quantity
 from trading_assistant.validation.significance import (
@@ -458,6 +459,7 @@ class LearningAgent:
         self.prediction_agent.promote_model(symbol, candidate, FEATURE_COLUMNS)
         self.last_promoted_metrics[symbol] = walk_forward.to_dict()
         self._capture_feature_baseline(symbol, featured)
+        self._capture_feature_importance(symbol, candidate, featured)
 
         return self._finish(
             RetrainOutcome(
@@ -601,6 +603,23 @@ class LearningAgent:
         distributions = {col: dist for col, dist in distributions.items() if dist}
         if distributions:
             self.journal.record_feature_baseline(symbol=symbol, boundaries=distributions)
+
+    def _capture_feature_importance(self, symbol: str, candidate: Any, featured: pd.DataFrame) -> None:
+        """Persist SHAP-based feature importance for the just-promoted
+        model - a diagnostic/QA record of which of the ~30 engineered
+        features it actually relies on (see
+        trading_assistant.ml.shap_importance), never consulted by any
+        live trading or promotion decision. Best-effort: skipped
+        entirely (not an error) when there's no journal, and any failure
+        inside the importance computation itself is already caught and
+        logged there, never here - a diagnostic feature must never be
+        capable of interrupting a real promotion that already
+        succeeded."""
+        if self.journal is None:
+            return
+        importance = compute_ensemble_feature_importance(candidate, featured[FEATURE_COLUMNS], FEATURE_COLUMNS)
+        if importance:
+            self.journal.record_feature_importance(symbol=symbol, importance=importance)
 
     def check_feature_drift(self, symbol: str, live_features: pd.DataFrame) -> Optional[dict]:
         """Compare a recent window of LIVE engineered features against the

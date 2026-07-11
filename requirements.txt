@@ -8,6 +8,7 @@ websocket-client==1.8.0
 scikit-learn==1.5.2
 scipy==1.17.1
 xgboost==2.1.1
+shap==0.51.0
 joblib==1.4.2
 python-dotenv==1.0.1
 PyYAML==6.0.2

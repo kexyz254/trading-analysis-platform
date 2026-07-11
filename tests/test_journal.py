@@ -470,6 +470,10 @@ def test_prune_old_records_never_touches_audit_critical_tables(tmp_path):
     journal.record_alert(category="drift", severity="warning", message="old alert", timestamp=old_ts)
     journal.record_retrain_event(promoted=True, reason="test", timestamp=old_ts)
     journal.record_circuit_breaker_event(tripped=True, reason="test", timestamp=old_ts)
+    # A QA/research record meant to accumulate over time (see
+    # Journal.record_feature_importance's docstring) - pruning it would
+    # silently destroy the exact history it exists to build up.
+    journal.record_feature_importance(symbol="BTC/USDT", importance={"atr_pct": 0.5}, timestamp=old_ts)
 
     deleted = journal.prune_old_records(retention_days=180)
 
@@ -478,10 +482,12 @@ def test_prune_old_records_never_touches_audit_critical_tables(tmp_path):
     assert "alerts" not in deleted
     assert "retrain_events" not in deleted
     assert "circuit_breaker_events" not in deleted
+    assert "feature_importance" not in deleted
     assert len(journal.recent_trades()) == 1
     assert len(journal.recent_trade_audit()) == 1
     assert len(journal.recent_alerts()) == 1
     assert journal.latest_circuit_breaker_event() is not None
+    assert journal.latest_feature_importance("BTC/USDT") is not None
 
 
 def test_prune_old_records_boundary_row_exactly_at_cutoff_is_kept(tmp_path):

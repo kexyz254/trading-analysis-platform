@@ -544,6 +544,44 @@ def test_rejected_retrain_does_not_persist_a_feature_baseline(tmp_path):
     assert journal.latest_feature_baseline("BTC/USDT") is None
 
 
+def test_retrain_promotion_persists_shap_feature_importance(tmp_path):
+    """End-to-end wiring test with a REAL EnsemblePredictor (RandomForest
+    + XGBoost, not the FakeModel _agent() normally uses) - proves the
+    actual promotion pipeline calls compute_ensemble_feature_importance
+    and persists a usable result, not just that the function works in
+    isolation (see tests/test_shap_importance.py for that)."""
+    from trading_assistant.agents.prediction import PredictionAgent
+    from trading_assistant.ml.predictor import EnsemblePredictor, RandomForestPredictor, XGBPredictor
+    from trading_assistant.persistence.journal import Journal
+
+    journal = Journal(db_path=str(tmp_path / "journal.db"))
+    prediction_agent = PredictionAgent(model_dir=tmp_path, auto_load=False)
+    agent = LearningAgent(
+        prediction_agent=prediction_agent,
+        model_factory=lambda: EnsemblePredictor(
+            predictors=[RandomForestPredictor(n_trees=20, max_depth=4), XGBPredictor(n_estimators=20, max_depth=3)]
+        ),
+        train_window_bars=100,
+        test_window_bars=20,
+        target_folds=3,
+        min_folds_required=2,
+        min_pct_folds_profitable=0.0,
+        min_sharpe_to_promote=-10.0,  # a real ensemble on synthetic data won't reliably beat 0.1 - only promotion matters here
+        max_drawdown_to_promote=1.0,
+        journal=journal,
+    )
+    ohlcv = _uptrend_ohlcv()
+
+    outcome = agent.retrain("BTC/USDT", ohlcv)
+
+    assert outcome.promoted is True
+    importance = journal.latest_feature_importance("BTC/USDT")
+    assert importance is not None
+    assert set(importance["importance"].keys()) <= set(FEATURE_COLUMNS)
+    assert importance["importance"]  # at least one feature got a real SHAP value
+    assert all(v >= 0 for v in importance["importance"].values())
+
+
 def test_check_feature_drift_returns_none_without_a_journal(tmp_path):
     agent, _ = _agent(0.9, tmp_path)
     live_features = _uptrend_ohlcv(n=250)

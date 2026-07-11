@@ -13,6 +13,7 @@ setup(
         "scikit-learn>=1.5.0",
         "scipy>=1.13.0",
         "xgboost>=2.1.0",
+        "shap>=0.51.0",
         "joblib>=1.4.0",
         "python-dotenv>=1.0.0",
         "PyYAML>=6.0.0",
