@@ -27,8 +27,10 @@ services:
     # cap, a memory spike during that pass can OOM the entire VPS, not
     # just this container, on a small box. Measured against the actual
     # deployment VPS (Hetzner, 1.9GB RAM, 1 vCPU - confirmed via `free -h`/
-    # `nproc`): 1000m + dashboard's 256m leaves ~650MB headroom for the OS/
-    # Docker daemon. cpus is capped at the box's own single core - Docker
+    # `nproc`): 1000m + dashboard's 600m leaves ~350MB headroom for the OS/
+    # Docker daemon - tighter than earlier, since the dashboard's own limit
+    # was raised (see its comment below); watch `free -h` after this change
+    # for a few days. cpus is capped at the box's own single core - Docker
     # rejects any limit above the host's actual CPU count outright, it
     # doesn't just clamp it. Re-tune both if you move to a different plan.
     mem_limit: 1000m
@@ -85,8 +87,11 @@ services:
     # call ccxt's load_markets(), which pulls in Binance's FULL market
     # list (thousands of pairs, not just the ~30 tracked symbols) - this
     # container was observed idling at ~150MB and crash-looping the
-    # moment a real request exercised that path.
-    mem_limit: 450m
+    # moment a real request exercised that path. Even 450m turned out
+    # tight in real 24/7 operation (observed sitting at ~94% of that limit
+    # continuously, not just during a request spike) - 600m gives real
+    # margin instead of leaving it one bad moment away from an OOM-kill.
+    mem_limit: 600m
     cpus: 0.2
     logging:
       driver: json-file
