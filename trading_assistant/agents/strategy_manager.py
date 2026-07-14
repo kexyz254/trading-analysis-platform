@@ -336,7 +336,7 @@ class StrategyManager:
                     model.train(train_slice[FEATURE_COLUMNS], train_slice["target"])
                     metrics = self._backtest_ml(model, symbol, test_slice)
                 elif candidate.kind == "ml_15m":
-                    metrics = self._backtest_ml_15m_candidate(symbol, test_slice, candidate)
+                    metrics = self._backtest_ml_15m_candidate(symbol, test_slice, candidate, timestamps=full_timestamp)
                 else:
                     strategy = candidate.factory()
                     metrics = self._backtest_rule(
@@ -635,7 +635,8 @@ class StrategyManager:
 
     # ---------- 15‑minute candidate backtesting helper ----------
     def _backtest_ml_15m_candidate(
-        self, symbol: str, test_slice: pd.DataFrame, candidate: StrategyCandidate
+        self, symbol: str, test_slice: pd.DataFrame, candidate: StrategyCandidate,
+        timestamps: Optional[pd.Series] = None,
     ) -> dict:
         """Run a single 15‑minute walk‑forward fold for the ml_ensemble_15m candidate."""
         if self.feed_15m is None:
@@ -649,8 +650,14 @@ class StrategyManager:
             }
         # The 1h test slice index carries timestamps. Use them to define
         # the corresponding calendar windows for the 15‑minute feed.
-        test_start = test_slice.index[0]
-        test_end = test_slice.index[-1]
+        if timestamps is not None:
+            test_start = timestamps.iloc[int(test_slice.index[0])]
+            test_end = timestamps.iloc[int(test_slice.index[-1])]
+        else:
+            test_start = test_slice.index[0]
+            test_end = test_slice.index[-1]
+        test_start = pd.Timestamp(test_start)
+        test_end = pd.Timestamp(test_end)
         train_start = test_start - pd.Timedelta(days=30)  # fixed 30‑day training window
         train_end = test_start
 
