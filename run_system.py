@@ -167,11 +167,17 @@ def build_orchestrator(config: Config) -> Orchestrator:
     champion_challenger_agent = None
     if config.tournament.enabled:
         # --- 15-minute candidate (opt-in) ---
-        ml_15m_config = config.get("ml_15m", {})
+        ml_15m_section = getattr(config, 'ml_15m', None)
+        ml_15m_config = {}
         feed_15m = None
-        if ml_15m_config.get("enabled", False):
-            from trading_assistant.market_data.feed_15m import FifteenMinuteFeed
-            feed_15m = FifteenMinuteFeed(exchange, cache_dir=Path("cache/15m"))
+        if ml_15m_section is not None:
+            ml_15m_config = {
+                k: v for k, v in vars(ml_15m_section).items()
+                if not k.startswith('_')
+            }
+            if ml_15m_config.get('enabled', False):
+                from trading_assistant.market_data.feed_15m import FifteenMinuteFeed
+                feed_15m = FifteenMinuteFeed(exchange, cache_dir=Path("cache/15m"))
         # --- end 15-minute candidate ---
 
         strategy_manager = StrategyManager(
