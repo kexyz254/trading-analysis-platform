@@ -382,6 +382,42 @@ tournament:
   paper_commission_rate: 0.001
   paper_slippage_rate: 0.0005
 
+# 15‑minute ML candidate (ml_ensemble_15m).
+# This is a separate, time‑horizon‑diversified candidate that operates on
+# 15‑minute bars with its own feature engineering, calibrated probability
+# predictions, and a cost‑aware decision gate. It competes in the same
+# tournament as every other candidate and is subject to the same walk‑forward
+# validation, significance testing, and promotion bar. Until drive_live_trading
+# is enabled, it paper‑trades only and carries zero live‑order risk.
+#
+# Disable by setting enabled: false (removes the candidate from the roster
+# entirely on the next restart).
+ml_15m:
+  enabled: true
+
+  # ATR‑adaptive profit threshold: a future move is only considered
+  # "profitable" if it exceeds atr_multiplier * current_ATR. In quiet
+  # markets the required move shrinks; in volatile markets it expands.
+  # 0.5 × ATR is deliberately modest – a genuine edge should show up
+  # even with a low bar, and the cost‑aware gate filters marginal signals.
+  atr_multiplier: 0.5
+
+  # Number of 15‑minute bars to look ahead when creating training labels.
+  # 4 bars = 1 hour, matching the existing 1h model's horizon.
+  horizon_bars: 4
+
+  # Cost‑aware decision gate. A signal is only acted upon when ALL of:
+  #   - calibrated probability ≥ min_confidence
+  #   - expected profit (reward − risk − fees) > 0
+  #   - reward/risk ratio ≥ min_rr_ratio
+  # are satisfied. This naturally filters low‑conviction and marginal
+  # signals without needing a separate HOLD classifier.
+  min_confidence: 0.55
+  min_rr_ratio: 2.0
+  fee_rate: 0.0015            # estimated total fee + slippage (0.15%)
+  stop_loss_atr_mult: 2.0     # stop‑loss distance in ATR multiples
+  take_profit_atr_mult: 3.0   # take‑profit distance in ATR multiples
+
 # Go-live readiness scorecard - turns "are we ready yet" into a computed,
 # auditable answer instead of a recurring judgment call. See
 # ReadinessConfig's docstring in trading_assistant/config.py for why each

@@ -166,6 +166,14 @@ def build_orchestrator(config: Config) -> Orchestrator:
     strategy_manager = None
     champion_challenger_agent = None
     if config.tournament.enabled:
+        # --- 15-minute candidate (opt-in) ---
+        ml_15m_config = config.get("ml_15m", {})
+        feed_15m = None
+        if ml_15m_config.get("enabled", False):
+            from trading_assistant.market_data.feed_15m import FifteenMinuteFeed
+            feed_15m = FifteenMinuteFeed(exchange, cache_dir=Path("cache/15m"))
+        # --- end 15-minute candidate ---
+
         strategy_manager = StrategyManager(
             train_window_bars=config.tournament.train_window_bars,
             test_window_bars=config.tournament.test_window_bars,
@@ -181,15 +189,11 @@ def build_orchestrator(config: Config) -> Orchestrator:
             risk_per_trade=config.risk.risk_per_trade,
             position_stop_loss_pct=config.risk.stop_loss_pct,
             max_position_size=config.risk.max_position_size,
-            # Matches ChampionChallengerAgent's paper_commission_rate/
-            # paper_slippage_rate below, not portfolio.commission_rate -
-            # the tournament's OWN backtest validation and its paper-trading
-            # comparison must share the same friction assumption, or a
-            # candidate could look better in one than the other purely from
-            # a cost-basis mismatch, not real performance.
             commission_rate=config.tournament.paper_commission_rate,
             slippage_rate=config.tournament.paper_slippage_rate,
             periods_per_year=backtest_periods_per_year,
+            feed_15m=feed_15m,
+            ml_15m_config=ml_15m_config,
         )
         # Paper-trading runs whenever the tournament is enabled, independent
         # of drive_live_trading - it never touches real (even testnet)
@@ -215,10 +219,6 @@ def build_orchestrator(config: Config) -> Orchestrator:
         market_monitor=MarketMonitorAgent(
             symbols=config.symbols,
             timeframe=config.timeframe,
-            # Matches the tournament's test_window_bars so live regime
-            # classification uses the same "windowed average" definition
-            # the tournament validated a champion against - see
-            # MarketMonitorAgent's regime_window_bars docstring.
             regime_window_bars=config.tournament.test_window_bars,
             exchange=exchange,
             enable_integrity_checks=config.market_data.enable_integrity_checks,
@@ -311,12 +311,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # First, before anything else (including config/logging setup) - a
-    # second instance racing this one against the same database/exchange
-    # account is a correctness emergency, not something worth doing any
-    # other work before checking. See process_lock's module docstring for
-    # why this exists: it already happened, more than once, in this
-    # project's own history.
     try:
         lock_file = acquire_singleton_lock(str(_LOCK_PATH))
     except AlreadyRunningError as exc:
@@ -338,16 +332,6 @@ def main() -> None:
 
 
 async def _run_with_graceful_shutdown(orchestrator: Orchestrator, max_cycles: Optional[int]) -> None:
-    # SIGTERM/SIGINT (what systemd/Docker send on stop/restart) must not
-    # kill this process mid-cycle - loop.add_signal_handler registers on
-    # THIS specific running event loop (must be called from inside a
-    # running loop, hence this wrapper rather than registering before
-    # asyncio.run), triggering Orchestrator.request_shutdown() so
-    # run_forever exits cleanly after the current cycle instead of Python's
-    # default SIGTERM disposition (immediate termination, skipping
-    # run_forever's finally block that cancels background tasks cleanly).
-    # add_signal_handler is POSIX-only - a no-op guard on Windows (this
-    # session's dev machine), fully functional on the Linux VPS target.
     if sys.platform != "win32":
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):

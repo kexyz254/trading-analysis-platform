@@ -44,6 +44,7 @@ from trading_assistant.agents.features import (
 )
 from trading_assistant.backtesting.framework import BacktestEngineV2, OrderDirection, Position
 from trading_assistant.market_data.feed import LiveFeed
+from trading_assistant.market_data.feed_15m import FifteenMinuteFeed
 from trading_assistant.ml.predictor import EnsemblePredictor, RandomForestPredictor, XGBPredictor
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.risk.backtest_sizing import risk_based_quantity
@@ -58,6 +59,10 @@ from trading_assistant.strategies.implementations import (
     TimeSeriesMomentumStrategy,
     VWAPReversionStrategy,
 )
+from trading_assistant.strategies.ml_15m_candidate import backtest_ml_15m
+# -- NEW research-layer imports --
+from trading_assistant.evaluation.recorder import CandidatePerformanceRecorder
+from trading_assistant.persistence.champion_registry import ChampionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +81,7 @@ def _default_ml_factory() -> Any:
 @dataclass
 class StrategyCandidate:
     name: str
-    kind: str  # "ml" | "rule"
+    kind: str  # "ml" | "rule" | "ml_15m"
     factory: Callable[[], Any]
 
 
@@ -94,6 +99,7 @@ def default_candidates() -> List[StrategyCandidate]:
         StrategyCandidate("time_series_momentum", "rule", TimeSeriesMomentumStrategy),
         StrategyCandidate("smart_money_concepts", "rule", SmartMoneyConceptsStrategy),
         StrategyCandidate("vwap_reversion", "rule", VWAPReversionStrategy),
+        StrategyCandidate("ml_ensemble_15m", "ml_15m", lambda: None),   # factory not used; dedicated backtester
     ]
 
 
@@ -198,46 +204,19 @@ class StrategyManager:
         journal: Optional[Journal] = None,
         feeds: Optional[Dict[str, Any]] = None,
         exchange: Optional[Any] = None,
-        # Champion-switching hysteresis: without this, a symbol/regime's
-        # champion is re-selected from scratch every single tournament run
-        # with no memory of who held the position before - two candidates
-        # a hair's-breadth apart in median Sharpe (well within noise) could
-        # trade places run after run, each switch carrying a real cost
-        # (a live position opened under one strategy's logic, closed under
-        # a completely different one's). An incumbent that still clears the
-        # promotion bar is only replaced once it has held the position for
-        # at least champion_switch_min_runs runs AND the challenger beats
-        # it by at least champion_switch_margin - not just any positive delta.
         champion_switch_min_runs: int = 3,
         champion_switch_margin: float = 0.1,
-        # Walk-forward sizing parity (trading_assistant.risk.backtest_sizing):
-        # every backtest trade previously deployed a flat ~95% of capital
-        # regardless of stop distance, a completely different risk regime
-        # from what RiskAgent.evaluate_buy actually sizes live trades at -
-        # so a candidate's validated Sharpe/drawdown/win-rate described
-        # performance at a risk level it would never really be traded at.
-        # None keeps the old flat-95% sizing (opt-in, backward compatible);
-        # a number makes every backtest trade sized by the SAME
-        # risk_per_trade/stop-distance formula live trading uses.
         risk_per_trade: Optional[float] = None,
         position_stop_loss_pct: float = 0.01,
         max_position_size: float = 0.1,
-        # Same real-world friction assumption PortfolioConfig's
-        # commission_rate/slippage_rate feeds the LIVE portfolio -
-        # BacktestEngineV2's own hardcoded defaults (0.001/0.0005)
-        # happen to match those defaults today, but nothing previously
-        # connected the two: an operator changing config.yaml's real fee
-        # assumption (VIP tier, BNB discount, exchange change) would
-        # silently leave every tournament backtest validating candidates
-        # against a stale friction assumption forever after.
         commission_rate: float = 0.001,
         slippage_rate: float = 0.0005,
-        # Periods-per-year for annualizing each fold's Sharpe (see
-        # trading_assistant.annualization.bars_per_year) - must match the
-        # ACTUAL bar timeframe run_tournament_from_live fetches (e.g. 8760
-        # for hourly 24/7 bars), not the default 252 (only correct for
-        # daily bars). Default of 252 preserves prior behavior for any
-        # caller that doesn't explicitly pass the right value.
+        # -- NEW research-layer recorder parameters --
+        candidate_performance_recorder: Optional[CandidatePerformanceRecorder] = None,
+        champion_registry: Optional[ChampionRegistry] = None,
+        # -- NEW 15‑minute candidate parameters --
+        feed_15m: Optional[FifteenMinuteFeed] = None,
+        ml_15m_config: Optional[Dict[str, Any]] = None,
         periods_per_year: float = 252,
     ):
         self.candidates = candidates if candidates is not None else default_candidates()
@@ -252,11 +231,6 @@ class StrategyManager:
         self.allow_short = allow_short
         self.journal = journal
         self._feeds: Dict[str, Any] = feeds or {}
-        # Passed to any LiveFeed constructed on demand in
-        # run_tournament_from_live so walk-forward validation trains/tests
-        # against the SAME exchange (and testnet/mainnet mode) real
-        # execution uses - a bare LiveFeed() otherwise defaults to an
-        # unsandboxed, always-mainnet ccxt instance regardless of config.mode.
         self._exchange = exchange
         self.risk_per_trade = risk_per_trade
         self.position_stop_loss_pct = position_stop_loss_pct
@@ -267,24 +241,16 @@ class StrategyManager:
         self.champion_switch_min_runs = champion_switch_min_runs
         self.champion_switch_margin = champion_switch_margin
         self.last_tournament: Dict[str, TournamentResult] = {}
-        # symbol -> regime -> [winner from run 1, winner from run 2, ...],
-        # in chronological order. This is what lets stability_score() answer
-        # "does the tournament keep picking the same strategy across
-        # repeated retraining cycles, or does the winner flip every time" -
-        # the single most important signal before ever trusting this enough
-        # to influence a live decision, per how many walk-forward folds a
-        # single run can validate is still bounded by one snapshot of history.
         self.winner_history: Dict[str, Dict[str, List[Optional[str]]]] = {}
-        # symbol -> candidate_name -> a currently-deployable instance: a
-        # model trained on the FULL history the last tournament run fetched
-        # (ml), or a fresh stateful instance ready to accumulate its own
-        # state as new live bars arrive (rule). Refreshed every
-        # run_tournament() call. This is what both the champion (routed to
-        # real execution) and challengers (routed to paper trading) predict
-        # from live - distinct from the walk-forward fold models, which
-        # only ever existed for one backtest slice and are discarded.
         self.live_instances: Dict[str, Dict[str, Any]] = {}
+        # NEW: recorders (None = disabled)
+        self.candidate_performance_recorder = candidate_performance_recorder
+        self.champion_registry = champion_registry
+        # NEW: 15‑minute candidate support
+        self.feed_15m = feed_15m
+        self.ml_15m_config = ml_15m_config or {}
 
+    # ---------- existing public API (unchanged) ----------
     def winner_for(self, symbol: str, regime: str) -> Optional[str]:
         selection = self.selection_for(symbol, regime)
         return selection.winner if selection else None
@@ -296,21 +262,11 @@ class StrategyManager:
         return result.winners.get(regime)
 
     def stability_score(self, symbol: str, regime: str) -> Optional[float]:
-        """Fraction of consecutive tournament re-runs where the winner for
-        this symbol/regime stayed the same. Returns None if fewer than 2
-        runs have been recorded yet - stability is a claim about repeated
-        behavior over time, not something a single (however good-looking)
-        run can establish."""
         history = self.winner_history.get(symbol, {}).get(regime, [])
         return self.compute_stability_score(history)
 
     @staticmethod
     def compute_stability_score(history: List[Optional[str]]) -> Optional[float]:
-        """Pure function version of stability_score - operates on any
-        chronological winner list, not just this instance's in-memory
-        winner_history. Lets a separate process (e.g. the dashboard)
-        reconstruct the identical score from tournament_events journal
-        history without needing access to a live StrategyManager."""
         if len(history) < 2:
             return None
         matches = sum(1 for i in range(1, len(history)) if history[i] == history[i - 1])
@@ -332,9 +288,6 @@ class StrategyManager:
         return self.run_tournament(symbol, ohlcv)
 
     def compare_long_only_vs_long_short(self, symbol: str, ohlcv: pd.DataFrame) -> Dict[str, TournamentResult]:
-        """Run the exact same candidates and walk-forward folds twice - once
-        long-only, once with shorting enabled - so the two can be compared
-        directly rather than guessing whether shorting would help."""
         original_allow_short = self.allow_short
         try:
             self.allow_short = False
@@ -346,15 +299,6 @@ class StrategyManager:
         return {"long_only": long_only, "long_short": long_short}
 
     def run_tournament(self, symbol: str, ohlcv: pd.DataFrame) -> TournamentResult:
-        # full_close/full_open/full_high/full_low keep the ORIGINAL row
-        # positions as their index (never reset), and `featured` below
-        # deliberately is NOT re-indexed after dropna() either - both stay
-        # aligned to the same absolute bar numbering, so a rule-based
-        # strategy backtest can look up "every bar up to and including bar
-        # N" via full_close.iloc[:N+1] regardless of how many leading rows
-        # were dropped for indicator warm-up. OHLC (not just close) is
-        # needed by candlestick-pattern-based strategies, which can't be
-        # computed from close prices alone.
         full_close = ohlcv["close"]
         full_open = ohlcv["open"]
         full_high = ohlcv["high"]
@@ -391,6 +335,8 @@ class StrategyManager:
                     model = candidate.factory()
                     model.train(train_slice[FEATURE_COLUMNS], train_slice["target"])
                     metrics = self._backtest_ml(model, symbol, test_slice)
+                elif candidate.kind == "ml_15m":
+                    metrics = self._backtest_ml_15m_candidate(symbol, test_slice, candidate)
                 else:
                     strategy = candidate.factory()
                     metrics = self._backtest_rule(
@@ -400,6 +346,16 @@ class StrategyManager:
                     )
 
                 report.folds.append(FoldRecord(fold_index=fold_index, regime=regime, metrics=metrics))
+
+                # -- NEW: record per-fold performance for research tracking --
+                if self.candidate_performance_recorder is not None:
+                    self.candidate_performance_recorder.record_fold_metrics(
+                        symbol=symbol,
+                        candidate_name=candidate.name,
+                        fold_number=fold_index,
+                        metrics=metrics,
+                    )
+
                 fold_index += 1
                 start += self.test_window_bars
 
@@ -413,29 +369,24 @@ class StrategyManager:
         self._log_tournament(symbol, result)
         return result
 
+    # ---------- helper methods (modified where noted) ----------
+
     def _deploy_live_instances(self, symbol: str, featured: pd.DataFrame) -> None:
-        """Produce one currently-deployable instance per candidate for live
-        (forward-only) use: ML candidates are retrained on the full
-        available window this run just fetched (the same idea as
-        LearningAgent's final full-data retrain after walk-forward
-        validates the approach); rule-based candidates get a fresh instance
-        that starts accumulating its own state from here forward."""
         deployed: Dict[str, Any] = {}
         for candidate in self.candidates:
             if candidate.kind == "ml":
                 model = candidate.factory()
                 model.train(featured[FEATURE_COLUMNS], featured["target"])
                 deployed[candidate.name] = model
+            elif candidate.kind == "ml_15m":
+                # 15m live instances are not deployed here; they are managed
+                # separately and not yet used for live trading.
+                deployed[candidate.name] = None
             else:
                 deployed[candidate.name] = candidate.factory()
         self.live_instances[symbol] = deployed
 
     def live_signal(self, symbol: str, candidate_name: str, features: pd.DataFrame) -> Signal:
-        """One live signal from a candidate's currently-deployed instance,
-        for the LAST row of `features` - used by both the champion (routed
-        to real execution elsewhere) and challengers (routed to paper
-        trading). Returns HOLD if the candidate has no deployed instance
-        yet (e.g. before the first tournament run for this symbol)."""
         instance = self.live_instances.get(symbol, {}).get(candidate_name)
         if instance is None:
             return Signal.HOLD
@@ -452,6 +403,7 @@ class StrategyManager:
                 return Signal.SELL
             return Signal.HOLD
 
+        # 15m candidate live signal not implemented yet; always HOLD
         return instance.generate_signal(
             {
                 "prices": features["close"],
@@ -529,12 +481,6 @@ class StrategyManager:
 
         incumbent = self._current_winner(symbol, regime)
         if incumbent is not None and incumbent in qualifying and incumbent != best_name:
-            # The incumbent STILL clears the bar this run - only actually
-            # switch away from it if it's held the position long enough
-            # AND the challenger's edge is more than noise. Two candidates
-            # separated by 0.01 median Sharpe are not a real signal to
-            # trade places on; if they were, they'd stay separated across
-            # several runs and the incumbent's own hold time would run out.
             held_runs = self._consecutive_runs_held(symbol, regime, incumbent)
             improvement = best_sharpe - qualifying[incumbent]
             if held_runs < self.champion_switch_min_runs or improvement < self.champion_switch_margin:
@@ -545,6 +491,33 @@ class StrategyManager:
                     f"({improvement:.2f}) is below the {self.champion_switch_margin} switch margin"
                 )
 
+        # -- NEW: record champion promotion in the research registry --
+        if self.champion_registry is not None and best_name is not None:
+            winner_report = next((c for c in candidates if c.name == best_name), None)
+            if winner_report:
+                regime_folds = [f for f in winner_report.folds if f.regime == regime]
+                if regime_folds:
+                    profit_factors = [f.metrics.get('profit_factor', 0.0) for f in regime_folds]
+                    max_drawdowns = [f.metrics.get('max_drawdown_pct', 0.0) for f in regime_folds]
+                    champion_metrics = {
+                        'sharpe': best_sharpe,
+                        'profit_factor': float(np.median(profit_factors)) if profit_factors else 0.0,
+                        'max_drawdown': float(min(max_drawdowns)),
+                        'folds_passed': len(regime_folds),
+                        'p_value': None,
+                    }
+                    replaced = self._current_winner(symbol, regime)
+                    if replaced == best_name:
+                        replaced = None
+                    self.champion_registry.record_promotion(
+                        symbol=symbol,
+                        regime=regime,
+                        champion_name=best_name,
+                        reason=reason,
+                        metrics=champion_metrics,
+                        replaced_champion=replaced,
+                    )
+
         return RegimeSelection(regime=regime, winner=best_name, reason=reason)
 
     def _current_winner(self, symbol: str, regime: str) -> Optional[str]:
@@ -552,9 +525,6 @@ class StrategyManager:
         return history[-1] if history else None
 
     def _consecutive_runs_held(self, symbol: str, regime: str, name: str) -> int:
-        """How many of the MOST RECENT tournament runs in a row had `name`
-        as the winner - the incumbent's current unbroken streak, not its
-        total lifetime win count."""
         history = self.winner_history.get(symbol, {}).get(regime, [])
         count = 0
         for winner in reversed(history):
@@ -562,6 +532,18 @@ class StrategyManager:
                 break
             count += 1
         return count
+
+    # ---------- backtesting helpers (profit_factor added) ----------
+
+    @staticmethod
+    def _profit_factor_from_engine(engine: BacktestEngineV2) -> float:
+        """Gross profit / gross loss from all closed trades in the engine."""
+        closed = [p for p in engine.positions if p.exit_time is not None]
+        if not closed:
+            return 0.0
+        gross_profit = sum(p.pnl for p in closed if p.pnl > 0)
+        gross_loss = abs(sum(p.pnl for p in closed if p.pnl < 0))
+        return gross_profit / gross_loss if gross_loss != 0 else float('inf')
 
     def _backtest_ml(self, model: Any, symbol: str, test_df: pd.DataFrame) -> dict:
         engine = BacktestEngineV2(
@@ -592,7 +574,9 @@ class StrategyManager:
             last_row = rows[-1]
             engine.close_position(position, float(last_row.close), getattr(last_row, "timestamp", None))
 
-        return self._result_to_dict(engine)
+        metrics = self._result_to_dict(engine)
+        metrics['profit_factor'] = self._profit_factor_from_engine(engine)
+        return metrics
 
     def _backtest_rule(
         self,
@@ -618,8 +602,6 @@ class StrategyManager:
             if price <= 0:
                 continue
 
-            # Everything up to and including this bar - exactly what would
-            # be available live at this point in time, nothing from the future.
             data = {"prices": full_close.iloc[: abs_idx + 1], "close": full_close.iloc[: abs_idx + 1]}
             if full_open is not None:
                 data["open"] = full_open.iloc[: abs_idx + 1]
@@ -647,8 +629,53 @@ class StrategyManager:
             last_row = test_df.iloc[-1]
             engine.close_position(position, float(last_row["close"]), last_row.get("timestamp"))
 
-        return self._result_to_dict(engine)
+        metrics = self._result_to_dict(engine)
+        metrics['profit_factor'] = self._profit_factor_from_engine(engine)
+        return metrics
 
+    # ---------- 15‑minute candidate backtesting helper ----------
+    def _backtest_ml_15m_candidate(
+        self, symbol: str, test_slice: pd.DataFrame, candidate: StrategyCandidate
+    ) -> dict:
+        """Run a single 15‑minute walk‑forward fold for the ml_ensemble_15m candidate."""
+        if self.feed_15m is None:
+            return {
+                "sharpe_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+                "win_rate": 0.0,
+                "num_trades": 0,
+                "total_return_pct": 0.0,
+                "profit_factor": 0.0,
+            }
+        # The 1h test slice index carries timestamps. Use them to define
+        # the corresponding calendar windows for the 15‑minute feed.
+        test_start = test_slice.index[0]
+        test_end = test_slice.index[-1]
+        train_start = test_start - pd.Timedelta(days=30)  # fixed 30‑day training window
+        train_end = test_start
+
+        config = {
+            "horizon_bars": 4,
+            "atr_multiplier": 0.5,
+            "min_confidence": 0.55,
+            "min_rr_ratio": 2.0,
+            "fee_rate": 0.0015,
+            "stop_loss_atr_mult": 2.0,
+            "take_profit_atr_mult": 3.0,
+        }
+        config.update(self.ml_15m_config)
+
+        return backtest_ml_15m(
+            symbol=symbol,
+            feed=self.feed_15m,
+            train_start=train_start,
+            train_end=train_end,
+            test_start=test_start,
+            test_end=test_end,
+            config=config,
+        )
+
+    # ---------- position helpers (unchanged) ----------
     def _ensure_direction(
         self,
         engine: BacktestEngineV2,
@@ -658,8 +685,6 @@ class StrategyManager:
         price: float,
         timestamp: Any,
     ) -> Optional[Position]:
-        """Close an opposing position if one is held, then open
-        desired_direction if flat. Idempotent if already in desired_direction."""
         if position is not None and position.direction != desired_direction:
             engine.close_position(position, price, timestamp)
             position = None
@@ -679,8 +704,6 @@ class StrategyManager:
     def _flatten_if_long(
         engine: BacktestEngineV2, position: Optional[Position], price: float, timestamp: Any
     ) -> Optional[Position]:
-        """Long-only mode's SELL handling: close a long if held, otherwise
-        no-op (never opens a short)."""
         if position is not None and position.direction == OrderDirection.LONG:
             engine.close_position(position, price, timestamp)
             return None

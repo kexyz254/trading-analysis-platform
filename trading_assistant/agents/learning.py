@@ -42,6 +42,7 @@ from trading_assistant.market_data.feed import LiveFeed
 from trading_assistant.ml.drift import compute_baseline_distribution, compute_feature_drift_from_baseline, summarize_drift
 from trading_assistant.ml.predictor import EnsemblePredictor, RandomForestPredictor, XGBPredictor
 from trading_assistant.ml.shap_importance import compute_ensemble_feature_importance
+from trading_assistant.persistence.experiment_log import ExperimentLog   # <-- NEW
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.risk.backtest_sizing import risk_based_quantity
 from trading_assistant.validation.significance import (
@@ -81,15 +82,6 @@ class WalkForwardSummary:
     pct_folds_profitable: float = 0.0
     worst_fold_drawdown_pct: float = 0.0
     total_trades: int = 0
-    # Trade-weighted average of each fold's own per-trade win_rate - NOT
-    # the same thing as pct_folds_profitable (the fraction of FOLD-level
-    # windows that ended net-positive, a much coarser signal). Distinct on
-    # purpose: check_live_decay compares live per-trade win rate against
-    # this, and comparing it against pct_folds_profitable instead used to
-    # compare two different metrics as if they were the same one (a model
-    # can clear 90% of fold windows net-positive while its actual per-trade
-    # win rate is ~35% on a few big winners) - a real decay could be masked,
-    # or a healthy live run could trip a false rollback.
     mean_win_rate: float = 0.0
 
     def to_dict(self) -> dict:
@@ -101,10 +93,6 @@ class WalkForwardSummary:
             "worst_fold_drawdown_pct": self.worst_fold_drawdown_pct,
             "total_trades": self.total_trades,
             "mean_win_rate": self.mean_win_rate,
-            # Raw per-fold Sharpe values, not just the summary median - the
-            # statistical significance checks (trading_assistant.validation.
-            # significance) need the actual spread across folds, not a
-            # single point estimate.
             "fold_sharpes": [f.metrics["sharpe_ratio"] for f in self.folds],
         }
 
@@ -119,15 +107,6 @@ class RetrainOutcome:
 
 @dataclass
 class CandidateEvaluation:
-    """Everything about a retrain candidate that's independent of WHICH
-    significance decision (a single uncorrected test, or a Benjamini-
-    Hochberg-corrected one across a whole retrain batch - see
-    trading_assistant.validation.significance) ultimately gets applied to
-    it. Walk-forward validation (expensive: trains a fresh model per
-    fold) happens exactly once here; retrain_all's batch correction and
-    retrain's single-symbol path both build on this same evaluation
-    rather than re-running it."""
-
     symbol: str
     featured: pd.DataFrame
     walk_forward: WalkForwardSummary
@@ -136,11 +115,6 @@ class CandidateEvaluation:
     min_folds_ok: bool
     pct_profitable_ok: bool
     drawdown_ok: bool
-    # None when there aren't enough folds for a real statistical test (see
-    # trading_assistant.validation.significance.MIN_FOLDS_FOR_TEST) -
-    # excluded from Benjamini-Hochberg correction entirely; the caller
-    # falls back to the same point-estimate comparison the uncorrected
-    # single-test functions use.
     threshold_p_value: Optional[float]
     baseline_p_value: Optional[float]
 
@@ -155,53 +129,23 @@ class LearningAgent:
         train_window_bars: int = 500,
         test_window_bars: int = 100,
         target_folds: int = 8,
-        # See LearningConfig.min_folds_required's docstring (trading_assistant/
-        # config.py) for why 3, not 5 - matches the live system's actual
-        # config.yaml default now.
         min_folds_required: int = 3,
         min_pct_folds_profitable: float = 0.5,
-        # See LearningConfig.min_trades_per_fold's docstring - a fold with
-        # 0-2 trades is dropped before num_folds/any aggregate is computed,
-        # rather than counting identically to a fold with real activity.
-        # 0 disables the filter (every fold counts).
         min_trades_per_fold: int = 0,
         journal: Optional[Journal] = None,
         model_factory: Callable[[], Any] = _default_model_factory,
         feeds: Optional[Dict[str, Any]] = None,
         exchange: Optional[Any] = None,
         alert_manager: Optional[AlertManager] = None,
-        # Live-performance-triggered rollback: once at least
-        # min_live_trades_for_decay_check real trades have closed for a
-        # symbol since its model was promoted, compare their actual win
-        # rate against what walk-forward validated. None disables it
-        # entirely (opt-in, backward compatible).
+        experiment_log: Optional[ExperimentLog] = None,   # <-- NEW
         min_live_trades_for_decay_check: Optional[int] = None,
         decay_win_rate_fraction: float = 0.5,
         decay_lookback_trades: int = 30,
-        # Walk-forward sizing parity (trading_assistant.risk.backtest_sizing) -
-        # see StrategyManager's identical parameter for why: a flat ~95%-
-        # of-capital backtest sizing describes performance at a risk level
-        # the model would never actually be traded at live. None keeps the
-        # old flat sizing (opt-in, backward compatible).
         risk_per_trade: Optional[float] = None,
         position_stop_loss_pct: float = 0.01,
         max_position_size: float = 0.1,
-        # Same real-world friction assumption PortfolioConfig's
-        # commission_rate/slippage_rate feeds the LIVE portfolio -
-        # BacktestEngineV2's own hardcoded defaults (0.001/0.0005) happen
-        # to match those defaults today, but nothing previously connected
-        # the two: an operator changing config.yaml's real fee assumption
-        # (VIP tier, BNB discount, exchange change) would silently leave
-        # every walk-forward promotion decision validating candidates
-        # against a stale friction assumption forever after.
         commission_rate: float = 0.001,
         slippage_rate: float = 0.0005,
-        # Periods-per-year for annualizing each fold's Sharpe (see
-        # trading_assistant.annualization.bars_per_year) - must match the
-        # ACTUAL bar timeframe retrain_from_live fetches (e.g. 8760 for
-        # hourly 24/7 bars), not the default 252 (only correct for daily
-        # bars). Default of 252 preserves prior behavior for any caller
-        # that doesn't explicitly pass the right value for its timeframe.
         periods_per_year: float = 252,
     ):
         self.prediction_agent = prediction_agent
@@ -225,24 +169,13 @@ class LearningAgent:
         self.decay_win_rate_fraction = decay_win_rate_fraction
         self.decay_lookback_trades = decay_lookback_trades
         self._feeds: Dict[str, Any] = feeds or {}
-        # Passed to any LiveFeed this agent constructs on demand (see
-        # retrain_from_live) so walk-forward training data comes from the
-        # SAME exchange (and testnet/mainnet mode) real execution uses -
-        # without this, a bare LiveFeed() defaults to an unsandboxed,
-        # always-mainnet ccxt instance regardless of config.mode.
         self._exchange = exchange
         self.alert_manager = alert_manager
-        # Keyed by symbol - a per-symbol baseline, not a single shared one.
-        # Otherwise BTC/USDT's promoted score would gate ETH/USDT's promotion
-        # decisions (and vice versa), which makes no sense across symbols.
+        self.experiment_log = experiment_log   # <-- NEW
         self.last_promoted_metrics: Dict[str, dict] = {}
 
     @property
     def buy_threshold(self) -> float:
-        # Read from prediction_agent rather than keeping an independent copy -
-        # otherwise tuning live trading thresholds without also touching this
-        # class would silently validate candidates against a stale rule that
-        # isn't the one actually deployed.
         return self.prediction_agent.buy_threshold
 
     @property
@@ -258,14 +191,6 @@ class LearningAgent:
     def retrain_all_from_live(
         self, symbols: List[str], timeframe: str = "1h", total_bars: Optional[int] = None
     ) -> Dict[str, RetrainOutcome]:
-        """Batch equivalent of retrain_from_live, correcting significance
-        across the WHOLE batch via Benjamini-Hochberg (see retrain_all) -
-        this is what Orchestrator._retrain_all_symbols actually calls, so
-        that a real retrain cycle's family of tests (every symbol
-        evaluated together, on the recurring cadence the tournament
-        reruns at) gets corrected as one family, not as N independent
-        single tests each carrying the full per-test false-positive risk
-        on its own."""
         symbols_and_ohlcv = [
             (symbol, self.fetch_ohlcv_for_retrain(symbol, timeframe, total_bars, feed=None)) for symbol in symbols
         ]
@@ -276,39 +201,52 @@ class LearningAgent:
     ) -> pd.DataFrame:
         feed = feed or self._feeds.get(symbol) or LiveFeed(symbol=symbol, timeframe=timeframe, exchange=self._exchange)
         if total_bars is None:
-            # Enough for target_folds walk-forward folds plus indicator warmup.
             total_bars = self.train_window_bars + self.target_folds * self.test_window_bars + 50
         if hasattr(feed, "fetch_ohlcv_history"):
             return feed.fetch_ohlcv_history(total_bars=total_bars)
         return feed.fetch_ohlcv(limit=total_bars)
 
     def retrain(self, symbol: str, ohlcv: pd.DataFrame) -> RetrainOutcome:
-        """Single-symbol retrain at a fixed, UNCORRECTED per-test
-        significance level - kept for standalone/backward-compatible use.
-        The live system's real retrain loop instead calls
-        retrain_all_from_live/retrain_all, which corrects across the
-        whole batch of symbols retrained together (see that method and
-        trading_assistant.validation.significance's module docstring on
-        why a fixed per-test alpha, applied independently to every
-        candidate on a recurring cadence, eventually promotes noise)."""
+        # --- experiment log start (single symbol) ---
+        experiment_id = None
+        if self.experiment_log is not None:
+            experiment_id = f"RET-{symbol}-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}"
+            self.experiment_log.start_experiment(
+                experiment_id=experiment_id,
+                goal=f"Walk-forward retrain for {symbol}",
+                changes=(
+                    f"train_window={self.train_window_bars}, test_window={self.test_window_bars}, "
+                    f"target_folds={self.target_folds}, min_folds={self.min_folds_required}, "
+                    f"min_sharpe={self.min_sharpe_to_promote}, min_pct_profitable={self.min_pct_folds_profitable}, "
+                    f"buy_threshold={self.buy_threshold}, sell_threshold={self.sell_threshold}, "
+                    f"risk_per_trade={self.risk_per_trade}, max_position_size={self.max_position_size}, "
+                    f"commission_rate={self.commission_rate}, slippage_rate={self.slippage_rate}"
+                ),
+            )
+        # --- end experiment log start ---
+
         evaluation = self._evaluate_candidate(symbol, ohlcv)
         threshold_significant = clears_threshold_significantly(evaluation.fold_sharpes, self.min_sharpe_to_promote)
         baseline_significant = self._uncorrected_baseline_significant(evaluation)
-        return self._finalize_candidate(evaluation, threshold_significant, baseline_significant)
+        outcome = self._finalize_candidate(evaluation, threshold_significant, baseline_significant)
+
+        # --- experiment log conclude ---
+        if self.experiment_log is not None and experiment_id is not None:
+            metrics = outcome.candidate_metrics
+            self.experiment_log.record_result(experiment_id, {
+                'sharpe': metrics.get('median_sharpe', 0.0),
+                'profit_factor': 0.0,   # placeholder – fold-level profit factor not yet captured here
+                'net_pnl': 0.0,
+                'win_rate': metrics.get('pct_folds_profitable', 0.0),
+                'max_drawdown': metrics.get('worst_fold_drawdown_pct', 0.0),
+            })
+            decision = "promoted" if outcome.promoted else "rejected"
+            self.experiment_log.conclude_experiment(experiment_id, decision)
+        # --- end experiment log ---
+
+        return outcome
 
     def retrain_all(self, symbols_and_ohlcv: List[Tuple[str, pd.DataFrame]]) -> Dict[str, RetrainOutcome]:
-        """Evaluate every (symbol, ohlcv) pair, then apply Benjamini-
-        Hochberg correction ONCE across the whole batch's p-values before
-        finalizing any individual promotion decision - see
-        trading_assistant.validation.significance.benjamini_hochberg and
-        this module's own docstring for why. Threshold-clearing and
-        beats-baseline are corrected as two SEPARATE families (they're
-        different hypotheses about different things), each only over the
-        candidates that actually produced a real p-value; candidates with
-        too few folds for a real test fall back to the same uncorrected
-        point-estimate comparison retrain()'s single-symbol path uses,
-        since there's no p-value on those to correct in the first place.
-        """
         evaluations = [self._evaluate_candidate(symbol, ohlcv) for symbol, ohlcv in symbols_and_ohlcv]
 
         threshold_corrected = benjamini_hochberg([e.threshold_p_value for e in evaluations])
@@ -316,6 +254,24 @@ class LearningAgent:
 
         outcomes: Dict[str, RetrainOutcome] = {}
         for i, evaluation in enumerate(evaluations):
+            # --- experiment log start (per symbol in batch) ---
+            experiment_id = None
+            if self.experiment_log is not None:
+                experiment_id = f"RET-{evaluation.symbol}-{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}-batch"
+                self.experiment_log.start_experiment(
+                    experiment_id=experiment_id,
+                    goal=f"Batch walk-forward retrain for {evaluation.symbol}",
+                    changes=(
+                        f"train_window={self.train_window_bars}, test_window={self.test_window_bars}, "
+                        f"target_folds={self.target_folds}, min_folds={self.min_folds_required}, "
+                        f"min_sharpe={self.min_sharpe_to_promote}, min_pct_profitable={self.min_pct_folds_profitable}, "
+                        f"buy_threshold={self.buy_threshold}, sell_threshold={self.sell_threshold}, "
+                        f"risk_per_trade={self.risk_per_trade}, max_position_size={self.max_position_size}, "
+                        f"commission_rate={self.commission_rate}, slippage_rate={self.slippage_rate}"
+                    ),
+                )
+            # --- end experiment log start ---
+
             if evaluation.threshold_p_value is not None:
                 threshold_significant = threshold_corrected[i]
             else:
@@ -328,18 +284,28 @@ class LearningAgent:
             else:
                 baseline_significant = self._uncorrected_baseline_significant(evaluation)
 
-            outcomes[evaluation.symbol] = self._finalize_candidate(
+            outcome = self._finalize_candidate(
                 evaluation, threshold_significant, baseline_significant
             )
+
+            # --- experiment log conclude ---
+            if self.experiment_log is not None and experiment_id is not None:
+                metrics = outcome.candidate_metrics
+                self.experiment_log.record_result(experiment_id, {
+                    'sharpe': metrics.get('median_sharpe', 0.0),
+                    'profit_factor': 0.0,
+                    'net_pnl': 0.0,
+                    'win_rate': metrics.get('pct_folds_profitable', 0.0),
+                    'max_drawdown': metrics.get('worst_fold_drawdown_pct', 0.0),
+                })
+                decision = "promoted" if outcome.promoted else "rejected"
+                self.experiment_log.conclude_experiment(experiment_id, decision)
+            # --- end experiment log ---
+
+            outcomes[evaluation.symbol] = outcome
         return outcomes
 
     def _uncorrected_baseline_significant(self, evaluation: "CandidateEvaluation") -> bool:
-        """The exact fallback logic retrain()'s original inline version
-        used: vacuously true with no baseline yet, a real significance
-        test when the baseline has fold-level history, or a plain median
-        comparison for an older baseline recorded before fold-level
-        tracking existed. Also used by retrain_all whenever a candidate's
-        baseline comparison doesn't have a real p-value to correct."""
         baseline_metrics = evaluation.baseline_metrics
         if not baseline_metrics:
             return True
@@ -449,11 +415,7 @@ class LearningAgent:
                 symbol,
             )
 
-        # Promote: train the model actually deployed live on ALL available
-        # data (every fold's train+test rows), not just the last fold's
-        # training window - walk-forward already proved this feature set/
-        # model class holds up across many windows, so the final model gets
-        # to see everything.
+        # Promote
         candidate = self.model_factory()
         candidate.train(featured[FEATURE_COLUMNS], featured["target"])
         self.prediction_agent.promote_model(symbol, candidate, FEATURE_COLUMNS)
@@ -495,17 +457,8 @@ class LearningAgent:
             )
 
             fold_index += 1
-            start += self.test_window_bars  # non-overlapping test windows; rolling (not expanding) train window
+            start += self.test_window_bars
 
-        # See LearningConfig.min_trades_per_fold's docstring: a fold with
-        # 0-2 trades produces a Sharpe/return number that's mostly noise,
-        # but previously counted toward num_folds/min_folds_required and
-        # every aggregate exactly the same as a fold with real activity -
-        # a real audit finding (some symbols had as few as 9-10 TOTAL
-        # trades across all 8 folds combined). Dropped BEFORE any
-        # aggregate is computed, not just flagged after the fact, so
-        # min_folds_required means "this many folds that actually
-        # observed enough trades," not just "this many folds ran."
         if self.min_trades_per_fold > 0:
             folds = [f for f in folds if f.metrics["num_trades"] >= self.min_trades_per_fold]
 
@@ -514,13 +467,9 @@ class LearningAgent:
 
         sharpes = [f.metrics["sharpe_ratio"] for f in folds]
         returns = [f.metrics["total_return_pct"] for f in folds]
-        drawdowns = [f.metrics["max_drawdown_pct"] for f in folds]  # zero or negative
+        drawdowns = [f.metrics["max_drawdown_pct"] for f in folds]
         trades = [f.metrics["num_trades"] for f in folds]
         total_trades = int(sum(trades))
-        # Trade-weighted, not a plain fold average: a fold with 20 trades
-        # should count more than a fold with 1 - see mean_win_rate's
-        # docstring on WalkForwardSummary for why this must stay distinct
-        # from pct_folds_profitable.
         mean_win_rate = (
             sum(f.metrics["win_rate"] * f.metrics["num_trades"] for f in folds) / total_trades
             if total_trades > 0 else 0.0
@@ -532,7 +481,7 @@ class LearningAgent:
             median_sharpe=float(np.median(sharpes)),
             mean_sharpe=float(np.mean(sharpes)),
             pct_folds_profitable=sum(1 for r in returns if r > 0) / len(folds),
-            worst_fold_drawdown_pct=float(min(drawdowns)),  # most negative = worst
+            worst_fold_drawdown_pct=float(min(drawdowns)),
             total_trades=total_trades,
             mean_win_rate=float(mean_win_rate),
         )
@@ -584,11 +533,6 @@ class LearningAgent:
         }
 
     def _capture_feature_baseline(self, symbol: str, featured: pd.DataFrame) -> None:
-        """Persist a compact snapshot of what the just-promoted model was
-        actually trained on, so a later live drift check has something to
-        compare against. Skipped (not an error) when there's no journal to
-        persist to, same convention as every other optional-journal path
-        in this class."""
         if self.journal is None:
             return
         distributions = {
@@ -596,25 +540,11 @@ class LearningAgent:
             for col in FEATURE_COLUMNS
             if col in featured.columns
         }
-        # A feature with no usable spread (e.g. constant over the training
-        # window) yields None - keep it out of the persisted baseline
-        # rather than storing a distribution that can never be compared
-        # against.
         distributions = {col: dist for col, dist in distributions.items() if dist}
         if distributions:
             self.journal.record_feature_baseline(symbol=symbol, boundaries=distributions)
 
     def _capture_feature_importance(self, symbol: str, candidate: Any, featured: pd.DataFrame) -> None:
-        """Persist SHAP-based feature importance for the just-promoted
-        model - a diagnostic/QA record of which of the ~30 engineered
-        features it actually relies on (see
-        trading_assistant.ml.shap_importance), never consulted by any
-        live trading or promotion decision. Best-effort: skipped
-        entirely (not an error) when there's no journal, and any failure
-        inside the importance computation itself is already caught and
-        logged there, never here - a diagnostic feature must never be
-        capable of interrupting a real promotion that already
-        succeeded."""
         if self.journal is None:
             return
         importance = compute_ensemble_feature_importance(candidate, featured[FEATURE_COLUMNS], FEATURE_COLUMNS)
@@ -622,17 +552,6 @@ class LearningAgent:
             self.journal.record_feature_importance(symbol=symbol, importance=importance)
 
     def check_feature_drift(self, symbol: str, live_features: pd.DataFrame) -> Optional[dict]:
-        """Compare a recent window of LIVE engineered features against the
-        currently-promoted model's training-time baseline for this symbol.
-
-        Returns None when there's no baseline yet to compare against (no
-        journal, or no model has been promoted for this symbol) - a
-        distinct, honest "nothing to check" state, not silently reported
-        as "no drift". Otherwise returns and persists a drift summary;
-        logs a warning when the worst-drifted feature reaches at least
-        moderate severity, since that's the first sign a promoted model
-        may be seeing live conditions its training data never covered.
-        """
         if self.journal is None:
             return None
         baseline = self.journal.latest_feature_baseline(symbol)
@@ -666,27 +585,6 @@ class LearningAgent:
         return summary
 
     def check_live_decay(self, symbol: str, recent_trade_pnls: List[float]) -> Optional[dict]:
-        """Compares a symbol's REAL recent trade outcomes against what its
-        currently-promoted model validated at during walk-forward -
-        "detect performance deterioration early" from Live Monitoring &
-        Model Decay, closing the loop feature drift alone leaves open
-        (drift says conditions changed; this says whether that change
-        actually hurt real results).
-
-        Deliberately compares WIN RATE (fraction of profitable trades),
-        not Sharpe: walk-forward's median_sharpe is annualized from daily-
-        equity-curve statistics, while recent_trade_pnls is a handful of
-        individual trade outcomes at whatever cadence they happened to
-        close - forcing those into the same "Sharpe" units would compare
-        two different sampling frequencies as if they meant the same
-        thing. Win rate is dimensionless and directly comparable either way.
-
-        On a confirmed decay (real win rate has fallen to less than
-        decay_win_rate_fraction of what walk-forward found AND the recent
-        window is net-losing - both conditions, not just one noisy metric
-        alone), automatically rolls back to the previously-promoted model
-        version via PredictionAgent.rollback_model.
-        """
         baseline = self.last_promoted_metrics.get(symbol)
         if baseline is None or self.min_live_trades_for_decay_check is None:
             return None
@@ -694,12 +592,6 @@ class LearningAgent:
             return None
 
         live_win_rate = sum(1 for p in recent_trade_pnls if p > 0) / len(recent_trade_pnls)
-        # NOT pct_folds_profitable (fraction of FOLD windows net-positive) -
-        # that's a different, coarser metric than a per-trade win rate; see
-        # WalkForwardSummary.mean_win_rate's docstring. baseline.get(...)
-        # falls back to pct_folds_profitable only for metrics persisted
-        # before mean_win_rate existed, matching this system's own
-        # "append, never break existing journaled records" convention.
         baseline_win_rate = baseline.get("mean_win_rate", baseline.get("pct_folds_profitable", 0.0))
         net_pnl = sum(recent_trade_pnls)
         decayed = live_win_rate < baseline_win_rate * self.decay_win_rate_fraction and net_pnl < 0

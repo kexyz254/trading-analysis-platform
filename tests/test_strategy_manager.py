@@ -54,7 +54,7 @@ def test_default_candidates_includes_ml_and_every_rule_based_strategy():
 
     assert names == {
         "ml_ensemble", "sma_crossover", "rsi_mean_reversion", "macd", "bollinger_bands", "candlestick_patterns",
-        "time_series_momentum", "smart_money_concepts", "vwap_reversion",
+        "time_series_momentum", "smart_money_concepts", "vwap_reversion", "ml_ensemble_15m",
     }
     assert kinds["ml_ensemble"] == "ml"
     assert kinds["sma_crossover"] == "rule"
@@ -345,6 +345,7 @@ def test_run_tournament_end_to_end_with_real_candidates_on_synthetic_data():
         "time_series_momentum",
         "smart_money_concepts",
         "vwap_reversion",
+        "ml_ensemble_15m",
     }
     for candidate in result.candidates:
         assert set(candidate.by_regime.keys()) == {"trending_up", "trending_down", "ranging"}
@@ -580,7 +581,7 @@ def test_run_tournament_deploys_a_live_instance_per_candidate():
     deployed_names = set(manager.live_instances["BTC/USDT"].keys())
     assert deployed_names == {
         "ml_ensemble", "sma_crossover", "rsi_mean_reversion", "macd", "bollinger_bands", "candlestick_patterns",
-        "time_series_momentum", "smart_money_concepts", "vwap_reversion",
+        "time_series_momentum", "smart_money_concepts", "vwap_reversion", "ml_ensemble_15m",
     }
     # a rule-based instance must be a real, fresh strategy object, not a placeholder
     assert hasattr(manager.live_instances["BTC/USDT"]["sma_crossover"], "generate_signal")
