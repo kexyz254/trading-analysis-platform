@@ -36,6 +36,7 @@ _PRUNABLE_TABLES = (
     # for dedupe_key Y", which has zero value once far older than any
     # realistic cooldown_seconds).
     "alert_delivery",
+    "ohlcv",
 )
 
 _SCHEMA = """
@@ -231,6 +232,30 @@ CREATE TABLE IF NOT EXISTS alert_delivery (
     timestamp TEXT NOT NULL,
     PRIMARY KEY (channel, dedupe_key)
 );
+
+-- One row per (symbol, timeframe, bar timestamp), upserted - the
+-- orchestrator persists the latest bar once per poll_interval_seconds,
+-- which is far more often than a new candle actually closes, so the same
+-- in-progress bar is written repeatedly. The UNIQUE constraint plus
+-- ON CONFLICT DO UPDATE in record_ohlcv_snapshot keeps exactly one row
+-- per bar instead of growing an unbounded number of duplicates. Feeds the
+-- professional dashboard's chart only - never consulted by any trading
+-- or promotion decision, so it belongs in _PRUNABLE_TABLES like its
+-- sibling operational tables.
+CREATE TABLE IF NOT EXISTS ohlcv (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    UNIQUE (symbol, timeframe, timestamp)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_timeframe ON ohlcv (symbol, timeframe, timestamp);
 """
 
 
@@ -817,6 +842,48 @@ class Journal:
         with closing(self._connect()) as conn:
             rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    def record_ohlcv_snapshot(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        timestamp: str,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> int:
+        """Upsert one bar. Called once per poll cycle with the latest bar
+        the engine has - see the ohlcv table's own docstring in _SCHEMA for
+        why ON CONFLICT DO UPDATE (not a plain INSERT) is required here."""
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO ohlcv (symbol, timeframe, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (symbol, timeframe, timestamp) DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume
+                """,
+                (symbol, timeframe, timestamp, open, high, low, close, volume),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def get_ohlcv_history(self, symbol: str, timeframe: str, limit: int = 200) -> List[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ohlcv WHERE symbol = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT ?",
+                (symbol, timeframe, limit),
+            ).fetchall()
+        bars = [dict(row) for row in rows]
+        bars.reverse()
+        return bars
 
     def record_trade_audit(
         self,

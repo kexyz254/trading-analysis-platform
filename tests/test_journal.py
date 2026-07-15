@@ -42,6 +42,54 @@ def test_record_and_read_trade(tmp_path):
     assert trades[0]["order_id"] == "abc123"
 
 
+def test_record_and_read_ohlcv_snapshot(tmp_path):
+    journal = _make_journal(tmp_path)
+    journal.record_ohlcv_snapshot(
+        symbol="BTC/USDT", timeframe="1h", timestamp="2026-07-15T18:00:00+00:00",
+        open=100.0, high=110.0, low=95.0, close=105.0, volume=42.0,
+    )
+
+    bars = journal.get_ohlcv_history("BTC/USDT", "1h", limit=10)
+    assert len(bars) == 1
+    assert bars[0]["close"] == 105.0
+    assert bars[0]["volume"] == 42.0
+
+
+def test_ohlcv_snapshot_upserts_the_same_bar_instead_of_duplicating(tmp_path):
+    journal = _make_journal(tmp_path)
+    ts = "2026-07-15T18:00:00+00:00"
+    # Simulates two poll cycles landing on the same still-open candle.
+    journal.record_ohlcv_snapshot(symbol="BTC/USDT", timeframe="1h", timestamp=ts, open=100.0, high=105.0, low=99.0, close=101.0, volume=10.0)
+    journal.record_ohlcv_snapshot(symbol="BTC/USDT", timeframe="1h", timestamp=ts, open=100.0, high=108.0, low=99.0, close=104.0, volume=15.0)
+
+    bars = journal.get_ohlcv_history("BTC/USDT", "1h", limit=10)
+    assert len(bars) == 1
+    assert bars[0]["close"] == 104.0
+    assert bars[0]["volume"] == 15.0
+
+
+def test_ohlcv_history_is_scoped_per_symbol_and_timeframe(tmp_path):
+    journal = _make_journal(tmp_path)
+    journal.record_ohlcv_snapshot(symbol="BTC/USDT", timeframe="1h", timestamp="2026-07-15T18:00:00+00:00", open=1, high=1, low=1, close=1, volume=1)
+    journal.record_ohlcv_snapshot(symbol="ETH/USDT", timeframe="1h", timestamp="2026-07-15T18:00:00+00:00", open=2, high=2, low=2, close=2, volume=2)
+    journal.record_ohlcv_snapshot(symbol="BTC/USDT", timeframe="15m", timestamp="2026-07-15T18:00:00+00:00", open=3, high=3, low=3, close=3, volume=3)
+
+    btc_1h = journal.get_ohlcv_history("BTC/USDT", "1h", limit=10)
+    assert len(btc_1h) == 1
+    assert btc_1h[0]["close"] == 1
+
+
+def test_ohlcv_history_returns_chronological_order_and_respects_limit(tmp_path):
+    journal = _make_journal(tmp_path)
+    base = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    for i in range(5):
+        ts = (base + timedelta(hours=i)).isoformat()
+        journal.record_ohlcv_snapshot(symbol="BTC/USDT", timeframe="1h", timestamp=ts, open=i, high=i, low=i, close=i, volume=i)
+
+    bars = journal.get_ohlcv_history("BTC/USDT", "1h", limit=3)
+    assert [b["close"] for b in bars] == [2, 3, 4]  # most recent 3, oldest first
+
+
 def test_recent_decisions_respects_symbol_filter(tmp_path):
     journal = _make_journal(tmp_path)
     journal.record_decision(symbol="BTC/USDT", risk_approved=True)
@@ -467,6 +515,10 @@ def test_prune_old_records_covers_every_prunable_table(tmp_path):
     journal.record_tournament_event(symbol="BTC/USDT", winners={}, report={}, timestamp=old_ts)
     journal.record_feature_baseline(symbol="BTC/USDT", boundaries={}, timestamp=old_ts)
     journal.record_alert_delivery(channel="webhook", dedupe_key="k", timestamp=old_ts)
+    journal.record_ohlcv_snapshot(
+        symbol="BTC/USDT", timeframe="1h", timestamp=old_ts,
+        open=1.0, high=1.0, low=1.0, close=1.0, volume=1.0,
+    )
 
     deleted = journal.prune_old_records(retention_days=180)
 
@@ -479,6 +531,7 @@ def test_prune_old_records_covers_every_prunable_table(tmp_path):
         "tournament_events": 1,
         "feature_baselines": 1,
         "alert_delivery": 1,
+        "ohlcv": 1,
     }
     assert journal.recent_decisions(limit=10) == []
     assert journal.recent_paper_equity_snapshots() == []

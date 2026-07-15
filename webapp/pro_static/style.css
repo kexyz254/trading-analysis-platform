@@ -102,6 +102,7 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .trades-table th, .trades-table td { padding: 2px 4px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .trades-table .positive { color: var(--accent); }
 .trades-table .negative { color: var(--danger); }
+.warn { color: var(--warning); font-size: 0.75rem; margin-top: 4px; }
 
 /* === BOTTOM BAR === */
 #bottombar {

@@ -219,8 +219,12 @@ def survivorship_bias():
 # ---------------------------------------------------------------------------
 # NEW: Professional Dashboard API (read‑only, journal‑backed)
 # ---------------------------------------------------------------------------
+# Every {symbol} below uses the `:path` converter, not the default `str`
+# one - symbols are exchange pairs like "BTC/USDT", and Starlette's default
+# path converter refuses to match a "/" inside a single segment, so a plain
+# {symbol} route 404s on every real symbol before the handler ever runs.
 
-@app.get("/api/pro/ohlcv/{symbol}")
+@app.get("/api/pro/ohlcv/{symbol:path}")
 def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
     """Return OHLCV bars persisted by the engine for charting."""
     try:
@@ -232,7 +236,7 @@ def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/prediction/{symbol}")
+@app.get("/api/pro/prediction/{symbol:path}")
 def pro_prediction(symbol: str):
     """Latest real decision for the symbol (signal, confidence, regime, etc.)."""
     try:
@@ -255,7 +259,7 @@ def pro_prediction(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/features/{symbol}")
+@app.get("/api/pro/features/{symbol:path}")
 def pro_features(symbol: str):
     """Latest SHAP feature importance for the champion model."""
     try:
@@ -270,7 +274,7 @@ def pro_features(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/trades/{symbol}")
+@app.get("/api/pro/trades/{symbol:path}")
 def pro_trades(symbol: str, limit: int = 50):
     """Real trade history for the symbol."""
     try:
@@ -282,7 +286,7 @@ def pro_trades(symbol: str, limit: int = 50):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/candidates/{symbol}")
+@app.get("/api/pro/candidates/{symbol:path}")
 def pro_candidates(symbol: str):
     """Paper‑trading leaderboard for the symbol (most recent snapshot per candidate)."""
     try:
@@ -299,6 +303,30 @@ def pro_candidates(symbol: str):
                 "timestamp": snap["timestamp"],
             })
         return {"symbol": symbol, "candidates": candidates}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/position/{symbol:path}")
+def pro_position(symbol: str):
+    """Current real-portfolio position for the symbol, from the most recent
+    mark-to-market equity snapshot - the same source of truth the engine
+    itself trades against, not a separate/derived view."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+        snapshot = journal.latest_equity_snapshot()
+        position = (snapshot or {}).get("positions", {}).get(symbol)
+        if not snapshot or not position or not position.get("quantity"):
+            return {"symbol": symbol, "open": False}
+        return {
+            "symbol": symbol,
+            "open": True,
+            "quantity": position["quantity"],
+            "price": position["price"],
+            "unexplained_quantity": position.get("unexplained_quantity", 0.0),
+            "as_of": snapshot["timestamp"],
+        }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 

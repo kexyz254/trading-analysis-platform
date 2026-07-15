@@ -96,7 +96,8 @@ async function refreshAll() {
             loadFeatures(),
             loadTrades(),
             loadStatus(),
-            loadCandidates()
+            loadCandidates(),
+            loadPosition()
         ]);
     } catch(e) { console.warn('Refresh error', e); }
 }
@@ -199,6 +200,21 @@ async function loadPrediction() {
             <div>Regime: ${data.regime || '—'}</div>
             <div>Champion: ${data.champion || 'none'}</div>
         `;
+        document.getElementById('champion-info').textContent = data.champion ? `♛ ${data.champion}` : '—';
+    } catch(e) { /* ignore */ }
+}
+
+async function loadPosition() {
+    try {
+        const data = await api(`/api/pro/position/${currentSymbol}`);
+        const content = document.getElementById('position-content');
+        if (!data.open) { content.textContent = 'No open position'; return; }
+        const side = data.quantity >= 0 ? 'LONG' : 'SHORT';
+        content.innerHTML = `
+            <div><strong class="${data.quantity >= 0 ? 'prediction-buy' : 'prediction-sell'}">${side}</strong> ${Math.abs(data.quantity)}</div>
+            <div>Mark: $${data.price.toFixed(2)}</div>
+            ${data.unexplained_quantity ? `<div class="warn">Unexplained qty: ${data.unexplained_quantity}</div>` : ''}
+        `;
     } catch(e) { /* ignore */ }
 }
 
@@ -243,7 +259,21 @@ async function loadTrades() {
 }
 
 async function loadCandidates() {
-    // Not yet linked to tournament data, placeholder
+    try {
+        const data = await api(`/api/pro/candidates/${currentSymbol}`);
+        const content = document.getElementById('candidates-content');
+        if (!data.candidates || data.candidates.length === 0) { content.textContent = 'No paper candidates yet'; return; }
+        const sorted = [...data.candidates].sort((a, b) => b.total_equity - a.total_equity);
+        const table = document.createElement('table');
+        table.className = 'trades-table';
+        table.innerHTML = '<tr><th>Candidate</th><th>Equity</th><th>Trades</th></tr>';
+        sorted.forEach(c => {
+            const row = table.insertRow();
+            row.innerHTML = `<td>${c.candidate}</td><td>${c.total_equity.toFixed(2)}</td><td>${c.num_trades}</td>`;
+        });
+        content.innerHTML = '';
+        content.appendChild(table);
+    } catch(e) { /* ignore */ }
 }
 
 function formatDuration(seconds) {
