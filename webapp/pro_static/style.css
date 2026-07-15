@@ -1,0 +1,133 @@
+/* === RESET & BASE === */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'IBM Plex Mono', 'Courier New', monospace;
+    background: #0A0E14;
+    color: #EAEAEA;
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+a { color: inherit; text-decoration: none; }
+button { cursor: pointer; background: none; border: none; color: inherit; font: inherit; }
+select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-radius: 4px; padding: 4px 8px; }
+
+/* === COLOR VARIABLES (not using var for simplicity) === */
+:root {
+    --accent: #00FFC2;
+    --danger: #FF3366;
+    --warning: #FFB800;
+    --card-bg: rgba(20,25,35,0.85);
+    --border: rgba(0,255,196,0.15);
+}
+
+/* === TOP BAR === */
+#topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 48px;
+    padding: 0 16px;
+    background: rgba(10,14,20,0.95);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+}
+.tb-left { display: flex; align-items: center; gap: 20px; }
+.logo { font-size: 20px; font-weight: 700; color: var(--accent); letter-spacing: 2px; }
+.symbol-selector { display: flex; align-items: center; gap: 10px; }
+#symbol-select { width: 120px; }
+.timeframe-tabs { display: flex; gap: 2px; }
+.timeframe-tabs button { padding: 4px 10px; border-radius: 4px; font-size: 0.8rem; background: rgba(255,255,255,0.05); }
+.timeframe-tabs button.active { background: var(--accent); color: #000; font-weight: bold; }
+.tb-center { display: flex; align-items: center; gap: 12px; }
+.price-big { font-size: 1.3rem; font-weight: bold; }
+.change { font-size: 0.85rem; }
+.dot { color: var(--accent); animation: pulse 1.5s infinite; }
+.badge { background: var(--danger); padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
+.tb-right { display: flex; align-items: center; gap: 16px; }
+.champion-info { font-size: 0.85rem; opacity: 0.8; }
+.health { font-size: 1.2rem; color: var(--accent); }
+
+/* === MAIN LAYOUT === */
+#main-container { display: grid; grid-template-columns: 60px 1fr 340px; height: calc(100vh - 48px - 32px); }
+/* === SIDEBAR === */
+#sidebar {
+    background: rgba(10,14,20,0.95);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 10px 0;
+    gap: 4px;
+}
+.nav-item {
+    padding: 12px 8px;
+    text-align: center;
+    font-size: 0.8rem;
+    opacity: 0.6;
+    transition: 0.2s;
+    border-left: 3px solid transparent;
+}
+.nav-item:hover, .nav-item.active { opacity: 1; background: rgba(0,255,196,0.1); border-left-color: var(--accent); }
+
+/* === CHART PANEL === */
+#chart-panel { display: flex; flex-direction: column; }
+#chart-container { flex: 3; }
+#volume-chart { flex: 1; border-top: 1px solid rgba(255,255,255,0.08); }
+
+/* === RIGHT PANEL === */
+#right-panel {
+    background: rgba(10,14,20,0.95);
+    border-left: 1px solid var(--border);
+    padding: 12px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.card {
+    background: var(--card-bg);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 8px;
+    padding: 12px;
+    backdrop-filter: blur(8px);
+}
+.card h3 { font-size: 0.85rem; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+.card-content { font-size: 0.8rem; }
+.prediction-buy { color: var(--accent); font-weight: bold; }
+.prediction-sell { color: var(--danger); font-weight: bold; }
+.feature-list { list-style: none; }
+.feature-list li { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.trades-table { width: 100%; font-size: 0.7rem; border-collapse: collapse; }
+.trades-table th, .trades-table td { padding: 2px 4px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.trades-table .positive { color: var(--accent); }
+.trades-table .negative { color: var(--danger); }
+
+/* === BOTTOM BAR === */
+#bottombar {
+    height: 32px;
+    background: rgba(10,14,20,0.95);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 24px;
+    font-size: 0.75rem;
+    opacity: 0.8;
+}
+#bottombar span { display: flex; align-items: center; gap: 4px; }
+.status-green { color: var(--accent); }
+.status-red { color: var(--danger); }
+
+/* === RESPONSIVENESS === */
+@media (max-width: 900px) {
+    #main-container { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+    #sidebar { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 4px 8px; }
+    #right-panel { border-left: none; border-top: 1px solid var(--border); }
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.3; }
+    100% { opacity: 1; }
+}

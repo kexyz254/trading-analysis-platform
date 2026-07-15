@@ -26,6 +26,9 @@ from webapp import data_access as da
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+# -- NEW: Pro dashboard static directory --
+PRO_STATIC_DIR = Path(__file__).resolve().parent / "pro_static"
+
 _CACHE_BUSTED_ASSETS = ("style.css", "ws.js", "app.js", "chart.js")
 
 
@@ -61,6 +64,9 @@ _db_path = _args.db
 app = FastAPI(title="Trading System Dashboard API")
 
 
+# ---------------------------------------------------------------------------
+# Existing endpoints (unchanged)
+# ---------------------------------------------------------------------------
 @app.get("/api/status")
 def status():
     return {
@@ -210,6 +216,97 @@ def survivorship_bias():
     )
 
 
+# ---------------------------------------------------------------------------
+# NEW: Professional Dashboard API (read‑only, journal‑backed)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/pro/ohlcv/{symbol}")
+def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
+    """Return OHLCV bars persisted by the engine for charting."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+        bars = journal.get_ohlcv_history(symbol, timeframe, limit)
+        return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/prediction/{symbol}")
+def pro_prediction(symbol: str):
+    """Latest real decision for the symbol (signal, confidence, regime, etc.)."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+        decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
+        if not decisions:
+            return {"signal": "HOLD", "confidence": None}
+        d = decisions[0]
+        details = d.get("details", {}) or {}
+        return {
+            "signal": d["signal"],
+            "confidence": d.get("confidence"),
+            "probability_up": details.get("probability_up"),
+            "regime": details.get("regime"),
+            "champion": details.get("champion"),
+            "timestamp": d["timestamp"],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/features/{symbol}")
+def pro_features(symbol: str):
+    """Latest SHAP feature importance for the champion model."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+        importance = journal.latest_feature_importance(symbol)
+        if not importance:
+            return {"features": []}
+        sorted_features = sorted(importance["importance"].items(), key=lambda x: abs(x[1]), reverse=True)[:10]
+        return {"features": [{"name": k, "importance": v} for k, v in sorted_features]}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/trades/{symbol}")
+def pro_trades(symbol: str, limit: int = 50):
+    """Real trade history for the symbol."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+        trades = journal.recent_trades(symbol=symbol, limit=limit)
+        return {"symbol": symbol, "trades": trades}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/candidates/{symbol}")
+def pro_candidates(symbol: str):
+    """Paper‑trading leaderboard for the symbol (most recent snapshot per candidate)."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+        latest = journal.latest_paper_equity_by_candidate(symbol)
+        candidates = []
+        for name, snap in latest.items():
+            candidates.append({
+                "candidate": name,
+                "capital": snap["capital"],
+                "total_equity": snap["total_equity"],
+                "num_trades": snap["num_trades"],
+                "timestamp": snap["timestamp"],
+            })
+        return {"symbol": symbol, "candidates": candidates}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Existing root route (unchanged)
+# ---------------------------------------------------------------------------
+
 @app.get("/")
 def index():
     # Inject ?v=<asset-mtime-version> onto every static asset reference so
@@ -222,3 +319,19 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# ---------------------------------------------------------------------------
+# NEW: Pro dashboard mount and route
+# ---------------------------------------------------------------------------
+
+# Mount the pro static assets (CSS, JS, etc.)
+app.mount("/pro/static", StaticFiles(directory=str(PRO_STATIC_DIR)), name="pro_static")
+
+
+@app.get("/pro", response_class=HTMLResponse)
+def pro_dashboard():
+    """Serve the professional trading terminal."""
+    html_path = PRO_STATIC_DIR / "index.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="Pro dashboard not found. Ensure webapp/pro_static/index.html exists.")
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))

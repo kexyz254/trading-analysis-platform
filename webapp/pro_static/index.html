@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>ATS Pro Terminal</title>
+    <link rel="stylesheet" href="/pro/static/style.css">
+    <!-- Lightweight Charts (TradingView open‑source library) -->
+    <script src="https://unpkg.com/lightweight-charts@5.0.1/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Top Bar -->
+        <header id="topbar">
+            <div class="tb-left">
+                <h1 class="logo">ATS</h1>
+                <div class="symbol-selector">
+                    <select id="symbol-select"></select>
+                    <div class="timeframe-tabs" id="timeframe-tabs">
+                        <button data-tf="15m">15m</button>
+                        <button data-tf="1h" class="active">1h</button>
+                        <button data-tf="4h">4h</button>
+                        <button data-tf="1d">1d</button>
+                    </div>
+                </div>
+            </div>
+            <div class="tb-center">
+                <span id="current-price" class="price-big">—</span>
+                <span id="price-change" class="change">—</span>
+                <span id="live-dot" class="dot" title="Live">●</span>
+                <span id="mode-badge" class="badge">TESTNET</span>
+            </div>
+            <div class="tb-right">
+                <div class="champion-info" id="champion-info">—</div>
+                <div class="health" id="health-ring">●</div>
+            </div>
+        </header>
+
+        <!-- Main Layout -->
+        <div id="main-container">
+            <!-- Left Sidebar (collapsible) -->
+            <nav id="sidebar">
+                <a href="#" class="nav-item active" data-panel="chart">📈 Chart</a>
+                <a href="#" class="nav-item" data-panel="research">🧪 Research</a>
+                <a href="#" class="nav-item" data-panel="tournament">🏆 Tournament</a>
+                <a href="#" class="nav-item" data-panel="logs">📝 Logs</a>
+            </nav>
+
+            <!-- Chart Panel -->
+            <section id="chart-panel" class="panel">
+                <div id="chart-container">
+                    <div id="chart"></div>
+                </div>
+                <div id="volume-chart"></div>
+            </section>
+
+            <!-- Right Panel -->
+            <aside id="right-panel">
+                <div class="card" id="prediction-card">
+                    <h3>AI Prediction</h3>
+                    <div class="card-content" id="prediction-content">Loading...</div>
+                </div>
+                <div class="card" id="position-card">
+                    <h3>Current Position</h3>
+                    <div class="card-content" id="position-content">No open position</div>
+                </div>
+                <div class="card" id="features-card">
+                    <h3>Top Features</h3>
+                    <div class="card-content" id="features-content">No model promoted yet</div>
+                </div>
+                <div class="card" id="trades-card">
+                    <h3>Recent Trades</h3>
+                    <div class="card-content" id="trades-content">No trades yet</div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- Bottom Status Bar -->
+        <footer id="bottombar">
+            <span id="engine-status">Engine: ●</span>
+            <span id="learning-status">Learning: ●</span>
+            <span id="risk-status">Risk: ●</span>
+            <span id="exchange-status">Exchange: ●</span>
+            <span id="uptime">Uptime: —</span>
+        </footer>
+    </div>
+
+    <script src="/pro/static/app.js"></script>
+</body>
+</html>

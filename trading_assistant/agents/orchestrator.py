@@ -198,6 +198,25 @@ class Orchestrator:
         # meaningfully within one poll_interval_seconds anyway.
         self._last_snapshots = snapshots
 
+        # -- NEW: Persist the latest OHLCV bar per symbol for the professional dashboard --
+        if self.journal is not None:
+            for symbol, snap in snapshots.items():
+                last = snap.frame.iloc[-1]
+                try:
+                    self.journal.record_ohlcv_snapshot(
+                        symbol=symbol,
+                        timeframe=self.market_monitor.timeframe,
+                        timestamp=last["timestamp"].isoformat(),
+                        open=float(last["open"]),
+                        high=float(last["high"]),
+                        low=float(last["low"]),
+                        close=float(last["close"]),
+                        volume=float(last["volume"]),
+                    )
+                except Exception:
+                    logger.exception("Failed to persist OHLCV snapshot for %s", symbol)
+        # ----------------------------------------------------------------------------
+
         # A persistent market-data outage must be able to trip the breaker
         # just like execution failures do - otherwise the system silently
         # loops forever on a dead feed with no escalation.
