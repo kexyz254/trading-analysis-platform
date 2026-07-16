@@ -231,6 +231,18 @@ CREATE TABLE IF NOT EXISTS alert_delivery (
     timestamp TEXT NOT NULL,
     PRIMARY KEY (channel, dedupe_key)
 );
+CREATE TABLE IF NOT EXISTS ohlcv_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    UNIQUE(symbol, timeframe, timestamp)
+);
 """
 
 
@@ -947,4 +959,51 @@ class Journal:
         record = dict(row)
         record["risk_approved"] = bool(record["risk_approved"])
         record["details"] = json.loads(record["details"]) if record["details"] else {}
+
+    def record_ohlcv_snapshot(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        timestamp: str,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> int:
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO ohlcv_snapshots
+                    (symbol, timeframe, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, timeframe, timestamp) DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume
+                """,
+                (symbol, timeframe, timestamp, open, high, low, close, volume),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def get_ohlcv_history(
+        self, symbol: str, timeframe: str, limit: int = 200
+    ) -> list:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT timestamp, open, high, low, close, volume
+                FROM ohlcv_snapshots
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (symbol, timeframe, limit),
+            ).fetchall()
+        bars = [dict(r) for r in reversed(rows)]
+        return bars
         return record

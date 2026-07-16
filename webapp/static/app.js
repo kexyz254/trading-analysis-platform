@@ -665,10 +665,10 @@ function renderDecisions(decisions) {
   const container = document.getElementById("decisions-table");
   const rows = (decisions || []).map((d) => ({
     ...d,
-    regime: d.details && d.details.regime,
-    champion: d.details && d.details.champion,
-    probability_up: d.details && d.details.probability_up,
-    market_condition: d.details && d.details.market_condition,
+    regime: d?.details && d?.details.regime,
+    champion: d?.details && d?.details.champion,
+    probability_up: d?.details && d?.details.probability_up,
+    market_condition: d?.details && d?.details.market_condition,
   }));
   renderTable(container, [
     { key: "timestamp", label: "Time (EAT)" },

@@ -217,10 +217,10 @@ def survivorship_bias():
 
 
 # ---------------------------------------------------------------------------
-# NEW: Professional Dashboard API (read‑only, journal‑backed)
+
 # ---------------------------------------------------------------------------
 
-@app.get("/api/pro/ohlcv/{symbol}")
+@app.get("/api/pro/ohlcv")
 def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
     """Return OHLCV bars persisted by the engine for charting."""
     try:
@@ -232,7 +232,7 @@ def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/prediction/{symbol}")
+@app.get("/api/pro/prediction")
 def pro_prediction(symbol: str):
     """Latest real decision for the symbol (signal, confidence, regime, etc.)."""
     try:
@@ -242,20 +242,30 @@ def pro_prediction(symbol: str):
         if not decisions:
             return {"signal": "HOLD", "confidence": None}
         d = decisions[0]
-        details = d.get("details", {}) or {}
+        if not isinstance(d, dict):
+            return {"signal": "HOLD", "confidence": None}
+        details = d.get("details")
+        if isinstance(details, str):
+            try:
+                import json
+                details = json.loads(details)
+            except Exception:
+                details = {}
+        if not isinstance(details, dict):
+            details = {}
         return {
-            "signal": d["signal"],
+            "signal": d.get("signal", "HOLD"),
             "confidence": d.get("confidence"),
             "probability_up": details.get("probability_up"),
             "regime": details.get("regime"),
             "champion": details.get("champion"),
-            "timestamp": d["timestamp"],
+            "timestamp": d.get("timestamp"),
         }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/features/{symbol}")
+@app.get("/api/pro/features")
 def pro_features(symbol: str):
     """Latest SHAP feature importance for the champion model."""
     try:
@@ -270,7 +280,7 @@ def pro_features(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/trades/{symbol}")
+@app.get("/api/pro/trades")
 def pro_trades(symbol: str, limit: int = 50):
     """Real trade history for the symbol."""
     try:
@@ -282,7 +292,7 @@ def pro_trades(symbol: str, limit: int = 50):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/candidates/{symbol}")
+@app.get("/api/pro/candidates")
 def pro_candidates(symbol: str):
     """Paper‑trading leaderboard for the symbol (most recent snapshot per candidate)."""
     try:
@@ -317,6 +327,94 @@ def index():
         html = html.replace(f'/static/{asset}"', f'/static/{asset}?v={_ASSET_VERSION}"')
     return HTMLResponse(html)
 
+
+
+# ---------------------------------------------------------------------------
+# Professional Dashboard API (query-parameter based, fully defensive)
+# ---------------------------------------------------------------------------
+
+from trading_assistant.persistence.journal import Journal as _ProJournal
+
+@app.get("/api/pro/ohlcv")
+async def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
+    try:
+        j = _ProJournal(_db_path)
+        bars = j.get_ohlcv_history(symbol, timeframe, limit)
+        return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+@app.get("/api/pro/prediction")
+async def pro_prediction(symbol: str):
+    try:
+        j = _ProJournal(_db_path)
+        decisions = list(j.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
+        if not decisions:
+            return {"signal": "HOLD", "confidence": None, "probability_up": None, "regime": None, "champion": None, "timestamp": None}
+        d = decisions[0]
+        if not isinstance(d, dict):
+            return {"signal": "HOLD", "confidence": None, "probability_up": None, "regime": None, "champion": None, "timestamp": None}
+        details = d.get("details")
+        if isinstance(details, str):
+            try:
+                import json
+                details = json.loads(details)
+            except Exception:
+                details = {}
+        if not isinstance(details, dict):
+            details = {}
+        return {
+            "signal": d.get("signal", "HOLD"),
+            "confidence": d.get("confidence"),
+            "probability_up": details.get("probability_up"),
+            "regime": details.get("regime"),
+            "champion": details.get("champion"),
+            "timestamp": d.get("timestamp", ""),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+@app.get("/api/pro/features")
+async def pro_features(symbol: str):
+    try:
+        j = _ProJournal(_db_path)
+        importance = j.latest_feature_importance(symbol)
+        if not importance or not isinstance(importance, dict):
+            return {"features": []}
+        imp = importance.get("importance", {})
+        if not isinstance(imp, dict):
+            return {"features": []}
+        sorted_features = sorted(imp.items(), key=lambda x: abs(x[1]), reverse=True)[:10]
+        return {"features": [{"name": k, "importance": v} for k, v in sorted_features]}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+@app.get("/api/pro/trades")
+async def pro_trades(symbol: str, limit: int = 50):
+    try:
+        j = _ProJournal(_db_path)
+        trades = j.recent_trades(symbol=symbol, limit=limit)
+        return {"symbol": symbol, "trades": trades}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+@app.get("/api/pro/candidates")
+async def pro_candidates(symbol: str):
+    try:
+        j = _ProJournal(_db_path)
+        latest = j.latest_paper_equity_by_candidate(symbol)
+        candidates = []
+        for name, snap in latest.items():
+            candidates.append({
+                "candidate": name,
+                "capital": snap.get("capital", 0),
+                "total_equity": snap.get("total_equity", 0),
+                "num_trades": snap.get("num_trades", 0),
+                "timestamp": snap.get("timestamp", ""),
+            })
+        return {"symbol": symbol, "candidates": candidates}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head><title>Pro Dashboard Debug</title></head>
+<body style="background:#0A0E14;color:#EAEAEA;font-family:monospace;padding:20px;">
+<h2>Pro Dashboard – API Diagnostics</h2>
+<div id="output"></div>
+<script>
+const out = document.getElementById('output');
+function log(msg) { out.innerHTML += msg + '<br>'; }
+async function test() {
+  log('Testing /api/status...');
+  try {
+    const s = await fetch('/api/status').then(r=>r.json());
+    log('Status OK: mode='+s.mode+', symbols='+s.symbols.length+', tournament='+s.tournament_enabled);
+  } catch(e) { log('Status FAIL: '+e.message); }
+
+  log('Testing /api/pro/prediction?symbol=BTC/USDT...');
+  try {
+    const p = await fetch('/api/pro/prediction?symbol=BTC/USDT').then(r=>r.json());
+    if (p.detail) { log('Prediction FAIL: '+p.detail); }
+    else { log('Prediction OK: signal='+p.signal); }
+  } catch(e) { log('Prediction FAIL: '+e.message); }
+
+  log('Testing /api/pro/ohlcv?symbol=BTC/USDT&timeframe=1h&limit=2...');
+  try {
+    const o = await fetch('/api/pro/ohlcv?symbol=BTC/USDT&timeframe=1h&limit=2').then(r=>r.json());
+    if (o.detail) { log('OHLCV FAIL: '+o.detail); }
+    else { log('OHLCV OK: bars='+(o.bars ? o.bars.length : 'none')); }
+  } catch(e) { log('OHLCV FAIL: '+e.message); }
+
+  log('Testing /api/pro/trades?symbol=BTC/USDT&limit=2...');
+  try {
+    const t = await fetch('/api/pro/trades?symbol=BTC/USDT&limit=2').then(r=>r.json());
+    if (t.detail) { log('Trades FAIL: '+t.detail); }
+    else { log('Trades OK: trades='+(t.trades ? t.trades.length : 'none')); }
+  } catch(e) { log('Trades FAIL: '+e.message); }
+
+  log('--- Done ---');
+}
+test();
+</script>
+</body>
+</html>
