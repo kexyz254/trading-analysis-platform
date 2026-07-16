@@ -114,6 +114,7 @@ async function refreshCards() {
             loadDecisionMarkers(),
             loadPriceCall(),
             loadModelInfo(),
+            loadPatterns(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
     // Kept out of the Promise.all: first call per (symbol, timeframe)
@@ -145,7 +146,9 @@ function onKline(k) {
     }
     candleSeries.update(bar);
     volumeSeries.update(volPoint(bar));
-    if (k.isClosed) recomputeIndicators();
+    // Recompute on every tick, not just closed candles - 300 bars of SMA/BB
+    // math is sub-millisecond, and live-moving overlay lines are the point.
+    recomputeIndicators();
     updatePriceHeader();
 }
 
@@ -290,8 +293,91 @@ function updateCallCountdown() {
 }
 setInterval(updateCallCountdown, 1000);
 
+// --- Chart patterns: trendlines on the chart + card list ---
+let _patternSeries = [];
+
+const PATTERN_LABELS = {
+    ascending_triangle: 'Ascending Triangle', descending_triangle: 'Descending Triangle',
+    symmetric_triangle: 'Symmetric Triangle', rising_wedge: 'Rising Wedge', falling_wedge: 'Falling Wedge',
+    bullish_rectangle: 'Bullish Rectangle', bearish_rectangle: 'Bearish Rectangle',
+    bull_flag: 'Bull Flag', bear_flag: 'Inverted Flag', head_shoulders: 'Head & Shoulders',
+    inverse_head_shoulders: 'Inverse H&S', double_top: 'Double Top', double_bottom: 'Double Bottom',
+    triple_bottom: 'Triple Bottom', cup_handle: 'Cup & Handle',
+};
+
+function biasColor(bias) {
+    return bias === 'bullish' ? '#00FFC2' : bias === 'bearish' ? '#FF3366' : '#FFB800';
+}
+
+async function loadPatterns() {
+    try {
+        const data = await api(`/api/pro/patterns/${currentSymbol}?timeframe=${currentTimeframe}`);
+        _patternSeries.forEach(s => { try { chart.removeSeries(s); } catch (e) {} });
+        _patternSeries = [];
+
+        const content = document.getElementById('patterns-content');
+        if (!data.patterns || data.patterns.length === 0) {
+            content.textContent = 'No patterns at the right edge';
+            return;
+        }
+        data.patterns.forEach(p => {
+            p.lines.forEach(line => {
+                const s = chart.addLineSeries({
+                    color: biasColor(p.bias),
+                    lineWidth: 1,
+                    lineStyle: line.role === 'level' ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Solid,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    crosshairMarkerVisible: false,
+                });
+                s.setData([{ time: line.t0, value: line.p0 }, { time: line.t1, value: line.p1 }]);
+                _patternSeries.push(s);
+            });
+        });
+        content.innerHTML = data.patterns.map(p => `
+            <div class="pattern-row">
+                <span class="pattern-name" style="color:${biasColor(p.bias)}">${PATTERN_LABELS[p.name] || p.name}</span>
+                <span class="pattern-bias">${p.bias}</span>
+                <span class="pattern-conf">geom ${(p.confidence * 100).toFixed(0)}%</span>
+            </div>`).join('');
+    } catch (e) { /* ignore */ }
+}
+
 // --- Next-3-candles forecast card ---
 let _forecastInFlight = false;
+
+let _projectionSeries = null;
+
+function drawProjection(data) {
+    // Dashed path from the last closed candle through the next 3: direction
+    // per horizon from the model, magnitude = the symbol's median absolute
+    // per-candle move on this timeframe (same honest convention as the
+    // price calls: the models predict direction, not distance).
+    if (_projectionSeries) { try { chart.removeSeries(_projectionSeries); } catch (e) {} _projectionSeries = null; }
+    if (!bars.length || !data.horizons || data.horizons.length === 0) return;
+    const moves = [];
+    for (let i = 1; i < bars.length; i++) moves.push(Math.abs(bars[i].close / bars[i - 1].close - 1));
+    moves.sort((a, b) => a - b);
+    const typicalMove = moves.length ? moves[Math.floor(moves.length / 2)] : 0;
+    const tfSec = TF_SECONDS[currentTimeframe] || 3600;
+    const last = bars[bars.length - 1];
+    const points = [{ time: last.time, value: last.close }];
+    let price = last.close;
+    data.horizons.forEach((h, i) => {
+        price = price * (1 + (h.probability_up >= 0.5 ? typicalMove : -typicalMove));
+        points.push({ time: last.time + (i + 1) * tfSec, value: price });
+    });
+    _projectionSeries = chart.addLineSeries({
+        color: '#FFB800',
+        lineWidth: 2,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        title: 'AI path',
+        crosshairMarkerVisible: false,
+    });
+    _projectionSeries.setData(points);
+}
 
 async function loadForecast() {
     if (_forecastInFlight) return; // first call per (symbol, tf) trains server-side; don't stack requests behind it
@@ -302,6 +388,7 @@ async function loadForecast() {
         const data = await api(`/api/pro/forecast/${currentSymbol}?timeframe=${currentTimeframe}`);
         // Symbol/timeframe changed while training - drop the stale answer.
         if (requested !== `${currentSymbol}|${currentTimeframe}`) return;
+        drawProjection(data);
         const content = document.getElementById('forecast-content');
         const rows = data.horizons.map(h => {
             const up = h.direction === 'UP';

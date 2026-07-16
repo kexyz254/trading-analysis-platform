@@ -411,6 +411,26 @@ def pro_price_calls(symbol: str, limit: int = 20):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.get("/api/pro/patterns/{symbol:path}")
+def pro_patterns(symbol: str, timeframe: str = "1h"):
+    """Classical chart patterns present at the right edge of the chart,
+    with drawable trendline segments extended a few bars forward - see
+    trading_assistant/analysis/chart_patterns.py. Confidence is geometry
+    quality, not a prediction; the forecast models consume these same
+    patterns as features, and their holdout hit rate is the honest measure
+    of whether the patterns predict anything."""
+    if timeframe not in da.TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of {da.TIMEFRAMES}")
+    try:
+        import pandas as pd
+        from trading_assistant.analysis.chart_patterns import detect_patterns
+        raw = da.fetch_ohlcv(_config, symbol, timeframe, limit=300)
+        frame = pd.DataFrame(raw).iloc[:-1]  # closed candles only
+        return {"symbol": symbol, "timeframe": timeframe, "patterns": detect_patterns(frame)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Could not detect patterns: {exc}") from exc
+
+
 @app.get("/api/pro/forecast/{symbol:path}")
 def pro_forecast(symbol: str, timeframe: str = "1h"):
     """Direction forecast for the next 1/2/3 closed candles of the given

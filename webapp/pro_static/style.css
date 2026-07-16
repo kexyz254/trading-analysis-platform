@@ -154,6 +154,12 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .call-dot.hit { color: var(--accent); }
 .call-dot.miss { color: var(--danger); opacity: 0.8; }
 
+/* === CHART PATTERNS CARD === */
+.pattern-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.pattern-name { font-weight: bold; flex: 1; }
+.pattern-bias { font-size: 0.68rem; opacity: 0.6; }
+.pattern-conf { font-size: 0.68rem; opacity: 0.6; }
+
 /* === BOTTOM BAR === */
 #bottombar {
     height: 32px;

@@ -24,8 +24,18 @@ import numpy as np
 import pandas as pd
 
 from trading_assistant.agents.features import FEATURE_COLUMNS, build_features
+from trading_assistant.analysis.chart_patterns import PATTERN_COLUMNS, pattern_feature_frame
 from trading_assistant.config import Config
 from webapp import data_access as da
+
+# The dashboard models train on the engine's engineered features PLUS the
+# chart-pattern feature layer (trading_assistant.analysis.chart_patterns).
+# The per-horizon holdout hit rate therefore directly measures whether the
+# classical patterns add any real predictive information on this symbol/
+# timeframe - which is the honest way to "evaluate" them. The LIVE engine's
+# models deliberately do NOT get these columns here: changing what real
+# money trades on requires a validated retrain cycle, not a dashboard edit.
+MODEL_FEATURES = FEATURE_COLUMNS + PATTERN_COLUMNS
 
 HORIZONS = (1, 2, 3)
 HISTORY_BARS = 1000
@@ -83,7 +93,7 @@ def _fit_horizon(featured: pd.DataFrame, horizon: int) -> Dict[str, Any]:
             f"(need >= {MIN_TRAIN_BARS} to train plus >= 20 held out)"
         )
 
-    X, y = labeled[FEATURE_COLUMNS], labeled["target"]
+    X, y = labeled[MODEL_FEATURES], labeled["target"]
 
     def _new_model():
         return RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42, n_jobs=1)
@@ -127,13 +137,15 @@ def _get_or_train(featured: pd.DataFrame, symbol: str, timeframe: str) -> Dict[s
 
 def get_forecast(config: Config, symbol: str, timeframe: str) -> Dict[str, Any]:
     frame = _closed_bars_frame(config, symbol, timeframe)
-    featured = build_features(frame).dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
+    featured = build_features(frame)
+    featured[PATTERN_COLUMNS] = pattern_feature_frame(frame).values
+    featured = featured.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
     if featured.empty:
         raise ValueError(f"no rows with complete features for {symbol} {timeframe}")
 
     entry = _get_or_train(featured, symbol, timeframe)
 
-    latest = featured[FEATURE_COLUMNS].iloc[[-1]]
+    latest = featured[MODEL_FEATURES].iloc[[-1]]
     last_bar = featured.iloc[-1]
 
     horizons: List[Dict[str, Any]] = []
