@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>ATS Pro Terminal</title>
     <link rel="stylesheet" href="/pro/static/style.css">
-    <!-- Lightweight Charts (TradingView open‑source library) -->
-    <script src="https://unpkg.com/lightweight-charts@5.0.1/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- Lightweight Charts (TradingView open-source library). Pinned to
+         v4.2.0: app.js uses the v4 API (addCandlestickSeries, setMarkers)
+         which v5 removed in favor of addSeries()/createSeriesMarkers. -->
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <div id="app">
@@ -16,12 +18,9 @@
                 <h1 class="logo">ATS</h1>
                 <div class="symbol-selector">
                     <select id="symbol-select"></select>
-                    <div class="timeframe-tabs" id="timeframe-tabs">
-                        <button data-tf="15m">15m</button>
-                        <button data-tf="1h" class="active">1h</button>
-                        <button data-tf="4h">4h</button>
-                        <button data-tf="1d">1d</button>
-                    </div>
+                    <!-- Populated from /api/timeframes so the tabs always
+                         match exactly what the backend can serve. -->
+                    <div class="timeframe-tabs" id="timeframe-tabs"></div>
                 </div>
             </div>
             <div class="tb-center">
@@ -46,12 +45,12 @@
                 <a href="#" class="nav-item" data-panel="logs">📝 Logs</a>
             </nav>
 
-            <!-- Chart Panel -->
+            <!-- Chart Panel (volume renders inside the main chart on its
+                 own price scale — see setupChart in app.js) -->
             <section id="chart-panel" class="panel">
                 <div id="chart-container">
                     <div id="chart"></div>
                 </div>
-                <div id="volume-chart"></div>
             </section>
 
             <!-- Right Panel -->
@@ -89,6 +88,9 @@
         </footer>
     </div>
 
+    <!-- Shared live-market-data module (browser -> Binance WebSocket),
+         same one the main dashboard uses. Must load before app.js. -->
+    <script src="/static/ws.js"></script>
     <script src="/pro/static/app.js"></script>
 </body>
 </html>

@@ -307,6 +307,31 @@ def pro_candidates(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.get("/api/pro/decisions/{symbol:path}")
+def pro_decisions(symbol: str, limit: int = 200):
+    """Recent REAL decisions for the symbol - the prediction history the
+    chart overlays as BUY/SELL markers on the candles they happened in."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+        decisions = journal.recent_decisions(symbol=symbol, limit=limit, exclude_paper=True)
+        return {
+            "symbol": symbol,
+            "decisions": [
+                {
+                    "timestamp": d["timestamp"],
+                    "signal": d["signal"],
+                    "confidence": d["confidence"],
+                    "price": d["price"],
+                    "action": d["action"],
+                }
+                for d in decisions
+            ],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @app.get("/api/pro/position/{symbol:path}")
 def pro_position(symbol: str):
     """Current real-portfolio position for the symbol, from the most recent
@@ -355,6 +380,21 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Mount the pro static assets (CSS, JS, etc.)
 app.mount("/pro/static", StaticFiles(directory=str(PRO_STATIC_DIR)), name="pro_static")
 
+# Same mtime-derived cache busting as the main dashboard (_static_asset_version
+# above documents the real mobile incident that motivated it). ws.js lives in
+# STATIC_DIR but is loaded by the pro page too, so it's versioned here as well.
+_PRO_CACHE_BUSTED_ASSETS = ("style.css", "app.js")
+
+
+def _pro_asset_version() -> str:
+    paths = [PRO_STATIC_DIR / name for name in _PRO_CACHE_BUSTED_ASSETS]
+    paths.append(STATIC_DIR / "ws.js")
+    mtimes = [p.stat().st_mtime for p in paths if p.exists()]
+    return str(int(max(mtimes))) if mtimes else "0"
+
+
+_PRO_ASSET_VERSION = _pro_asset_version()
+
 
 @app.get("/pro", response_class=HTMLResponse)
 def pro_dashboard():
@@ -362,4 +402,8 @@ def pro_dashboard():
     html_path = PRO_STATIC_DIR / "index.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Pro dashboard not found. Ensure webapp/pro_static/index.html exists.")
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    html = html_path.read_text(encoding="utf-8")
+    for asset in _PRO_CACHE_BUSTED_ASSETS:
+        html = html.replace(f'/pro/static/{asset}"', f'/pro/static/{asset}?v={_PRO_ASSET_VERSION}"')
+    html = html.replace('/static/ws.js"', f'/static/ws.js?v={_PRO_ASSET_VERSION}"')
+    return HTMLResponse(html)
