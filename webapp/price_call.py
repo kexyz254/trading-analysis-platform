@@ -15,12 +15,18 @@ running score (percent correct, average miss) alongside the current call.
 The track record accumulates 24/7 in the background regardless of whether
 anyone has the dashboard open.
 
-Storage note: this is the one table in trading_system.db written by the
-dashboard process rather than the engine. It is dashboard-owned analytics
-- the engine never reads it, and nothing here can influence trading. It
-lives in the same file (rather than a second db) so it survives container
-rebuilds via the existing bind mount, using the same WAL + busy_timeout
-settings that already let the two processes share the file safely.
+Storage note - this MUST live in its own database file, never in
+trading_system.db. docker-compose bind-mounts trading_system.db as a
+single FILE into both containers, and SQLite's WAL mode keeps its
+write-ahead log in sidecar files (-wal/-shm) next to the database - which
+under a single-file mount means each container's own private overlay
+filesystem, not the shared host file. Two containers committing through
+two divergent private WALs into one main file corrupts it ("database disk
+image is malformed" - happened in production on 2026-07-16 the moment
+this module briefly made the dashboard a second writer to the shared db).
+This module's database lives in a DIRECTORY mount owned solely by the
+dashboard container: one writer, and the WAL sidecars travel with the db
+inside the mounted directory, which is the supported setup.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import sqlite3
 import statistics
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from trading_assistant.config import Config
@@ -64,9 +71,18 @@ CREATE INDEX IF NOT EXISTS idx_price_calls_symbol_id ON price_calls (symbol, id)
 """
 
 
+# Default path for the dashboard-owned analytics database - inside the
+# ./dashboard_data directory mount (see docker-compose.yml). Overridable
+# for tests via the constructor.
+DEFAULT_ANALYTICS_DB = "dashboard_data/analytics.db"
+
+
 class PriceCallBook:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str = DEFAULT_ANALYTICS_DB):
         self.db_path = db_path
+        parent = Path(db_path).parent
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
             conn.executescript(_SCHEMA)
             conn.commit()
@@ -218,7 +234,7 @@ def _make_call(config: Config, book: PriceCallBook, symbol: str) -> int:
     )
 
 
-def run_once(config: Config, db_path: str, symbols: Optional[List[str]] = None) -> None:
+def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optional[List[str]] = None) -> None:
     """One pass of the call loop: settle everything due, then open a new
     call for any symbol without one. Runs every ~60s from the dashboard's
     background task, so settlement lands within a minute of due time

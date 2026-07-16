@@ -74,12 +74,18 @@ async def _start_price_call_loop() -> None:
     webapp/price_call.py). Runs in this dashboard process so the track
     record accumulates 24/7 whether or not anyone is watching; each pass
     is run in a worker thread because it does blocking exchange I/O and
-    (at most every 30 min per symbol) model training."""
+    (at most every 30 min per symbol) model training.
+
+    CRITICAL: this writes to the dashboard-owned analytics database ONLY
+    (price_call.DEFAULT_ANALYTICS_DB), never to trading_system.db - the
+    dashboard must stay strictly read-only on the shared trading journal.
+    See price_call.py's storage note for the production corruption this
+    rule exists to prevent."""
     async def _loop() -> None:
         from webapp import price_call
         while True:
             try:
-                await asyncio.to_thread(price_call.run_once, _config, _db_path)
+                await asyncio.to_thread(price_call.run_once, _config)
             except Exception:  # noqa: BLE001 - the loop must survive any single pass failing
                 logger.exception("price call loop pass failed")
             await asyncio.sleep(60)
@@ -390,10 +396,11 @@ def pro_model_info(symbol: str):
 @app.get("/api/pro/price-calls/{symbol:path}")
 def pro_price_calls(symbol: str, limit: int = 20):
     """The symbol's current open 5-minute price call, its recent settled
-    calls, and the running score - see webapp/price_call.py."""
+    calls, and the running score - see webapp/price_call.py. Reads the
+    dashboard-owned analytics db, NOT trading_system.db."""
     try:
         from webapp.price_call import PriceCallBook
-        book = PriceCallBook(_db_path)
+        book = PriceCallBook()
         return {
             "symbol": symbol,
             "open_call": book.open_call(symbol),
