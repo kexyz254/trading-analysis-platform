@@ -92,10 +92,38 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
     padding: 12px;
     backdrop-filter: blur(8px);
 }
-.card h3 { font-size: 0.85rem; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+.card h3 { font-size: 0.85rem; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .card-content { font-size: 0.8rem; }
 .prediction-buy { color: var(--accent); font-weight: bold; }
 .prediction-sell { color: var(--danger); font-weight: bold; }
+
+/* System-model vs dashboard-analytics cards are visually distinct so a
+   generic analytic is never mistaken for the live trading model. */
+.card.system-model { border-left: 3px solid var(--accent); }
+.card.analytics { border-left: 3px solid rgba(255,184,0,0.5); }
+.src-badge { font-size: 0.6rem; padding: 2px 6px; border-radius: 3px; text-transform: none; letter-spacing: 0; font-weight: normal; }
+.src-badge.live { background: rgba(0,255,196,0.15); color: var(--accent); }
+.src-badge.analytics-badge { background: rgba(255,184,0,0.15); color: var(--warning); }
+
+/* AI Prediction panel */
+.pred-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pred-signal { font-size: 1.5rem; font-weight: 800; letter-spacing: 1px; }
+.pred-signal.buy { color: var(--accent); }
+.pred-signal.sell { color: var(--danger); }
+.pred-signal.hold { color: var(--warning); }
+.gauge { width: 120px; height: 74px; }
+.gauge-val { font-size: 20px; font-weight: 800; }
+.gauge-lbl { font-size: 8px; fill: #EAEAEA; opacity: 0.5; text-transform: uppercase; letter-spacing: 1px; }
+.gauge-none { font-size: 0.65rem; opacity: 0.5; text-align: center; line-height: 1.4; }
+.pred-rows { margin-top: 10px; }
+.pred-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.pred-row .pos { color: var(--accent); }
+.pred-row .neg { color: var(--danger); }
+
+/* Model Info panel */
+.mi-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.76rem; }
+.mi-row span:first-child { opacity: 0.6; }
+.mi-val { color: var(--accent); text-align: right; }
 .feature-list { list-style: none; }
 .feature-list li { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .trades-table { width: 100%; font-size: 0.7rem; border-collapse: collapse; }

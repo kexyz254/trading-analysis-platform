@@ -113,6 +113,7 @@ async function refreshCards() {
             loadHealth(),
             loadDecisionMarkers(),
             loadPriceCall(),
+            loadModelInfo(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
     // Kept out of the Promise.all: first call per (symbol, timeframe)
@@ -405,18 +406,85 @@ async function loadHealth() {
 }
 
 // --- Cards ---
+function signalClass(sig) {
+    return sig === 'BUY' ? 'buy' : sig === 'SELL' ? 'sell' : 'hold';
+}
+
+function signalArrow(sig) {
+    return sig === 'BUY' ? '↗' : sig === 'SELL' ? '↘' : '→';
+}
+
+// Semicircular gauge (like the mockup). `frac` 0..1 fills the arc; color
+// keys off the signal. Returns an inline SVG string.
+function confidenceGauge(frac, sig) {
+    const r = 52, cx = 60, cy = 60;
+    const clamped = Math.max(0, Math.min(1, frac || 0));
+    // Semicircle from 180deg (left) to 0deg (right).
+    const a0 = Math.PI, a1 = Math.PI * (1 - clamped);
+    const x0 = cx + r * Math.cos(a0), y0 = cy - r * Math.sin(a0);
+    const x1 = cx + r * Math.cos(a1), y1 = cy - r * Math.sin(a1);
+    const xEnd = cx + r, yEnd = cy;
+    const color = sig === 'BUY' ? '#00FFC2' : sig === 'SELL' ? '#FF3366' : '#FFB800';
+    const large = clamped > 0.5 ? 1 : 0;
+    return `
+      <svg viewBox="0 0 120 74" class="gauge">
+        <path d="M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${xEnd} ${yEnd}" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="9" stroke-linecap="round"/>
+        <path d="M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}" fill="none" stroke="${color}" stroke-width="9" stroke-linecap="round"/>
+        <text x="${cx}" y="${cy - 12}" text-anchor="middle" class="gauge-val" fill="${color}">${(clamped * 100).toFixed(0)}%</text>
+        <text x="${cx}" y="${cy + 2}" text-anchor="middle" class="gauge-lbl">confidence</text>
+      </svg>`;
+}
+
 async function loadPrediction() {
     try {
         const data = await api(`/api/pro/prediction/${currentSymbol}`);
         const content = document.getElementById('prediction-content');
+        const sig = data.signal || 'HOLD';
+        // Confidence gauge prefers the model's ensemble confidence; falls
+        // back to how far probability_up sits from 0.5 (its conviction).
+        const conv = data.confidence != null ? data.confidence
+                   : data.probability_up != null ? Math.abs(data.probability_up - 0.5) * 2 : null;
+        const pUp = data.probability_up;
         content.innerHTML = `
-            <div><strong>Signal:</strong> <span class="prediction-${data.signal === 'BUY' ? 'buy' : data.signal === 'SELL' ? 'sell' : ''}">${data.signal || 'HOLD'}</span></div>
-            <div>Confidence: ${data.confidence ? (data.confidence * 100).toFixed(1) + '%' : '—'}</div>
-            <div>Probability Up: ${data.probability_up ? (data.probability_up * 100).toFixed(1) + '%' : '—'}</div>
-            <div>Regime: ${data.regime || '—'}</div>
-            <div>Champion: ${data.champion || 'none'}</div>
-        `;
+            <div class="pred-head">
+                <div class="pred-signal ${signalClass(sig)}">${signalArrow(sig)} ${sig}</div>
+                ${conv != null ? confidenceGauge(conv, sig) : '<div class="gauge-none">no live model<br>for this regime</div>'}
+            </div>
+            <div class="pred-rows">
+                <div class="pred-row"><span>Probability Up</span><span class="${pUp != null && pUp >= 0.5 ? 'pos' : 'neg'}">${pUp != null ? (pUp * 100).toFixed(1) + '%' : '—'}</span></div>
+                <div class="pred-row"><span>Probability Down</span><span>${pUp != null ? ((1 - pUp) * 100).toFixed(1) + '%' : '—'}</span></div>
+                <div class="pred-row"><span>Regime</span><span>${data.regime || '—'}</span></div>
+                <div class="pred-row"><span>Champion</span><span>${data.champion || 'none'}</span></div>
+            </div>`;
         document.getElementById('champion-info').textContent = data.champion ? `♛ ${data.champion}` : '—';
+    } catch (e) { /* ignore */ }
+}
+
+function fmtAge(iso) {
+    if (!iso) return '—';
+    const secs = (Date.now() - Date.parse(iso)) / 1000;
+    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    return `${Math.floor(secs / 86400)}d ago`;
+}
+
+async function loadModelInfo() {
+    try {
+        const d = await api(`/api/pro/model-info/${currentSymbol}`);
+        const content = document.getElementById('model-info-content');
+        const rows = [
+            ['Champion Model', d.champion || 'none promoted'],
+            ['Engine Timeframe', d.timeframe],
+            ['Current Regime', d.regime || '—'],
+            ['Buy / Sell Threshold', `${d.buy_threshold} / ${d.sell_threshold}`],
+            ['Features Used', d.feature_count || '—'],
+            ['Last Retrain', `${fmtAge(d.last_retrain_at)}`],
+            ['Last Promotion', d.last_promotion_at ? fmtAge(d.last_promotion_at) : 'never'],
+            ['Retrain Every', `${d.retrain_interval_hours}h`],
+        ];
+        content.innerHTML = rows.map(([k, v]) =>
+            `<div class="mi-row"><span>${k}</span><span class="mi-val">${v}</span></div>`
+        ).join('');
     } catch (e) { /* ignore */ }
 }
 

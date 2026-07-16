@@ -330,6 +330,63 @@ def pro_candidates(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.get("/api/pro/model-info/{symbol:path}")
+def pro_model_info(symbol: str):
+    """The system's REAL per-symbol model state - the promoted tournament
+    champion / PredictionAgent output that actually drives live trading,
+    not the dashboard's own analytics models. Everything here is read from
+    the engine's own journal (the decisions/retrain_events/feature_importance
+    it writes), so it reflects exactly what the live engine decided, on the
+    engine's configured timeframe."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path)
+
+        decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
+        decision = decisions[0] if decisions else None
+        details = (decision or {}).get("details", {}) or {}
+
+        # Most recent retrain attempt for this symbol, and the most recent
+        # one that actually promoted - "last retrain" vs "last promotion"
+        # are different questions and the config notes promotions are rare.
+        last_retrain = None
+        last_promotion = None
+        for ev in reversed(da.retrain_events(_db_path, limit=500)):
+            if ev.get("symbol") not in (symbol, None):
+                continue
+            if last_retrain is None:
+                last_retrain = ev
+            if ev.get("promoted") and last_promotion is None:
+                last_promotion = ev
+            if last_retrain is not None and last_promotion is not None:
+                break
+
+        importance = journal.latest_feature_importance(symbol)
+        feature_count = len(importance["importance"]) if importance else 0
+
+        prob_up = details.get("probability_up")
+        signal = decision["signal"] if decision else "HOLD"
+        return {
+            "symbol": symbol,
+            "timeframe": _config.timeframe,
+            "signal": signal,
+            "champion": details.get("champion"),
+            "regime": details.get("regime"),
+            "confidence": decision.get("confidence") if decision else None,
+            "probability_up": prob_up,
+            "probability_down": (1 - prob_up) if prob_up is not None else None,
+            "decision_at": decision["timestamp"] if decision else None,
+            "buy_threshold": _config.prediction.buy_threshold,
+            "sell_threshold": _config.prediction.sell_threshold,
+            "feature_count": feature_count,
+            "last_retrain_at": last_retrain["timestamp"] if last_retrain else None,
+            "last_promotion_at": last_promotion["timestamp"] if last_promotion else None,
+            "retrain_interval_hours": _config.learning.retrain_interval_hours,
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/api/pro/price-calls/{symbol:path}")
 def pro_price_calls(symbol: str, limit: int = 20):
     """The symbol's current open 5-minute price call, its recent settled

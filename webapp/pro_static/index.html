@@ -55,24 +55,32 @@
 
             <!-- Right Panel -->
             <aside id="right-panel">
-                <div class="card" id="call-card">
-                    <h3>5-Min Price Call <span class="tf-label">self-scoring</span></h3>
-                    <div class="card-content" id="call-content">Waiting for first call…</div>
+                <!-- The system's REAL model (promoted champion / PredictionAgent) -->
+                <div class="card system-model" id="prediction-card">
+                    <h3>AI Prediction <span class="src-badge live">live model</span></h3>
+                    <div class="card-content" id="prediction-content">Loading…</div>
                 </div>
-                <div class="card" id="forecast-card">
-                    <h3>Next 3 Candles <span id="forecast-tf" class="tf-label"></span></h3>
-                    <div class="card-content" id="forecast-content">Training model…</div>
-                </div>
-                <div class="card" id="prediction-card">
-                    <h3>AI Prediction</h3>
-                    <div class="card-content" id="prediction-content">Loading...</div>
+                <div class="card system-model" id="model-info-card">
+                    <h3>Model Info</h3>
+                    <div class="card-content" id="model-info-content">Loading…</div>
                 </div>
                 <div class="card" id="position-card">
                     <h3>Current Position</h3>
                     <div class="card-content" id="position-content">No open position</div>
                 </div>
+
+                <!-- Dashboard-side analytics: NOT the live trading model -->
+                <div class="card analytics" id="call-card">
+                    <h3>5-Min Price Call <span class="src-badge analytics-badge">dashboard analytics</span></h3>
+                    <div class="card-content" id="call-content">Waiting for first call…</div>
+                </div>
+                <div class="card analytics" id="forecast-card">
+                    <h3>Next 3 Candles <span id="forecast-tf" class="tf-label"></span> <span class="src-badge analytics-badge">dashboard analytics</span></h3>
+                    <div class="card-content" id="forecast-content">Training model…</div>
+                </div>
+
                 <div class="card" id="features-card">
-                    <h3>Top Features</h3>
+                    <h3>Top Features <span class="tf-label">live model</span></h3>
                     <div class="card-content" id="features-content">No model promoted yet</div>
                 </div>
                 <div class="card" id="trades-card">
@@ -81,7 +89,7 @@
                 </div>
                 <div class="card" id="candidates-card">
                     <h3>Paper Candidates</h3>
-                    <div class="card-content" id="candidates-content">Loading...</div>
+                    <div class="card-content" id="candidates-content">Loading…</div>
                 </div>
             </aside>
         </div>
