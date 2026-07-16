@@ -161,6 +161,12 @@ function onTicker(t) {
 
 // --- Chart data ---
 async function loadChart() {
+    // A symbol/timeframe switch invalidates every overlay drawn in the old
+    // time coordinate system - clear them now rather than leaving stale
+    // lines up until their own refreshes land.
+    if (_projectionSeries) { try { chart.removeSeries(_projectionSeries); } catch (e) {} _projectionSeries = null; }
+    _patternSeries.forEach(s => { try { chart.removeSeries(s); } catch (e) {} });
+    _patternSeries = [];
     const data = await api(
         `/api/ohlcv?symbol=${encodeURIComponent(currentSymbol)}&timeframe=${currentTimeframe}&limit=${HISTORY_LIMIT}`
     );
@@ -474,7 +480,7 @@ async function renderTimeframeTabs() {
             currentTimeframe = tf;
             document.getElementById('forecast-content').textContent = 'Training model…';
             try { await loadChart(); } catch (e) { console.warn('Chart load error', e); }
-            await loadDecisionMarkers();
+            await Promise.all([loadDecisionMarkers(), loadPatterns()]);
             startLiveCandles();
             loadForecast();
         });
