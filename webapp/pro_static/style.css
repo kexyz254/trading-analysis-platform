@@ -104,6 +104,17 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .trades-table .negative { color: var(--danger); }
 .warn { color: var(--warning); font-size: 0.75rem; margin-top: 4px; }
 
+/* === FORECAST CARD === */
+.forecast-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.forecast-step { opacity: 0.6; width: 24px; }
+.forecast-arrow { font-weight: bold; width: 72px; }
+.forecast-arrow.up { color: var(--accent); }
+.forecast-arrow.down { color: var(--danger); }
+.forecast-hit { font-size: 0.72rem; opacity: 0.85; }
+.forecast-hit.no-edge { opacity: 0.4; }
+.forecast-note { font-size: 0.68rem; opacity: 0.5; margin-top: 6px; line-height: 1.4; }
+.tf-label { color: #EAEAEA; opacity: 0.6; text-transform: none; letter-spacing: 0; }
+
 /* === BOTTOM BAR === */
 #bottombar {
     height: 32px;

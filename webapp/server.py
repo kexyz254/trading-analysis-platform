@@ -307,6 +307,20 @@ def pro_candidates(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.get("/api/pro/forecast/{symbol:path}")
+def pro_forecast(symbol: str, timeframe: str = "1h"):
+    """Direction forecast for the next 1/2/3 closed candles of the given
+    timeframe, each with its own out-of-sample hit rate - see
+    webapp/forecast.py for what these numbers do and don't claim."""
+    if timeframe not in da.TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of {da.TIMEFRAMES}")
+    try:
+        from webapp.forecast import get_forecast
+        return get_forecast(_config, symbol, timeframe)
+    except Exception as exc:  # noqa: BLE001 - surface as a clean API error, not a 500 stack trace
+        raise HTTPException(status_code=502, detail=f"Could not build forecast: {exc}") from exc
+
+
 @app.get("/api/pro/decisions/{symbol:path}")
 def pro_decisions(symbol: str, limit: int = 200):
     """Recent REAL decisions for the symbol - the prediction history the

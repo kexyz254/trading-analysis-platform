@@ -114,6 +114,10 @@ async function refreshCards() {
             loadDecisionMarkers(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
+    // Kept out of the Promise.all: first call per (symbol, timeframe)
+    // trains models server-side and can take a few seconds - it must not
+    // delay every other card while it does.
+    loadForecast();
 }
 
 // --- Live candle streaming (ws.js) ---
@@ -224,6 +228,43 @@ function updatePriceHeader() {
     document.getElementById('current-price').textContent = `$${formatPrice(bars[bars.length - 1].close)}`;
 }
 
+// --- Next-3-candles forecast card ---
+let _forecastInFlight = false;
+
+async function loadForecast() {
+    if (_forecastInFlight) return; // first call per (symbol, tf) trains server-side; don't stack requests behind it
+    _forecastInFlight = true;
+    const requested = `${currentSymbol}|${currentTimeframe}`;
+    try {
+        document.getElementById('forecast-tf').textContent = currentTimeframe;
+        const data = await api(`/api/pro/forecast/${currentSymbol}?timeframe=${currentTimeframe}`);
+        // Symbol/timeframe changed while training - drop the stale answer.
+        if (requested !== `${currentSymbol}|${currentTimeframe}`) return;
+        const content = document.getElementById('forecast-content');
+        const rows = data.horizons.map(h => {
+            const up = h.direction === 'UP';
+            const shownProb = up ? h.probability_up : 1 - h.probability_up;
+            // A hit rate at/below the holdout's own always-up baseline means
+            // the model currently has no measurable edge - say so plainly.
+            const edge = h.hit_rate - Math.max(0.5, h.up_share_holdout);
+            return `
+                <div class="forecast-row">
+                    <span class="forecast-step">+${h.step}</span>
+                    <span class="forecast-arrow ${up ? 'up' : 'down'}">${up ? '▲' : '▼'} ${(shownProb * 100).toFixed(0)}%</span>
+                    <span class="forecast-hit ${edge > 0 ? '' : 'no-edge'}">hit ${(h.hit_rate * 100).toFixed(0)}% of last ${h.holdout_bars}</span>
+                </div>`;
+        }).join('');
+        content.innerHTML = rows + `
+            <div class="forecast-note">Direction of the next 1–3 closed ${data.timeframe} candles.
+            Dim hit rates mean no edge over guessing in the recent window.</div>`;
+    } catch (e) {
+        const content = document.getElementById('forecast-content');
+        if (requested === `${currentSymbol}|${currentTimeframe}`) content.textContent = 'Forecast unavailable';
+    } finally {
+        _forecastInFlight = false;
+    }
+}
+
 // --- Prediction markers on the chart ---
 async function loadDecisionMarkers() {
     try {
@@ -282,9 +323,11 @@ async function renderTimeframeTabs() {
             wrap.querySelectorAll('button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             currentTimeframe = tf;
+            document.getElementById('forecast-content').textContent = 'Training model…';
             try { await loadChart(); } catch (e) { console.warn('Chart load error', e); }
             await loadDecisionMarkers();
             startLiveCandles();
+            loadForecast();
         });
         wrap.appendChild(btn);
     });
