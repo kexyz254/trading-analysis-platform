@@ -112,6 +112,7 @@ async function refreshCards() {
             loadCandidates(),
             loadHealth(),
             loadDecisionMarkers(),
+            loadPriceCall(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
     // Kept out of the Promise.all: first call per (symbol, timeframe)
@@ -227,6 +228,66 @@ function updatePriceHeader() {
     if (bars.length === 0) return;
     document.getElementById('current-price').textContent = `$${formatPrice(bars[bars.length - 1].close)}`;
 }
+
+// --- 5-minute self-scoring price call card ---
+let _callPriceLine = null;
+let _callDueAt = null;
+
+async function loadPriceCall() {
+    try {
+        const data = await api(`/api/pro/price-calls/${currentSymbol}`);
+        const content = document.getElementById('call-content');
+
+        if (_callPriceLine) { candleSeries.removePriceLine(_callPriceLine); _callPriceLine = null; }
+        _callDueAt = null;
+
+        const parts = [];
+        const call = data.open_call;
+        if (call) {
+            const up = call.direction === 'UP';
+            _callDueAt = Date.parse(call.due_at);
+            parts.push(`
+                <div class="call-main ${up ? 'up' : 'down'}">
+                    ${up ? '▲' : '▼'} ${call.direction} to $${formatPrice(call.projected_price)}
+                    <span class="call-countdown" id="call-countdown"></span>
+                </div>
+                <div class="call-sub">from $${formatPrice(call.price_at_call)} · model ${(call.probability * 100).toFixed(0)}% · typical 5m move ${(call.expected_move_pct * 100).toFixed(2)}%</div>`);
+            _callPriceLine = candleSeries.createPriceLine({
+                price: call.projected_price,
+                color: up ? '#00FFC2' : '#FF3366',
+                lineWidth: 1,
+                lineStyle: LightweightCharts.LineStyle.Dashed,
+                axisLabelVisible: true,
+                title: `5m ${call.direction}`,
+            });
+        } else {
+            parts.push('<div class="call-sub">No open call (calls run for configured symbols only)</div>');
+        }
+
+        if (data.stats && data.stats.n > 0) {
+            const acc = (data.stats.accuracy * 100).toFixed(0);
+            const miss = (data.stats.avg_miss_pct * 100).toFixed(2);
+            const dots = data.recent.map(r =>
+                `<span class="call-dot ${r.correct ? 'hit' : 'miss'}" title="${r.direction} ${r.correct ? 'correct' : 'wrong'}">${r.correct ? '✓' : '✗'}</span>`
+            ).join('');
+            parts.push(`<div class="call-score">Last ${data.stats.n}: <strong>${acc}%</strong> correct · avg miss ${miss}%</div>`);
+            parts.push(`<div class="call-dots">${dots}</div>`);
+        } else {
+            parts.push('<div class="call-sub">No settled calls yet — score appears after the first few settle.</div>');
+        }
+        content.innerHTML = parts.join('');
+        updateCallCountdown();
+    } catch (e) { /* ignore */ }
+}
+
+function updateCallCountdown() {
+    const el = document.getElementById('call-countdown');
+    if (!el || !_callDueAt) return;
+    const remaining = Math.max(0, Math.floor((_callDueAt - Date.now()) / 1000));
+    const m = Math.floor(remaining / 60), s = remaining % 60;
+    el.textContent = remaining > 0 ? `settles in ${m}:${String(s).padStart(2, '0')}` : 'settling…';
+}
+setInterval(updateCallCountdown, 1000);
 
 // --- Next-3-candles forecast card ---
 let _forecastInFlight = false;

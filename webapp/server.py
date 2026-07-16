@@ -13,6 +13,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -61,7 +63,28 @@ _args = _parse_args()
 _config = load_config(_args.config)
 _db_path = _args.db
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Trading System Dashboard API")
+
+
+@app.on_event("startup")
+async def _start_price_call_loop() -> None:
+    """Background loop for the self-scoring 5-minute price calls (see
+    webapp/price_call.py). Runs in this dashboard process so the track
+    record accumulates 24/7 whether or not anyone is watching; each pass
+    is run in a worker thread because it does blocking exchange I/O and
+    (at most every 30 min per symbol) model training."""
+    async def _loop() -> None:
+        from webapp import price_call
+        while True:
+            try:
+                await asyncio.to_thread(price_call.run_once, _config, _db_path)
+            except Exception:  # noqa: BLE001 - the loop must survive any single pass failing
+                logger.exception("price call loop pass failed")
+            await asyncio.sleep(60)
+
+    asyncio.create_task(_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +328,23 @@ def pro_candidates(symbol: str):
         return {"symbol": symbol, "candidates": candidates}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/price-calls/{symbol:path}")
+def pro_price_calls(symbol: str, limit: int = 20):
+    """The symbol's current open 5-minute price call, its recent settled
+    calls, and the running score - see webapp/price_call.py."""
+    try:
+        from webapp.price_call import PriceCallBook
+        book = PriceCallBook(_db_path)
+        return {
+            "symbol": symbol,
+            "open_call": book.open_call(symbol),
+            "recent": book.recent_settled(symbol, limit=limit),
+            "stats": book.stats(symbol),
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/pro/forecast/{symbol:path}")
