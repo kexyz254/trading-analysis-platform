@@ -184,7 +184,9 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .fp-code { font-size: 0.64rem; letter-spacing: 0.5px; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px; opacity: 0.85; }
 .why-group { margin-bottom: 6px; }
 .why-head { font-size: 0.7rem; font-weight: bold; margin-bottom: 2px; }
-.why-item { font-size: 0.7rem; opacity: 0.6; padding-left: 8px; }
+.why-item { font-size: 0.7rem; opacity: 0.7; padding-left: 8px; }
+.why-head .neu, .neu { color: #FFB800; }
+.stale-tag { font-size: 0.6rem; background: rgba(255,51,102,0.15); color: var(--danger); padding: 1px 5px; border-radius: 3px; }
 .watch-item { font-size: 0.71rem; opacity: 0.7; padding: 2px 0; line-height: 1.4; }
 .interp-conf { margin-top: 10px; font-size: 0.7rem; opacity: 0.55; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 6px; }
 

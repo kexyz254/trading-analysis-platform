@@ -391,12 +391,26 @@ def pro_model_info(symbol: str):
 
         prob_up = details.get("probability_up")
         signal = decision["signal"] if decision else "HOLD"
+        # Staleness: a journaled regime hours old must not be presented as
+        # "current" without a flag - the engine may be behind/stopped, and
+        # the live interpreter can already read a different market.
+        stale = False
+        age_seconds = None
+        if decision:
+            from datetime import datetime, timezone
+            try:
+                age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(decision["timestamp"])).total_seconds()
+                stale = age_seconds > max(_config.poll_interval_seconds * 3, 900)
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "symbol": symbol,
             "timeframe": _config.timeframe,
             "signal": signal,
             "champion": details.get("champion"),
             "regime": details.get("regime"),
+            "regime_stale": stale,
+            "decision_age_seconds": age_seconds,
             "confidence": decision.get("confidence") if decision else None,
             "probability_up": prob_up,
             "probability_down": (1 - prob_up) if prob_up is not None else None,

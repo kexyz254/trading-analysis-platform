@@ -808,9 +808,14 @@ async function loadInterpreter() {
         const fp = Object.entries(d.fingerprint).map(([k,v]) => `<span class="fp-code">${k}-${v}</span>`).join('');
         html += subPanel('Market DNA', dna + `<div class="fp-row">${fp}</div>`);
 
-        // Why
-        const whyBlock = (title, w) => `<div class="why-group"><div class="why-head ${w.direction==='up'?'pos':'neg'}">${title} ${w.direction==='up'?'↑':'↓'} because</div>` +
-            w.reasons.map(r => `<div class="why-item">${r}</div>`).join('') + `</div>`;
+        // Why — each factor shows its OWN direction; the header states the
+        // net lean (which can honestly be "mixed").
+        const arrow = dir => dir === 'up' ? '<span class="pos">↑</span>'
+                          : dir === 'down' ? '<span class="neg">↓</span>' : '<span class="neu">•</span>';
+        const netCls = n => n === 'up' ? 'pos' : n === 'down' ? 'neg' : 'neu';
+        const whyBlock = (title, w) => `<div class="why-group">
+                <div class="why-head">${title} — <span class="${netCls(w.net)}">${w.net}</span></div>` +
+            w.factors.map(f => `<div class="why-item">${arrow(f.dir)} ${f.text}</div>`).join('') + `</div>`;
         html += subPanel('Why?', whyBlock('Trend', d.why.trend) + whyBlock('Pressure', d.why.pressure));
 
         // Watch
@@ -836,10 +841,13 @@ async function loadModelInfo() {
         const d = await apiScoped(`/api/pro/model-info/${currentSymbol}`);
         if (d === null) return;
         const content = document.getElementById('model-info-content');
+        const regimeCell = d.regime
+            ? `${d.regime.replace('_', ' ')}${d.regime_stale ? ` <span class="stale-tag">stale · ${fmtAge(d.decision_at)}</span>` : ''}`
+            : '—';
         const rows = [
             ['Champion Model', d.champion || 'none promoted'],
             ['Engine Timeframe', d.timeframe],
-            ['Current Regime', d.regime || '—'],
+            ['Current Regime', regimeCell],
             ['Buy / Sell Threshold', `${d.buy_threshold} / ${d.sell_threshold}`],
             ['Features Used', d.feature_count || '—'],
             ['Last Retrain', `${fmtAge(d.last_retrain_at)}`],

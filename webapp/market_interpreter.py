@@ -184,8 +184,11 @@ def interpret_market(config: Config, symbol: str, timeframe: str) -> Dict[str, A
         if past > 0:
             vol_change_pct = round((atr_pct - past) / past * 100, 0)
 
-    # --- Structure: the strongest detected chart pattern (real detector) ---
-    pattern = _top_pattern(featured, volatility)
+    # --- Structure: the strongest detected chart pattern. Reuses the SAME
+    #     cached detection the Chart Patterns card shows, so the two panels
+    #     can never disagree (they did: one said 'no pattern', the other a
+    #     Rising Wedge). ---
+    pattern = _structure_pattern(config, symbol, timeframe, volatility)
 
     buyers_pct = int(round(50 + pressure * 50))
     sellers_pct = 100 - buyers_pct
@@ -281,11 +284,9 @@ def _regime_block(featured: pd.DataFrame, regime: str, adx_strength: float, bar_
     }
 
 
-def _top_pattern(featured: pd.DataFrame, volatility: float) -> Optional[Dict[str, Any]]:
+def _structure_pattern(config: Config, symbol: str, timeframe: str, volatility: float) -> Optional[Dict[str, Any]]:
     try:
-        from trading_assistant.analysis.chart_patterns import detect_patterns
-        frame = featured[["timestamp", "open", "high", "low", "close", "volume"]].copy()
-        pats = detect_patterns(frame)
+        pats = da.detected_patterns(config, symbol, timeframe)  # same cached source as the Chart Patterns card
         if not pats:
             return None
         top = pats[0]
@@ -371,26 +372,37 @@ def _clarity_meaning(clarity: float) -> str:
 
 
 def _why(trend, pressure, momentum, price_vs_sma_slow, price_vs_sma_fast, sma_fast_vs_slow,
-         adx_directional, obv_z, rel_volume, macd_hist_pct, rsi) -> Dict[str, List[str]]:
-    """The real feature reasons behind each read - so the user sees the
-    'because'. Every bullet is a true statement about a computed feature."""
-    trend_up = trend >= 0
-    trend_reasons = []
-    trend_reasons.append(("Price above SMA50" if price_vs_sma_slow > 0 else "Price below SMA50"))
-    trend_reasons.append(("Price above SMA20" if price_vs_sma_fast > 0 else "Price below SMA20"))
-    trend_reasons.append(("Fast SMA over slow SMA" if sma_fast_vs_slow > 0 else "Fast SMA under slow SMA"))
-    trend_reasons.append(("+DI over -DI (buyers)" if adx_directional > 0 else "-DI over +DI (sellers)"))
+         adx_directional, obv_z, rel_volume, macd_hist_pct, rsi) -> Dict[str, Any]:
+    """The real feature reasons behind each read. Each factor carries its
+    OWN direction (up/down/neutral) so a mixed picture reads honestly as
+    mixed - the aggregate can be marginally 'up' while individual factors
+    disagree, and forcing them all under one header (the old bug) was
+    misleading. `net` counts which way the factors lean."""
+    def factor(text: str, up: bool) -> Dict[str, str]:
+        return {"text": text, "dir": "up" if up else "down"}
 
-    pressure_up = pressure >= 0
-    pressure_reasons = []
-    pressure_reasons.append(("OBV trending up" if obv_z > 0 else "OBV trending down"))
-    pressure_reasons.append(("Above-average volume" if rel_volume > 1 else "Below-average volume"))
-    pressure_reasons.append(("MACD histogram positive" if macd_hist_pct > 0 else "MACD histogram negative"))
-    pressure_reasons.append((f"RSI {'above' if rsi > 0.5 else 'below'} 50 ({rsi*100:.0f})"))
+    trend_factors = [
+        factor("Price above SMA50" if price_vs_sma_slow > 0 else "Price below SMA50", price_vs_sma_slow > 0),
+        factor("Price above SMA20" if price_vs_sma_fast > 0 else "Price below SMA20", price_vs_sma_fast > 0),
+        factor("Fast SMA over slow SMA" if sma_fast_vs_slow > 0 else "Fast SMA under slow SMA", sma_fast_vs_slow > 0),
+        factor("+DI over -DI (buyers)" if adx_directional > 0 else "-DI over +DI (sellers)", adx_directional > 0),
+    ]
+    pressure_factors = [
+        factor("OBV trending up" if obv_z > 0 else "OBV trending down", obv_z > 0),
+        factor("MACD histogram positive" if macd_hist_pct > 0 else "MACD histogram negative", macd_hist_pct > 0),
+        factor(f"RSI above 50 ({rsi*100:.0f})" if rsi > 0.5 else f"RSI below 50 ({rsi*100:.0f})", rsi > 0.5),
+        # Volume is an amplifier, not a direction - report it plainly.
+        {"text": f"Volume {'above' if rel_volume > 1 else 'below'} average ({rel_volume:.2f}×)", "dir": "neutral"},
+    ]
+
+    def net(factors):
+        ups = sum(1 for f in factors if f["dir"] == "up")
+        downs = sum(1 for f in factors if f["dir"] == "down")
+        return "up" if ups > downs else "down" if downs > ups else "mixed"
 
     return {
-        "trend": {"direction": "up" if trend_up else "down", "reasons": trend_reasons},
-        "pressure": {"direction": "up" if pressure_up else "down", "reasons": pressure_reasons},
+        "trend": {"net": net(trend_factors), "factors": trend_factors},
+        "pressure": {"net": net(pressure_factors), "factors": pressure_factors},
     }
 
 
