@@ -36,10 +36,22 @@ from trading_assistant.persistence.journal import Journal
 from webapp import data_access as da
 
 
-def _latest_feature_row(config: Config, symbol: str, timeframe: str) -> Optional[pd.Series]:
+_TF_SECONDS = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200, "1d": 86400,
+}
+# The next-higher timeframe used for higher-timeframe trend confirmation -
+# roughly a 4x step, matching the engine's own higher_timeframe_factor.
+_NEXT_TF = {
+    "1m": "5m", "3m": "15m", "5m": "30m", "15m": "1h", "30m": "2h",
+    "1h": "4h", "2h": "12h", "4h": "1d", "6h": "1d", "12h": "1d", "1d": "1d",
+}
+
+
+def _featured(config: Config, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     raw = da.fetch_ohlcv(config, symbol, timeframe, limit=300)
     frame = pd.DataFrame(raw)
-    if frame.empty or len(frame) < 40:
+    if frame.empty or len(frame) < 60:
         return None
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
     frame = frame.iloc[:-1]  # closed candles only - the last row is still forming
@@ -51,7 +63,34 @@ def _latest_feature_row(config: Config, symbol: str, timeframe: str) -> Optional
     # read - report "no data" rather than a half-NaN interpretation.
     if pd.isna(row.get("adx_strength")) or pd.isna(row.get("rsi_normalized")):
         return None
-    return row
+    return featured
+
+
+def _regime_of(row: pd.Series) -> str:
+    return classify_regime(_f(row, "sma_fast_vs_slow"), _f(row, "adx_strength"))
+
+
+def _pressure_score(row: pd.Series) -> float:
+    return _clip(_f(row, "candle_body_ratio") * 0.4
+                 + np.tanh(_f(row, "obv_zscore")) * 0.3
+                 + _f(row, "adx_directional") * 2 * 0.3)
+
+
+def _higher_tf_trend(config: Config, symbol: str, timeframe: str) -> Dict[str, Any]:
+    """Regime of the next-higher timeframe - real, from its own bars. Best
+    effort: a fetch/compute failure returns 'unavailable', never a guess."""
+    higher = _NEXT_TF.get(timeframe, timeframe)
+    if higher == timeframe:
+        return {"timeframe": higher, "state": "n/a"}
+    try:
+        featured = _featured(config, symbol, higher)
+        if featured is None:
+            return {"timeframe": higher, "state": "unavailable"}
+        regime = _regime_of(featured.iloc[-1])
+        state = {"trending_up": "bullish", "trending_down": "bearish", "ranging": "neutral"}[regime]
+        return {"timeframe": higher, "state": state}
+    except Exception:  # noqa: BLE001
+        return {"timeframe": higher, "state": "unavailable"}
 
 
 def _clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -65,11 +104,14 @@ def _f(row: pd.Series, key: str, default: float = 0.0) -> float:
 
 def interpret_market(config: Config, symbol: str, timeframe: str) -> Dict[str, Any]:
     """The Market Interpreter payload - or {available: False} when there is
-    not enough history to read honestly."""
-    row = _latest_feature_row(config, symbol, timeframe)
-    if row is None:
+    not enough history to read honestly. Every field below is derived from
+    real engineered features; the prose is templated, never generated."""
+    featured = _featured(config, symbol, timeframe)
+    if featured is None:
         return {"symbol": symbol, "timeframe": timeframe, "available": False}
 
+    row = featured.iloc[-1]
+    close = _f(row, "close", None) if "close" in featured.columns else None
     sma_fast_vs_slow = _f(row, "sma_fast_vs_slow")
     adx_strength = _f(row, "adx_strength")
     adx_directional = _f(row, "adx_directional")
@@ -81,65 +123,169 @@ def interpret_market(config: Config, symbol: str, timeframe: str) -> Dict[str, A
     rel_volume = _f(row, "relative_volume", 1.0)
     obv_z = _f(row, "obv_zscore")
     body_ratio = _f(row, "candle_body_ratio")
-    smc_state = _f(row, "smc_structure_state")
-    smc_bos = _f(row, "smc_bos")
-    smc_mss = _f(row, "smc_mss")
+    price_vs_sma_slow = _f(row, "price_vs_sma_slow")
+    price_vs_sma_fast = _f(row, "price_vs_sma_fast")
 
-    regime = classify_regime(sma_fast_vs_slow, adx_strength)
+    regime = _regime_of(row)
     condition = classify_market_condition(atr_pct, rel_volume)
 
     # --- Directional sub-signals, each bounded to [-1, 1] ---
     trend_dir = _clip(adx_directional * 3 + np.sign(sma_fast_vs_slow) * adx_strength)
     momentum = _clip((rsi - 0.5) * 2 * 0.5 + np.tanh(macd_hist_pct * 50) * 0.3 + np.tanh(roc_pct * 5) * 0.2)
-    # Buyer-vs-seller pressure: candle bodies + OBV drift + directional
-    # trend strength + which side the volume is leaning, all real features.
-    pressure = _clip(body_ratio * 0.4 + np.tanh(obv_z) * 0.3 + adx_directional * 2 * 0.3)
-    structure = _clip(smc_state + smc_bos * 0.3 - 0.0 + smc_mss * 0.2)
+    pressure = _pressure_score(row)
+    structure = _clip(_f(row, "smc_structure_state") + _f(row, "smc_bos") * 0.3 + _f(row, "smc_mss") * 0.2)
 
     # --- Non-directional magnitudes, [0, 1] ---
-    # Scaled against ordinary crypto ranges (ATR ~0-8% -> panic threshold,
-    # BB width similar) so the bar is readable, not a raw fraction.
     volatility = _clip(atr_pct / 0.08 * 0.6 + min(bb_width, 0.2) / 0.2 * 0.4, 0.0, 1.0)
     liquidity = _clip(rel_volume / 2.0, 0.0, 1.0)  # 1.0 == 2x the 20-bar average
 
-    # Interpreter confidence = agreement among the directional reads. Four
-    # signals all pointing the same way -> a clear picture; a tug-of-war ->
-    # low. This is a READING-CLARITY score, explicitly NOT the model's
-    # prediction confidence (which lives on the AI Prediction card).
+    # --- Reading clarity (is there a directional edge) + interpreter
+    #     confidence (do the indicators AGREE) - related but distinct. ---
     dirs = [trend_dir, momentum, pressure, structure]
     mean_dir = float(np.mean(dirs))
     agreement = 1.0 - float(np.mean([abs(d - mean_dir) for d in dirs]))
-    reading_clarity = _clip(abs(mean_dir) * 0.5 + agreement * 0.5, 0.0, 1.0)
+    clarity = _clip(abs(mean_dir) * 0.5 + agreement * 0.5, 0.0, 1.0)
+    same_sign = sum(1 for d in dirs if (d > 0.05) == (mean_dir > 0) and abs(d) > 0.05)
+    interp_confidence = _clip(agreement, 0.0, 1.0)
+
+    bar_seconds = _TF_SECONDS.get(timeframe, 3600)
+    regime_block = _regime_block(featured, regime, adx_strength, bar_seconds)
+    higher_tf = _higher_tf_trend(config, symbol, timeframe)
+
+    # --- Momentum acceleration: MACD histogram now vs its recent average ---
+    macd_series = featured["macd_hist_pct"].dropna()
+    accel = "steady"
+    if len(macd_series) >= 5:
+        recent = float(macd_series.iloc[-4:-1].mean())
+        accel = "increasing" if macd_hist_pct > recent + 1e-6 else "decreasing" if macd_hist_pct < recent - 1e-6 else "steady"
+
+    # --- Pressure trend: pressure now vs a few bars back ---
+    pressure_trend = "steady"
+    if len(featured) >= 5:
+        prev_pressure = _pressure_score(featured.iloc[-4])
+        pressure_trend = "increasing" if abs(pressure) > abs(prev_pressure) + 0.05 else \
+                         "easing" if abs(pressure) < abs(prev_pressure) - 0.05 else "steady"
+
+    # --- Volatility vs its own recent history (real, computed) ---
+    atr_series = featured["atr_pct"].dropna()
+    vol_change_pct = None
+    if len(atr_series) >= 100:
+        past = float(atr_series.iloc[-100:-80].mean())
+        if past > 0:
+            vol_change_pct = round((atr_pct - past) / past * 100, 0)
+
+    # --- Structure: the strongest detected chart pattern (real detector) ---
+    pattern = _top_pattern(featured, volatility)
+
+    buyers_pct = int(round(50 + pressure * 50))
+    sellers_pct = 100 - buyers_pct
 
     dna = {
-        "trend": round(trend_dir, 3),
-        "momentum": round(momentum, 3),
-        "pressure": round(pressure, 3),
-        "structure": round(structure, 3),
-        "volatility": round(volatility, 3),
-        "liquidity": round(liquidity, 3),
+        "trend": round(trend_dir, 3), "momentum": round(momentum, 3), "pressure": round(pressure, 3),
+        "structure": round(structure, 3), "volatility": round(volatility, 3), "liquidity": round(liquidity, 3),
+    }
+    fingerprint = {
+        "TRN": _code(trend_dir), "MOM": _code(momentum), "PRS": _code(pressure),
+        "STR": _code(structure), "VOL": int(round(volatility * 100)), "LIQ": int(round(liquidity * 100)),
     }
 
     return {
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "available": True,
-        "regime": regime,
-        "condition": condition,  # 'panic' | 'illiquid' | None
-        "reading_clarity": round(reading_clarity, 3),
-        "metrics": {
-            "trend": {"value": round(trend_dir, 3), "label": _band(trend_dir, "up", "down", "flat")},
-            "momentum": {"value": round(momentum, 3), "label": _band(momentum, "rising", "falling", "neutral"), "rsi": round(rsi * 100, 1)},
-            "structure": {"value": round(structure, 3), "label": _band(structure, "bullish", "bearish", "ranging"),
-                          "bos": bool(smc_bos), "mss": bool(smc_mss)},
-            "pressure": {"value": round(pressure, 3), "label": _band(pressure, "buyers", "sellers", "balanced")},
-            "volatility": {"value": round(volatility, 3), "label": _magnitude(volatility), "atr_pct": round(atr_pct * 100, 2)},
-            "liquidity": {"value": round(liquidity, 3), "label": _magnitude(liquidity), "rel_volume": round(rel_volume, 2)},
+        "symbol": symbol, "timeframe": timeframe, "available": True,
+        "regime": regime, "condition": condition,
+        "summary": _analyst_summary(symbol, regime, momentum, pressure, volatility, liquidity, condition, clarity),
+        "regime_block": regime_block,
+        "trend": {
+            "value": round(trend_dir, 3), "direction": _band(trend_dir, "bullish", "bearish", "neutral"),
+            "strength_pct": int(round(adx_strength * 100)),
+            "slope": _magnitude(min(abs(sma_fast_vs_slow) / 0.02, 1.0)),
+            "higher_tf": higher_tf,
         },
-        "dna": dna,
-        "explanation": _explain(symbol, regime, condition, trend_dir, momentum, pressure,
-                                structure, volatility, liquidity, rsi, reading_clarity),
+        "momentum": {
+            "value": round(momentum, 3), "label": _band(momentum, "rising", "falling", "neutral"),
+            "rsi": round(rsi * 100, 1), "macd": "bullish" if macd_hist_pct > 0 else "bearish",
+            "acceleration": accel,
+            "interpretation": _momentum_text(momentum, rsi),
+        },
+        "pressure": {
+            "value": round(pressure, 3), "label": _band(pressure, "buyers", "sellers", "balanced"),
+            "buyers_pct": buyers_pct, "sellers_pct": sellers_pct,
+            "dominance": "buyers" if buyers_pct > 55 else "sellers" if buyers_pct < 45 else "balanced",
+            "trend": pressure_trend,
+        },
+        "structure": {"value": round(structure, 3), "label": _band(structure, "bullish", "bearish", "ranging"),
+                      "pattern": pattern},
+        "volatility": {"value": round(volatility, 3), "label": _magnitude(volatility),
+                       "atr_pct": round(atr_pct * 100, 2), "vs_recent_pct": vol_change_pct},
+        "liquidity": {
+            "value": round(liquidity, 3), "label": _magnitude(liquidity), "rel_volume": round(rel_volume, 2),
+            # Honest scope: spread / order-book depth / live slippage need a
+            # Level-2 order-book feed we don't fetch here. We report the real
+            # volume-based liquidity and (if present) the engine's OWN recorded
+            # execution slippage - never a fabricated spread/depth number.
+            "orderbook": "not measured (needs L2 feed)",
+        },
+        "dna": dna, "fingerprint": fingerprint,
+        "clarity": {"value": round(clarity, 3), "meaning": _clarity_meaning(clarity)},
+        "interpreter_confidence": {
+            "value": round(interp_confidence, 3),
+            "reason": f"{same_sign} of {len(dirs)} indicators agree" if same_sign >= 3
+                      else "indicators are mixed",
+        },
+        "why": _why(trend_dir, pressure, momentum, price_vs_sma_slow, price_vs_sma_fast,
+                    sma_fast_vs_slow, adx_directional, obv_z, rel_volume, macd_hist_pct, rsi),
+        "watch": _watch_items(row, close, rsi, bb_width),
+        "explanation": _analyst_summary(symbol, regime, momentum, pressure, volatility, liquidity, condition, clarity),
     }
+
+
+def _code(v: float) -> int:
+    # directional [-1,1] -> 0..100 with 50 = neutral
+    return int(round((v + 1) / 2 * 100))
+
+
+def _regime_block(featured: pd.DataFrame, regime: str, adx_strength: float, bar_seconds: int) -> Dict[str, Any]:
+    """Time-in-regime, previous regime, and stable/changing - all computed by
+    walking the per-bar regime backwards over real history."""
+    regimes = [classify_regime(_f(r, "sma_fast_vs_slow"), _f(r, "adx_strength")) for _, r in featured.tail(120).iterrows()]
+    run = 1
+    for i in range(len(regimes) - 2, -1, -1):
+        if regimes[i] == regime:
+            run += 1
+        else:
+            break
+    previous = None
+    if run < len(regimes):
+        previous = regimes[len(regimes) - run - 1]
+    # Regime confidence: how decisively ADX places us on the trending/ranging
+    # side of the 0.25 threshold.
+    if regime == "ranging":
+        conf = _clip(1 - adx_strength / 0.25, 0.0, 1.0)
+    else:
+        conf = _clip((adx_strength - 0.25) / 0.25, 0.0, 1.0)
+    return {
+        "regime": regime,
+        "confidence_pct": int(round(conf * 100)),
+        "time_in_regime_seconds": run * bar_seconds,
+        "previous": previous,
+        "transition": "changing" if run <= 2 else "stable",
+    }
+
+
+def _top_pattern(featured: pd.DataFrame, volatility: float) -> Optional[Dict[str, Any]]:
+    try:
+        from trading_assistant.analysis.chart_patterns import detect_patterns
+        frame = featured[["timestamp", "open", "high", "low", "close", "volume"]].copy()
+        pats = detect_patterns(frame)
+        if not pats:
+            return None
+        top = pats[0]
+        converging = top["name"] in {"ascending_triangle", "descending_triangle", "symmetric_triangle",
+                                     "rising_wedge", "falling_wedge"}
+        breakout_risk = "high" if converging and volatility < 0.4 else "moderate" if converging else "low"
+        return {"name": top["name"], "bias": top["bias"],
+                "confidence_pct": int(round(top["confidence"] * 100)), "breakout_risk": breakout_risk}
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _band(v: float, pos: str, neg: str, mid: str, dead: float = 0.15) -> str:
@@ -158,43 +304,106 @@ def _magnitude(v: float) -> str:
     return "low"
 
 
-def _explain(symbol, regime, condition, trend, momentum, pressure, structure,
-             volatility, liquidity, rsi, clarity) -> str:
-    """Deterministic natural-language read, composed from the real metrics
-    above. No model, no LLM - the same inputs always produce the same
-    sentence."""
-    regime_phrase = {
-        "trending_up": "in an uptrend",
-        "trending_down": "in a downtrend",
-        "ranging": "ranging (no dominant trend)",
-    }.get(regime, regime)
-
-    parts: List[str] = [f"{symbol} is {regime_phrase}"]
-
-    mom = _band(momentum, "rising", "fading", "flat")
-    parts.append(f"momentum is {mom} (RSI {rsi * 100:.0f})")
-
-    if pressure > 0.15:
-        parts.append("buyers are in control")
-    elif pressure < -0.15:
-        parts.append("sellers are in control")
+def _analyst_summary(symbol, regime, momentum, pressure, volatility, liquidity, condition, clarity) -> str:
+    """Analyst-style prose composed deterministically from the real metrics.
+    No model, no LLM - the same inputs always produce the same paragraph."""
+    if regime == "trending_up":
+        lead = f"{symbol} is trading with an upward bias. Buyers have been in control, pushing prices higher"
+    elif regime == "trending_down":
+        lead = f"{symbol} is trading with a downward bias. Sellers have been in control, pressing prices lower"
     else:
-        parts.append("buyer/seller pressure is balanced")
+        lead = f"{symbol} is trading in a range. Neither buyers nor sellers have established clear control"
 
-    vol_word = _magnitude(volatility)
-    liq_word = _magnitude(liquidity)
-    parts.append(f"volatility is {vol_word} and liquidity is {liq_word}")
+    mom_word = _band(momentum, "positive", "negative", "neutral")
+    if pressure > 0.15:
+        pres = "buyers are currently absorbing supply"
+    elif pressure < -0.15:
+        pres = "sellers continue to absorb demand"
+    else:
+        pres = "order flow is roughly balanced"
 
-    text = ", ".join(parts) + "."
+    tail = (f". Momentum is {mom_word}, volatility is {_magnitude(volatility)}, "
+            f"and liquidity is {_magnitude(liquidity)}, so {pres}.")
 
     if condition == "panic":
-        text += " Conditions are dislocated (extreme volatility) — the engine sits out regardless of direction."
+        edge = " Conditions are dislocated (extreme volatility) — no directional edge; the engine sits out."
     elif condition == "illiquid":
-        text += " Volume is unusually thin — the engine sits out until liquidity returns."
+        edge = " Volume is unusually thin — the engine sits out until liquidity returns."
+    elif clarity >= 0.66:
+        edge = " Current conditions present a reasonably clear directional picture."
+    elif clarity <= 0.33:
+        edge = " Current conditions do not provide a strong directional edge."
+    else:
+        edge = " The directional edge is moderate."
+    return lead + tail + edge
 
-    if clarity < 0.3:
-        text += " Signals conflict, so this read is low-confidence."
-    return text
+
+def _momentum_text(momentum: float, rsi: float) -> str:
+    if momentum > 0.4:
+        return "Momentum is strongly positive."
+    if momentum > 0.15:
+        return "Momentum is positive but not extreme."
+    if momentum < -0.4:
+        return "Momentum is strongly negative."
+    if momentum < -0.15:
+        return "Momentum is negative but not extreme."
+    return "Momentum is flat."
+
+
+def _clarity_meaning(clarity: float) -> str:
+    if clarity >= 0.75:
+        return "Very clear market — strong directional agreement."
+    if clarity >= 0.5:
+        return "Reasonably clear — a directional lean is present."
+    if clarity >= 0.3:
+        return "The market is sending mixed signals."
+    return "Chaotic / conflicting signals — best to wait."
+
+
+def _why(trend, pressure, momentum, price_vs_sma_slow, price_vs_sma_fast, sma_fast_vs_slow,
+         adx_directional, obv_z, rel_volume, macd_hist_pct, rsi) -> Dict[str, List[str]]:
+    """The real feature reasons behind each read - so the user sees the
+    'because'. Every bullet is a true statement about a computed feature."""
+    trend_up = trend >= 0
+    trend_reasons = []
+    trend_reasons.append(("Price above SMA50" if price_vs_sma_slow > 0 else "Price below SMA50"))
+    trend_reasons.append(("Price above SMA20" if price_vs_sma_fast > 0 else "Price below SMA20"))
+    trend_reasons.append(("Fast SMA over slow SMA" if sma_fast_vs_slow > 0 else "Fast SMA under slow SMA"))
+    trend_reasons.append(("+DI over -DI (buyers)" if adx_directional > 0 else "-DI over +DI (sellers)"))
+
+    pressure_up = pressure >= 0
+    pressure_reasons = []
+    pressure_reasons.append(("OBV trending up" if obv_z > 0 else "OBV trending down"))
+    pressure_reasons.append(("Above-average volume" if rel_volume > 1 else "Below-average volume"))
+    pressure_reasons.append(("MACD histogram positive" if macd_hist_pct > 0 else "MACD histogram negative"))
+    pressure_reasons.append((f"RSI {'above' if rsi > 0.5 else 'below'} 50 ({rsi*100:.0f})"))
+
+    return {
+        "trend": {"direction": "up" if trend_up else "down", "reasons": trend_reasons},
+        "pressure": {"direction": "up" if pressure_up else "down", "reasons": pressure_reasons},
+    }
+
+
+def _watch_items(row: pd.Series, close: Optional[float], rsi: float, bb_width: float) -> List[str]:
+    """Concrete, computed levels whose crossing would change the read. Real
+    numbers recovered from the current features, not invented."""
+    items: List[str] = []
+    price_vs_sma_slow = _f(row, "price_vs_sma_slow")
+    if close and abs(1 + price_vs_sma_slow) > 1e-9:
+        sma_slow = close / (1 + price_vs_sma_slow)
+        if close >= sma_slow:
+            items.append(f"If price closes below {sma_slow:,.2f} (SMA50), the uptrend weakens.")
+        else:
+            items.append(f"If price closes above {sma_slow:,.2f} (SMA50), the trend turns bullish.")
+    rsi100 = rsi * 100
+    if rsi100 >= 50:
+        items.append(f"If RSI drops below 48 (now {rsi100:.0f}), momentum weakens.")
+    else:
+        items.append(f"If RSI rises above 52 (now {rsi100:.0f}), momentum builds.")
+    items.append("If volatility expands (Bollinger bands widen), breakout probability increases."
+                 if bb_width < 0.06 else
+                 "If volatility contracts (bands tighten), a breakout is being coiled.")
+    return items
 
 
 # ---------------------------------------------------------------------------

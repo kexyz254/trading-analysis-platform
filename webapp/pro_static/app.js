@@ -725,26 +725,97 @@ function dnaBar(label, value) {
         <span class="dna-track"><span class="dna-center"></span>${fill}</span></div>`;
 }
 
+function kv(label, value) {
+    return `<div class="iv-row"><span class="iv-k">${label}</span><span class="iv-v">${value}</span></div>`;
+}
+function fmtDur(secs) {
+    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+function subPanel(title, bodyHtml) {
+    return `<div class="iv-sub"><div class="iv-title">${title}</div>${bodyHtml}</div>`;
+}
+
 async function loadInterpreter() {
     try {
         const d = await apiScoped(`/api/pro/interpreter/${currentSymbol}?timeframe=${currentTimeframe}`);
         if (d === null) return;
         const content = document.getElementById('interpreter-content');
         if (!d.available) { content.textContent = 'Not enough history to read this timeframe yet'; return; }
-        const m = d.metrics;
-        const chips = `
-            <div class="interp-chips">
-                <span class="interp-chip">${d.regime.replace('_', ' ')}</span>
-                <span class="interp-chip">${m.pressure.label}</span>
-                <span class="interp-chip">momentum ${m.momentum.label}</span>
-                ${d.condition ? `<span class="interp-chip warn">${d.condition}</span>` : ''}
-            </div>`;
+
+        const rb = d.regime_block, tr = d.trend, mo = d.momentum, pr = d.pressure,
+              st = d.structure, vo = d.volatility, li = d.liquidity, cl = d.clarity,
+              cf = d.interpreter_confidence;
+
+        // Market summary + clarity headline
+        const clarityColor = cl.value >= 0.66 ? '#00FFC2' : cl.value >= 0.33 ? '#FFB800' : '#FF3366';
+        let html = `<div class="interp-summary">${d.summary}</div>`;
+        html += `<div class="interp-clarity-head"><span>Market Clarity</span>
+                 <span style="color:${clarityColor}"><strong>${(cl.value*100).toFixed(0)}%</strong></span></div>
+                 <div class="iv-meaning">${cl.meaning}</div>`;
+
+        // Regime
+        html += subPanel('Regime',
+            kv('Current', `<strong style="text-transform:capitalize">${rb.regime.replace('_',' ')}</strong>`) +
+            kv('Confidence', `${rb.confidence_pct}%`) +
+            kv('Time in regime', fmtDur(rb.time_in_regime_seconds)) +
+            (rb.previous ? kv('Previous', rb.previous.replace('_',' ')) : '') +
+            kv('Transition', rb.transition));
+
+        // Trend
+        html += subPanel('Trend',
+            kv('Direction', `<span class="${tr.value>=0?'pos':'neg'}">${tr.direction}</span>`) +
+            kv('Strength', `${tr.strength_pct}%`) +
+            kv('Slope', tr.slope) +
+            kv('Higher TF ('+tr.higher_tf.timeframe+')', tr.higher_tf.state));
+
+        // Momentum
+        html += subPanel('Momentum',
+            kv('RSI', mo.rsi.toFixed(0)) +
+            kv('MACD', mo.macd) +
+            kv('Acceleration', mo.acceleration) +
+            `<div class="iv-note">${mo.interpretation}</div>`);
+
+        // Pressure (buyers vs sellers bar)
+        html += subPanel('Pressure',
+            `<div class="pr-bar"><span class="pr-buy" style="width:${pr.buyers_pct}%">${pr.buyers_pct}%</span>` +
+            `<span class="pr-sell" style="width:${pr.sellers_pct}%">${pr.sellers_pct}%</span></div>` +
+            kv('Dominance', `<span class="${pr.dominance==='buyers'?'pos':pr.dominance==='sellers'?'neg':''}">${pr.dominance}</span>`) +
+            kv('Pressure trend', pr.trend));
+
+        // Structure
+        html += subPanel('Structure',
+            st.pattern
+              ? kv('Pattern', `<span style="text-transform:capitalize">${st.pattern.name.replace(/_/g,' ')}</span>`) +
+                kv('Confidence', `${st.pattern.confidence_pct}%`) +
+                kv('Breakout risk', st.pattern.breakout_risk)
+              : `<div class="iv-note">No defined pattern — structure reads ${st.label}.</div>`);
+
+        // Volatility + Liquidity
+        html += subPanel('Volatility',
+            kv('ATR', `${vo.atr_pct}%`) + kv('Level', vo.label) +
+            (vo.vs_recent_pct != null ? kv('vs recent', `${vo.vs_recent_pct>0?'+':''}${vo.vs_recent_pct}%`) : ''));
+        html += subPanel('Liquidity',
+            kv('Volume', `${li.rel_volume}× avg`) + kv('Level', li.label) +
+            `<div class="iv-note">Spread / order-book depth: ${li.orderbook}</div>`);
+
+        // Market DNA + fingerprint
         const dna = Object.entries(d.dna).map(([k, v]) => dnaBar(k, v)).join('');
-        content.innerHTML = `
-            ${chips}
-            <div class="interp-explanation">${d.explanation}</div>
-            <div class="dna-block"><div class="dna-title">Market DNA</div>${dna}</div>
-            <div class="interp-clarity">reading clarity: ${(d.reading_clarity * 100).toFixed(0)}%</div>`;
+        const fp = Object.entries(d.fingerprint).map(([k,v]) => `<span class="fp-code">${k}-${v}</span>`).join('');
+        html += subPanel('Market DNA', dna + `<div class="fp-row">${fp}</div>`);
+
+        // Why
+        const whyBlock = (title, w) => `<div class="why-group"><div class="why-head ${w.direction==='up'?'pos':'neg'}">${title} ${w.direction==='up'?'↑':'↓'} because</div>` +
+            w.reasons.map(r => `<div class="why-item">${r}</div>`).join('') + `</div>`;
+        html += subPanel('Why?', whyBlock('Trend', d.why.trend) + whyBlock('Pressure', d.why.pressure));
+
+        // Watch
+        html += subPanel('Watch', d.watch.map(w => `<div class="watch-item">▸ ${w}</div>`).join(''));
+
+        // Interpreter confidence footer
+        html += `<div class="interp-conf">Interpreter confidence: <strong>${(cf.value*100).toFixed(0)}%</strong> — ${cf.reason}</div>`;
+
+        content.innerHTML = html;
     } catch (e) { /* ignore */ }
 }
 

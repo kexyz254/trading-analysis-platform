@@ -163,6 +163,27 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .dna-center { position: absolute; left: 50%; top: -1px; width: 1px; height: 8px; background: rgba(255,255,255,0.25); }
 .dna-fill { position: absolute; top: 0; height: 6px; border-radius: 3px; }
 .interp-clarity { margin-top: 8px; font-size: 0.68rem; opacity: 0.45; }
+.interp-summary { font-size: 0.8rem; line-height: 1.55; opacity: 0.92; }
+.interp-clarity-head { display: flex; justify-content: space-between; margin-top: 10px; font-size: 0.78rem; }
+.iv-meaning { font-size: 0.7rem; opacity: 0.55; margin-top: 2px; }
+.iv-sub { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); }
+.iv-title { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 1px; color: var(--accent); opacity: 0.75; margin-bottom: 4px; }
+.iv-row { display: flex; justify-content: space-between; padding: 1px 0; font-size: 0.74rem; }
+.iv-k { opacity: 0.55; }
+.iv-v { text-align: right; }
+.iv-v .pos, .why-head.pos, .pos { color: var(--accent); }
+.iv-v .neg, .why-head.neg, .neg { color: var(--danger); }
+.iv-note { font-size: 0.7rem; opacity: 0.6; margin-top: 3px; line-height: 1.4; }
+.pr-bar { display: flex; height: 18px; border-radius: 4px; overflow: hidden; margin: 2px 0 6px; font-size: 0.64rem; font-weight: bold; }
+.pr-buy { background: rgba(0,255,196,0.35); color: #0A0E14; display: flex; align-items: center; justify-content: flex-start; padding-left: 5px; }
+.pr-sell { background: rgba(255,51,102,0.35); color: #0A0E14; display: flex; align-items: center; justify-content: flex-end; padding-right: 5px; }
+.fp-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.fp-code { font-size: 0.64rem; letter-spacing: 0.5px; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px; opacity: 0.85; }
+.why-group { margin-bottom: 6px; }
+.why-head { font-size: 0.7rem; font-weight: bold; margin-bottom: 2px; }
+.why-item { font-size: 0.7rem; opacity: 0.6; padding-left: 8px; }
+.watch-item { font-size: 0.71rem; opacity: 0.7; padding: 2px 0; line-height: 1.4; }
+.interp-conf { margin-top: 10px; font-size: 0.7rem; opacity: 0.55; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 6px; }
 
 /* Model Info panel */
 .mi-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.76rem; }
