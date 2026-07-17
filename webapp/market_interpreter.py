@@ -131,10 +131,33 @@ def interpret_market(config: Config, symbol: str, timeframe: str) -> Dict[str, A
     condition = classify_market_condition(atr_pct, rel_volume)
 
     # --- Directional sub-signals, each bounded to [-1, 1] ---
-    trend_dir = _clip(adx_directional * 3 + np.sign(sma_fast_vs_slow) * adx_strength)
+    # Trend is tied to the REGIME classification (single source of truth):
+    # a "ranging" regime cannot simultaneously report a confident bullish
+    # trend. Only when the regime is actually trending does the directional
+    # magnitude carry through; in a range it collapses toward flat, so the
+    # trend label, the regime, and the trend DNA bar all agree.
+    raw_trend = _clip(adx_directional * 3 + np.sign(sma_fast_vs_slow) * adx_strength)
+    if regime == "ranging":
+        # Keep it inside the neutral/flat band (|x|<0.15) so the trend DNA
+        # bar visibly agrees with the "sideways" label - a range must not
+        # show a leaning trend bar.
+        trend_dir = _clip(raw_trend * 0.12, -0.14, 0.14)
+    else:
+        trend_dir = raw_trend
     momentum = _clip((rsi - 0.5) * 2 * 0.5 + np.tanh(macd_hist_pct * 50) * 0.3 + np.tanh(roc_pct * 5) * 0.2)
     pressure = _pressure_score(row)
-    structure = _clip(_f(row, "smc_structure_state") + _f(row, "smc_bos") * 0.3 + _f(row, "smc_mss") * 0.2)
+
+    # Structure blends the SMC market-structure feature with the strongest
+    # detected chart pattern's OWN bias, so the Structure section (which
+    # shows the pattern) and the DNA "structure" bar can never contradict
+    # (they did: pattern = bearish Rising Wedge, DNA = STR-100 bullish).
+    pattern = _structure_pattern(config, symbol, timeframe, None)
+    smc_structure = _clip(_f(row, "smc_structure_state") + _f(row, "smc_bos") * 0.3 + _f(row, "smc_mss") * 0.2)
+    if pattern:
+        pbias = {"bullish": 1.0, "bearish": -1.0}.get(pattern["bias"], 0.0)
+        structure = _clip(smc_structure * 0.4 + pbias * 0.6)
+    else:
+        structure = smc_structure
 
     # --- Non-directional magnitudes as PERCENTILES of this market's own
     #     recent history (not a hardcoded constant): 0.5 == a perfectly
@@ -184,11 +207,12 @@ def interpret_market(config: Config, symbol: str, timeframe: str) -> Dict[str, A
         if past > 0:
             vol_change_pct = round((atr_pct - past) / past * 100, 0)
 
-    # --- Structure: the strongest detected chart pattern. Reuses the SAME
-    #     cached detection the Chart Patterns card shows, so the two panels
-    #     can never disagree (they did: one said 'no pattern', the other a
-    #     Rising Wedge). ---
-    pattern = _structure_pattern(config, symbol, timeframe, volatility)
+    # Now that volatility is known, finish the pattern's breakout risk
+    # (converging pattern + compressed volatility = coiled for a break).
+    if pattern:
+        pattern = dict(pattern)
+        converging = pattern.pop("converging", False)
+        pattern["breakout_risk"] = "high" if converging and volatility < 0.4 else "moderate" if converging else "low"
 
     buyers_pct = int(round(50 + pressure * 50))
     sellers_pct = 100 - buyers_pct
@@ -208,7 +232,11 @@ def interpret_market(config: Config, symbol: str, timeframe: str) -> Dict[str, A
         "summary": _analyst_summary(symbol, regime, momentum, pressure, volatility, liquidity, condition, clarity),
         "regime_block": regime_block,
         "trend": {
-            "value": round(trend_dir, 3), "direction": _band(trend_dir, "bullish", "bearish", "neutral"),
+            "value": round(trend_dir, 3),
+            # Direction agrees with the regime: ranging => sideways, never a
+            # confident "bullish" on a 17%-strength noise wiggle.
+            "direction": ("sideways" if regime == "ranging"
+                          else "bullish" if regime == "trending_up" else "bearish"),
             "strength_pct": int(round(adx_strength * 100)),
             "slope": _magnitude(min(abs(sma_fast_vs_slow) / 0.02, 1.0)),
             "higher_tf": higher_tf,
@@ -284,17 +312,19 @@ def _regime_block(featured: pd.DataFrame, regime: str, adx_strength: float, bar_
     }
 
 
-def _structure_pattern(config: Config, symbol: str, timeframe: str, volatility: float) -> Optional[Dict[str, Any]]:
+def _structure_pattern(config: Config, symbol: str, timeframe: str, _unused: Any = None) -> Optional[Dict[str, Any]]:
+    """Strongest detected chart pattern from the SAME cached source as the
+    Chart Patterns card (so the two panels agree). breakout_risk is filled
+    in by the caller once volatility is known."""
     try:
-        pats = da.detected_patterns(config, symbol, timeframe)  # same cached source as the Chart Patterns card
+        pats = da.detected_patterns(config, symbol, timeframe)
         if not pats:
             return None
         top = pats[0]
         converging = top["name"] in {"ascending_triangle", "descending_triangle", "symmetric_triangle",
                                      "rising_wedge", "falling_wedge"}
-        breakout_risk = "high" if converging and volatility < 0.4 else "moderate" if converging else "low"
         return {"name": top["name"], "bias": top["bias"],
-                "confidence_pct": int(round(top["confidence"] * 100)), "breakout_risk": breakout_risk}
+                "confidence_pct": int(round(top["confidence"] * 100)), "converging": converging}
     except Exception:  # noqa: BLE001
         return None
 
@@ -354,10 +384,14 @@ def _momentum_text(momentum: float, rsi: float) -> str:
         return "Momentum is strongly positive."
     if momentum > 0.15:
         return "Momentum is positive but not extreme."
+    if momentum > 0.05:
+        return "Momentum is mildly positive."
     if momentum < -0.4:
         return "Momentum is strongly negative."
     if momentum < -0.15:
         return "Momentum is negative but not extreme."
+    if momentum < -0.05:
+        return "Momentum is mildly negative."
     return "Momentum is flat."
 
 
