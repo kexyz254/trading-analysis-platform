@@ -54,6 +54,33 @@ _MAX_CACHED_ENTRIES = 8
 _cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _cache_lock = threading.Lock()
 
+# Featured-frame cache: build_features + pattern_feature_frame over ~1000
+# bars is the expensive part of a request (a per-bar Python loop with
+# repeated line fits), and its output only changes when a candle CLOSES -
+# yet the frontend polls every 10s and the price-call loop every 60s. Keyed
+# by the last closed bar's timestamp so a new candle invalidates it
+# immediately; same LRU bound as the model cache.
+_frame_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+
+def _featured_frame(frame: pd.DataFrame, symbol: str, timeframe: str) -> pd.DataFrame:
+    key = (symbol, timeframe)
+    last_ts = frame.iloc[-1]["timestamp"]
+    with _cache_lock:
+        entry = _frame_cache.get(key)
+        if entry is not None and entry["last_ts"] == last_ts and entry["n_bars"] == len(frame):
+            return entry["featured"]
+
+    featured = build_features(frame)
+    featured[PATTERN_COLUMNS] = pattern_feature_frame(frame).values
+    featured = featured.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
+
+    with _cache_lock:
+        _frame_cache[key] = {"last_ts": last_ts, "n_bars": len(frame), "featured": featured}
+        while len(_frame_cache) > _MAX_CACHED_ENTRIES:
+            del _frame_cache[next(iter(_frame_cache))]
+    return featured
+
 
 def _closed_bars_frame(config: Config, symbol: str, timeframe: str) -> pd.DataFrame:
     raw = da.fetch_ohlcv(config, symbol, timeframe, limit=HISTORY_BARS)
@@ -137,9 +164,7 @@ def _get_or_train(featured: pd.DataFrame, symbol: str, timeframe: str) -> Dict[s
 
 def get_forecast(config: Config, symbol: str, timeframe: str) -> Dict[str, Any]:
     frame = _closed_bars_frame(config, symbol, timeframe)
-    featured = build_features(frame)
-    featured[PATTERN_COLUMNS] = pattern_feature_frame(frame).values
-    featured = featured.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
+    featured = _featured_frame(frame, symbol, timeframe)
     if featured.empty:
         raise ValueError(f"no rows with complete features for {symbol} {timeframe}")
 

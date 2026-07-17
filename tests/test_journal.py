@@ -42,6 +42,35 @@ def test_record_and_read_trade(tmp_path):
     assert trades[0]["order_id"] == "abc123"
 
 
+def test_reader_journal_never_writes_schema(tmp_path):
+    """initialize=False must construct a PURE READER: no tables created, no
+    migrations run, no db file created - the dashboard's guarantee that it
+    can never corrupt the engine's journal through a private-WAL schema
+    write (see Journal.__init__'s docstring for the production incident)."""
+    db_path = tmp_path / "journal.db"
+
+    # Constructing a reader against a nonexistent path must not create it.
+    Journal(db_path=str(db_path), initialize=False)
+    assert not db_path.exists()
+
+    # Against a schema-BEHIND database (simulating an old db + new deploy),
+    # the reader must not create the missing tables: byte-identical file.
+    import sqlite3 as sql
+    conn = sql.connect(db_path)
+    conn.execute("CREATE TABLE decisions (id INTEGER PRIMARY KEY, timestamp TEXT, symbol TEXT, signal TEXT, confidence REAL, risk_approved INTEGER, risk_reason TEXT, action TEXT, price REAL, quantity REAL, details TEXT)")
+    conn.commit()
+    conn.close()
+    before = db_path.read_bytes()
+
+    reader = Journal(db_path=str(db_path), initialize=False)
+    assert reader.recent_decisions(limit=5) == []  # reads work
+    with pytest.raises(sql.OperationalError):
+        # querying a table the old schema lacks fails loudly instead of
+        # being silently created
+        reader.recent_trades(limit=5)
+    assert db_path.read_bytes() == before
+
+
 def test_record_and_read_ohlcv_snapshot(tmp_path):
     journal = _make_journal(tmp_path)
     journal.record_ohlcv_snapshot(

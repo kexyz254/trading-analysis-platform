@@ -24,24 +24,39 @@ const TF_SECONDS = {
 };
 
 // --- Initialization ---
-document.addEventListener('DOMContentLoaded', async () => {
-    setupChart();
-    const status = await api('/api/status');
+document.addEventListener('DOMContentLoaded', initTerminal);
+
+async function initTerminal() {
+    if (!chart) setupChart();
+    let status;
+    try {
+        status = await api('/api/status');
+    } catch (e) {
+        // A transient backend error at page load (e.g. a brief "database is
+        // locked" while the engine writes) must degrade to a retry, not
+        // permanently brick the whole terminal on a dead init chain.
+        document.getElementById('uptime').textContent = 'Backend unreachable — retrying…';
+        setTimeout(initTerminal, 5000);
+        return;
+    }
     renderStatus(status);
     renderSymbolList(status.symbols);
     await renderTimeframeTabs();
     initLiveFeed(status.ws_base_url);
     subscribeTickers(status.symbols, onTicker);
     await refreshAll();
+    _lastKlineAt = Date.now(); // start the WS watchdog clock from "just loaded"
     startLiveCandles();
     startPolling();
 
     document.getElementById('symbol-select').addEventListener('change', async (e) => {
         currentSymbol = e.target.value;
+        _viewEpoch++;
+        bars = []; // stop live klines painting onto the old symbol's series
         await refreshAll();
         startLiveCandles();
     });
-});
+}
 
 // --- Chart Setup ---
 function setupChart() {
@@ -95,6 +110,24 @@ async function api(url) {
     return res.json();
 }
 
+// Stale-response guard: an in-flight request can outlive a symbol/timeframe
+// switch, and applying its payload would paint the previous view's data
+// onto the new one. Symbol/timeframe-scoped loaders fetch through this and
+// treat null as "view changed while waiting - drop it".
+let _viewEpoch = 0;
+async function apiScoped(url) {
+    const epoch = _viewEpoch;
+    const data = await api(url);
+    return epoch === _viewEpoch ? data : null;
+}
+
+let _lastKlineAt = 0;
+let _lastTickerAt = 0;
+
+function removeSeriesSafe(series) {
+    if (series) { try { chart.removeSeries(series); } catch (e) { /* already removed */ } }
+}
+
 async function refreshAll() {
     try {
         await loadChart();
@@ -115,8 +148,15 @@ async function refreshCards() {
             loadPriceCall(),
             loadModelInfo(),
             loadPatterns(),
+            loadStatusBadge(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
+    // WS watchdog: if no kline arrived in 45s the browser's Binance socket
+    // is dead/blocked - degrade to 10s REST-polled candles instead of a
+    // silently frozen "live" chart.
+    if (_lastKlineAt && Date.now() - _lastKlineAt > 45000) {
+        try { await loadChart(); } catch (e) { /* next poll retries */ }
+    }
     // Kept out of the Promise.all: first call per (symbol, timeframe)
     // trains models server-side and can take a few seconds - it must not
     // delay every other card while it does.
@@ -134,6 +174,8 @@ function startLiveCandles() {
 
 function onKline(k) {
     if (k.interval !== currentTimeframe || k.symbol !== binancePair(currentSymbol)) return;
+    _lastKlineAt = Date.now();
+    if (!bars.length) return; // mid-switch: the REST history hasn't landed yet
     const bar = { time: k.time, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume };
     const last = bars[bars.length - 1];
     if (last && bar.time === last.time) {
@@ -154,6 +196,7 @@ function onKline(k) {
 
 function onTicker(t) {
     if (t.symbol !== binancePair(currentSymbol)) return;
+    _lastTickerAt = Date.now();
     const el = document.getElementById('price-change');
     el.textContent = `${t.changePct >= 0 ? '+' : ''}${t.changePct.toFixed(2)}% (24h)`;
     el.style.color = t.changePct >= 0 ? '#00FFC2' : '#FF3366';
@@ -164,12 +207,14 @@ async function loadChart() {
     // A symbol/timeframe switch invalidates every overlay drawn in the old
     // time coordinate system - clear them now rather than leaving stale
     // lines up until their own refreshes land.
-    if (_projectionSeries) { try { chart.removeSeries(_projectionSeries); } catch (e) {} _projectionSeries = null; }
-    _patternSeries.forEach(s => { try { chart.removeSeries(s); } catch (e) {} });
+    removeSeriesSafe(_projectionSeries); _projectionSeries = null;
+    _patternSeries.forEach(removeSeriesSafe);
     _patternSeries = [];
-    const data = await api(
+    const data = await apiScoped(
         `/api/ohlcv?symbol=${encodeURIComponent(currentSymbol)}&timeframe=${currentTimeframe}&limit=${HISTORY_LIMIT}`
     );
+    if (data === null) return;                       // view changed while waiting
+    if (!Array.isArray(data) || data.length === 0) return; // keep the last good chart
     bars = data.map(b => ({
         time: Math.floor(b.timestamp / 1000), // exchange sends ms epoch, chart wants seconds
         open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
@@ -236,7 +281,18 @@ function formatPrice(p) {
 
 function updatePriceHeader() {
     if (bars.length === 0) return;
-    document.getElementById('current-price').textContent = `$${formatPrice(bars[bars.length - 1].close)}`;
+    const last = bars[bars.length - 1];
+    document.getElementById('current-price').textContent = `$${formatPrice(last.close)}`;
+    // Fallback when the browser->Binance ticker stream is silent (blocked
+    // network, geo-block, testnet outage): show candle-over-candle change
+    // from REST data instead of leaving the header frozen at '—'.
+    if (Date.now() - _lastTickerAt > 90000 && bars.length > 1) {
+        const prev = bars[bars.length - 2].close;
+        const pct = ((last.close - prev) / prev * 100).toFixed(2);
+        const el = document.getElementById('price-change');
+        el.textContent = `${last.close >= prev ? '+' : ''}${pct}% (bar)`;
+        el.style.color = last.close >= prev ? '#00FFC2' : '#FF3366';
+    }
 }
 
 // --- 5-minute self-scoring price call card ---
@@ -245,7 +301,8 @@ let _callDueAt = null;
 
 async function loadPriceCall() {
     try {
-        const data = await api(`/api/pro/price-calls/${currentSymbol}`);
+        const data = await apiScoped(`/api/pro/price-calls/${currentSymbol}`);
+        if (data === null) return;
         const content = document.getElementById('call-content');
 
         if (_callPriceLine) { candleSeries.removePriceLine(_callPriceLine); _callPriceLine = null; }
@@ -317,8 +374,9 @@ function biasColor(bias) {
 
 async function loadPatterns() {
     try {
-        const data = await api(`/api/pro/patterns/${currentSymbol}?timeframe=${currentTimeframe}`);
-        _patternSeries.forEach(s => { try { chart.removeSeries(s); } catch (e) {} });
+        const data = await apiScoped(`/api/pro/patterns/${currentSymbol}?timeframe=${currentTimeframe}`);
+        if (data === null) return;
+        _patternSeries.forEach(removeSeriesSafe);
         _patternSeries = [];
 
         const content = document.getElementById('patterns-content');
@@ -350,7 +408,7 @@ async function loadPatterns() {
 }
 
 // --- Next-3-candles forecast card ---
-let _forecastInFlight = false;
+let _forecastInFlight = null;
 
 let _projectionSeries = null;
 
@@ -359,7 +417,7 @@ function drawProjection(data) {
     // per horizon from the model, magnitude = the symbol's median absolute
     // per-candle move on this timeframe (same honest convention as the
     // price calls: the models predict direction, not distance).
-    if (_projectionSeries) { try { chart.removeSeries(_projectionSeries); } catch (e) {} _projectionSeries = null; }
+    removeSeriesSafe(_projectionSeries); _projectionSeries = null;
     if (!bars.length || !data.horizons || data.horizons.length === 0) return;
     const moves = [];
     for (let i = 1; i < bars.length; i++) moves.push(Math.abs(bars[i].close / bars[i - 1].close - 1));
@@ -386,22 +444,25 @@ function drawProjection(data) {
 }
 
 async function loadForecast() {
-    if (_forecastInFlight) return; // first call per (symbol, tf) trains server-side; don't stack requests behind it
-    _forecastInFlight = true;
     const requested = `${currentSymbol}|${currentTimeframe}`;
+    // Skip only if a request for this SAME view is already in flight - a
+    // different view's slow first-train must not block the new view's card.
+    if (_forecastInFlight === requested) return;
+    _forecastInFlight = requested;
     try {
         document.getElementById('forecast-tf').textContent = currentTimeframe;
-        const data = await api(`/api/pro/forecast/${currentSymbol}?timeframe=${currentTimeframe}`);
-        // Symbol/timeframe changed while training - drop the stale answer.
-        if (requested !== `${currentSymbol}|${currentTimeframe}`) return;
+        const data = await apiScoped(`/api/pro/forecast/${currentSymbol}?timeframe=${currentTimeframe}`);
+        if (data === null) return; // view changed while training
         drawProjection(data);
         const content = document.getElementById('forecast-content');
         const rows = data.horizons.map(h => {
             const up = h.direction === 'UP';
             const shownProb = up ? h.probability_up : 1 - h.probability_up;
-            // A hit rate at/below the holdout's own always-up baseline means
-            // the model currently has no measurable edge - say so plainly.
-            const edge = h.hit_rate - Math.max(0.5, h.up_share_holdout);
+            // The trivial baseline is the holdout's MAJORITY class: a model
+            // that always guesses the majority direction scores max(up, down)
+            // share, so only a hit rate above that is any edge at all.
+            const baseline = Math.max(h.up_share_holdout, 1 - h.up_share_holdout);
+            const edge = h.hit_rate - baseline;
             return `
                 <div class="forecast-row">
                     <span class="forecast-step">+${h.step}</span>
@@ -416,15 +477,15 @@ async function loadForecast() {
         const content = document.getElementById('forecast-content');
         if (requested === `${currentSymbol}|${currentTimeframe}`) content.textContent = 'Forecast unavailable';
     } finally {
-        _forecastInFlight = false;
+        if (_forecastInFlight === requested) _forecastInFlight = null;
     }
 }
 
 // --- Prediction markers on the chart ---
 async function loadDecisionMarkers() {
     try {
-        const data = await api(`/api/pro/decisions/${currentSymbol}?limit=200`);
-        if (bars.length === 0) return;
+        const data = await apiScoped(`/api/pro/decisions/${currentSymbol}?limit=200`);
+        if (data === null || bars.length === 0) return;
         const tf = TF_SECONDS[currentTimeframe] || 3600;
         const firstTime = bars[0].time;
         const markers = data.decisions
@@ -444,6 +505,12 @@ async function loadDecisionMarkers() {
 }
 
 // --- Top bar / status ---
+async function loadStatusBadge() {
+    // The LIVE/TESTNET badge is the "am I looking at real money?" indicator
+    // - it must track server restarts that flip mode, not just page load.
+    try { renderStatus(await api('/api/status')); } catch (e) { /* keep last known */ }
+}
+
 function renderStatus(status) {
     document.getElementById('mode-badge').textContent = status.mode.toUpperCase();
     document.getElementById('live-dot').style.color = status.is_live ? '#FF3366' : '#00FFC2';
@@ -466,7 +533,12 @@ function renderSymbolList(symbols) {
 }
 
 async function renderTimeframeTabs() {
-    const timeframes = await api('/api/timeframes');
+    let timeframes;
+    try {
+        timeframes = await api('/api/timeframes');
+    } catch (e) {
+        timeframes = Object.keys(TF_SECONDS); // backend hiccup: same list, hardcoded
+    }
     const wrap = document.getElementById('timeframe-tabs');
     wrap.innerHTML = '';
     timeframes.forEach(tf => {
@@ -478,6 +550,8 @@ async function renderTimeframeTabs() {
             wrap.querySelectorAll('button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             currentTimeframe = tf;
+            _viewEpoch++;
+            bars = []; // stop live klines painting onto the old timeframe's series
             document.getElementById('forecast-content').textContent = 'Training model…';
             try { await loadChart(); } catch (e) { console.warn('Chart load error', e); }
             await Promise.all([loadDecisionMarkers(), loadPatterns()]);
@@ -530,7 +604,8 @@ function confidenceGauge(frac, sig) {
 
 async function loadPrediction() {
     try {
-        const data = await api(`/api/pro/prediction/${currentSymbol}`);
+        const data = await apiScoped(`/api/pro/prediction/${currentSymbol}`);
+        if (data === null) return;
         const content = document.getElementById('prediction-content');
         const sig = data.signal || 'HOLD';
         // Confidence gauge prefers the model's ensemble confidence; falls
@@ -563,7 +638,8 @@ function fmtAge(iso) {
 
 async function loadModelInfo() {
     try {
-        const d = await api(`/api/pro/model-info/${currentSymbol}`);
+        const d = await apiScoped(`/api/pro/model-info/${currentSymbol}`);
+        if (d === null) return;
         const content = document.getElementById('model-info-content');
         const rows = [
             ['Champion Model', d.champion || 'none promoted'],
@@ -583,7 +659,8 @@ async function loadModelInfo() {
 
 async function loadPosition() {
     try {
-        const data = await api(`/api/pro/position/${currentSymbol}`);
+        const data = await apiScoped(`/api/pro/position/${currentSymbol}`);
+        if (data === null) return;
         const content = document.getElementById('position-content');
         if (!data.open) { content.textContent = 'No open position'; return; }
         const side = data.quantity >= 0 ? 'LONG' : 'SHORT';
@@ -597,7 +674,8 @@ async function loadPosition() {
 
 async function loadFeatures() {
     try {
-        const data = await api(`/api/pro/features/${currentSymbol}`);
+        const data = await apiScoped(`/api/pro/features/${currentSymbol}`);
+        if (data === null) return;
         const content = document.getElementById('features-content');
         if (!data.features || data.features.length === 0) { content.textContent = 'No features yet'; return; }
         const list = document.createElement('ul');
@@ -614,7 +692,8 @@ async function loadFeatures() {
 
 async function loadTrades() {
     try {
-        const data = await api(`/api/pro/trades/${currentSymbol}?limit=20`);
+        const data = await apiScoped(`/api/pro/trades/${currentSymbol}?limit=20`);
+        if (data === null) return;
         const content = document.getElementById('trades-content');
         if (!data.trades || data.trades.length === 0) { content.textContent = 'No trades yet'; return; }
         const table = document.createElement('table');
@@ -637,7 +716,8 @@ async function loadTrades() {
 
 async function loadCandidates() {
     try {
-        const data = await api(`/api/pro/candidates/${currentSymbol}`);
+        const data = await apiScoped(`/api/pro/candidates/${currentSymbol}`);
+        if (data === null) return;
         const content = document.getElementById('candidates-content');
         if (!data.candidates || data.candidates.length === 0) { content.textContent = 'No paper candidates yet'; return; }
         const sorted = [...data.candidates].sort((a, b) => b.total_equity - a.total_equity);

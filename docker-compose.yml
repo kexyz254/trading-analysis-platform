@@ -87,7 +87,15 @@ services:
       # a private WAL corrupts the main file ("database disk image is
       # malformed" - happened in production 2026-07-16). The dashboard must
       # therefore stay STRICTLY READ-ONLY on this database; anything the
-      # dashboard needs to persist goes in dashboard_data/ below.
+      # dashboard needs to persist goes in dashboard_data/ below. Enforced
+      # in code: every dashboard-side Journal is constructed with
+      # initialize=False (no schema DDL, no migrations - see Journal.__init__).
+      # TODO(deep fix): migrate trading_system.db into a shared DIRECTORY
+      # mount (e.g. ./data:/app/data for both services) so the WAL sidecars
+      # live on the host for both containers - that removes this whole class
+      # of hazard instead of guarding it. Requires moving the db file on the
+      # host plus updating both services' paths and the backup cron in one
+      # deliberate maintenance step.
       - ./trading_system.db:/app/trading_system.db
       # Dashboard-owned analytics (price calls etc.): a DIRECTORY mount, so
       # the analytics db's WAL sidecars live inside the shared directory and

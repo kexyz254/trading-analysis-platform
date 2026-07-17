@@ -75,6 +75,12 @@ _MIN_LINE_R2 = 0.80           # trendline fit quality gate when >= 3 touches
 
 
 def _atr(frame: pd.DataFrame, period: int = 14) -> np.ndarray:
+    """Same TR/rolling-mean math as analysis.ta_lib.TechnicalIndicators.atr,
+    kept separate ON PURPOSE for two behavioral deltas this module needs:
+    min_periods=1 (patterns must be scorable near the frame head, where
+    ta_lib returns NaN warmup) and prev_close seeded from close[0] instead
+    of a NaN shift. If you change ATR semantics in ta_lib, decide explicitly
+    whether this copy should follow."""
     high, low, close = frame["high"].values, frame["low"].values, frame["close"].values
     prev_close = np.roll(close, 1)
     prev_close[0] = close[0]

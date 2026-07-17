@@ -277,12 +277,25 @@ class DecisionRecord:
 class Journal:
     """A small, dependency-free audit log backed by SQLite."""
 
-    def __init__(self, db_path: str = "trading_system.db"):
+    def __init__(self, db_path: str = "trading_system.db", initialize: bool = True):
+        """initialize=False constructs a PURE READER: no schema DDL, no
+        migrations, no directory creation - required for any process that
+        must never write this database. The dashboard opens the engine's
+        journal through a single-FILE docker bind mount, where SQLite's WAL
+        sidecars land in each container's own private overlay fs; a schema
+        write from the dashboard (e.g. CREATE TABLE for a table added in a
+        newer deploy) therefore commits through a private WAL that diverges
+        from the engine's and corrupts the shared main file ("database disk
+        image is malformed", production 2026-07-16). Readers querying a
+        table that doesn't exist yet get sqlite3.OperationalError - the
+        correct, honest failure for a schema-behind database."""
         self.db_path = db_path
-        parent = Path(db_path).parent
-        if str(parent) not in ("", "."):
-            parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        self._reader = not initialize
+        if initialize:
+            parent = Path(db_path).parent
+            if str(parent) not in ("", "."):
+                parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -294,8 +307,13 @@ class Journal:
         # this dashboard process both open independent connections to the
         # same file constantly. busy_timeout makes any remaining contention
         # wait-and-retry (up to 5s) instead of raising immediately.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        if not self._reader:
+            # Writer-only pragmas. journal_mode=WAL is a WRITE on any
+            # database not already in WAL mode (it rewrites the header) - a
+            # pure reader must never issue it. Reading a WAL database does
+            # not require setting the mode; it's a property of the file.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 

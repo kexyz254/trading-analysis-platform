@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import statistics
+from functools import lru_cache
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,6 +46,11 @@ from webapp import data_access as da
 logger = logging.getLogger(__name__)
 
 CALL_HORIZON_SECONDS = 300
+# A due call settled more than this long after its due time is VOIDED, not
+# scored - the loop runs every ~60s, so anything later than this means the
+# process was down and the only available price is from long after the
+# 5-minute mark.
+SETTLE_GRACE_SECONDS = 120
 # Median |5m move| is computed over this many recent closed candles.
 _MOVE_WINDOW_BARS = 120
 _STATS_WINDOW = 50
@@ -64,7 +70,13 @@ CREATE TABLE IF NOT EXISTS price_calls (
     actual_price REAL,
     correct INTEGER,
     miss_pct REAL,
-    settled_at TEXT
+    settled_at TEXT,
+    -- 1 = call could not be settled honestly (came due while the process
+    -- was down, so the only available price is from far after the 5-minute
+    -- mark). Voided calls are excluded from stats and the results strip -
+    -- scoring a "5-minute" call against a price from hours later would
+    -- contaminate the exact track record this table exists to keep honest.
+    voided INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_price_calls_symbol_id ON price_calls (symbol, id);
@@ -75,6 +87,14 @@ CREATE INDEX IF NOT EXISTS idx_price_calls_symbol_id ON price_calls (symbol, id)
 # ./dashboard_data directory mount (see docker-compose.yml). Overridable
 # for tests via the constructor.
 DEFAULT_ANALYTICS_DB = "dashboard_data/analytics.db"
+
+
+@lru_cache(maxsize=4)
+def get_book(db_path: str = DEFAULT_ANALYTICS_DB) -> "PriceCallBook":
+    """One book per db path: constructing PriceCallBook runs the schema
+    script, and both the 60s background loop and every /api/pro/price-calls
+    request need a book - re-running DDL on each of those is pure waste."""
+    return PriceCallBook(db_path)
 
 
 class PriceCallBook:
@@ -147,6 +167,16 @@ class PriceCallBook:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def void(self, call_id: int, settled_at: Optional[str] = None) -> None:
+        """Close a call WITHOUT scoring it - see the voided column's schema
+        comment for when this is the honest outcome."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE price_calls SET voided = 1, settled_at = ? WHERE id = ? AND settled_at IS NULL",
+                (settled_at or self._now_iso(), call_id),
+            )
+            conn.commit()
+
     def settle(self, call_id: int, actual_price: float, settled_at: Optional[str] = None) -> None:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM price_calls WHERE id = ?", (call_id,)).fetchone()
@@ -169,7 +199,8 @@ class PriceCallBook:
     def recent_settled(self, symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT * FROM price_calls WHERE symbol = ? AND settled_at IS NOT NULL ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM price_calls WHERE symbol = ? AND settled_at IS NOT NULL AND voided = 0 "
+                "ORDER BY id DESC LIMIT ?",
                 (symbol, limit),
             ).fetchall()
         records = [dict(row) for row in rows]
@@ -181,7 +212,7 @@ class PriceCallBook:
             rows = conn.execute(
                 """
                 SELECT correct, miss_pct FROM price_calls
-                WHERE symbol = ? AND settled_at IS NOT NULL
+                WHERE symbol = ? AND settled_at IS NOT NULL AND voided = 0
                 ORDER BY id DESC LIMIT ?
                 """,
                 (symbol, window),
@@ -245,9 +276,18 @@ def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optio
     discovery universe: each symbol costs a 5m model (trained/cached by
     webapp.forecast) and the dashboard container has a hard memory cap.
     """
-    book = PriceCallBook(db_path)
+    book = get_book(db_path)
+    now = datetime.now(timezone.utc)
     for call in book.due_unsettled():
         try:
+            overdue = (now - datetime.fromisoformat(call["due_at"])).total_seconds()
+            if overdue > SETTLE_GRACE_SECONDS:
+                # Came due while the process was down - the only price we
+                # have is from far past the 5-minute mark. Scoring it would
+                # contaminate the track record; void it instead.
+                book.void(call["id"])
+                logger.info("voided price call %s (%.0fs overdue)", call["id"], overdue)
+                continue
             book.settle(call["id"], _current_price(config, call["symbol"]))
         except Exception:  # noqa: BLE001 - one symbol's failure must not block the rest
             logger.exception("failed to settle price call %s", call["id"])

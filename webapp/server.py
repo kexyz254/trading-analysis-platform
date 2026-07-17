@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
@@ -65,11 +66,8 @@ _db_path = _args.db
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Trading System Dashboard API")
 
-
-@app.on_event("startup")
-async def _start_price_call_loop() -> None:
+async def _price_call_loop() -> None:
     """Background loop for the self-scoring 5-minute price calls (see
     webapp/price_call.py). Runs in this dashboard process so the track
     record accumulates 24/7 whether or not anyone is watching; each pass
@@ -81,16 +79,32 @@ async def _start_price_call_loop() -> None:
     dashboard must stay strictly read-only on the shared trading journal.
     See price_call.py's storage note for the production corruption this
     rule exists to prevent."""
-    async def _loop() -> None:
-        from webapp import price_call
-        while True:
-            try:
-                await asyncio.to_thread(price_call.run_once, _config)
-            except Exception:  # noqa: BLE001 - the loop must survive any single pass failing
-                logger.exception("price call loop pass failed")
-            await asyncio.sleep(60)
+    from webapp import price_call
+    while True:
+        try:
+            await asyncio.to_thread(price_call.run_once, _config)
+        except Exception:  # noqa: BLE001 - the loop must survive any single pass failing
+            logger.exception("price call loop pass failed")
+        await asyncio.sleep(60)
 
-    asyncio.create_task(_loop())
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # The Task reference is deliberately held for the app's lifetime:
+    # asyncio keeps only weak references to tasks, so a bare
+    # create_task(...) can be garbage-collected mid-flight and the loop
+    # silently stops - no exception, no log. Cancelled (and awaited) on
+    # shutdown so SIGTERM doesn't kill a pass mid-write to analytics.db.
+    task = asyncio.create_task(_price_call_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="Trading System Dashboard API", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -255,10 +269,13 @@ def survivorship_bias():
 
 @app.get("/api/pro/ohlcv/{symbol:path}")
 def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
-    """Return OHLCV bars persisted by the engine for charting."""
+    """OHLCV bars the ENGINE persisted to the journal (its own configured
+    timeframe only, one bar per poll cycle) - a research record of what the
+    engine actually saw. NOT the chart's data source: the pro frontend
+    charts from /api/ohlcv (exchange-backed, all timeframes)."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         bars = journal.get_ohlcv_history(symbol, timeframe, limit)
         return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
     except Exception as exc:
@@ -270,7 +287,7 @@ def pro_prediction(symbol: str):
     """Latest real decision for the symbol (signal, confidence, regime, etc.)."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
         if not decisions:
             return {"signal": "HOLD", "confidence": None}
@@ -293,7 +310,7 @@ def pro_features(symbol: str):
     """Latest SHAP feature importance for the champion model."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         importance = journal.latest_feature_importance(symbol)
         if not importance:
             return {"features": []}
@@ -308,7 +325,7 @@ def pro_trades(symbol: str, limit: int = 50):
     """Real trade history for the symbol."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         trades = journal.recent_trades(symbol=symbol, limit=limit)
         return {"symbol": symbol, "trades": trades}
     except Exception as exc:
@@ -320,7 +337,7 @@ def pro_candidates(symbol: str):
     """Paper‑trading leaderboard for the symbol (most recent snapshot per candidate)."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         latest = journal.latest_paper_equity_by_candidate(symbol)
         candidates = []
         for name, snap in latest.items():
@@ -346,7 +363,7 @@ def pro_model_info(symbol: str):
     engine's configured timeframe."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
 
         decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
         decision = decisions[0] if decisions else None
@@ -355,9 +372,11 @@ def pro_model_info(symbol: str):
         # Most recent retrain attempt for this symbol, and the most recent
         # one that actually promoted - "last retrain" vs "last promotion"
         # are different questions and the config notes promotions are rare.
+        # da.retrain_events returns rows newest-first (ORDER BY id DESC in
+        # _read_events), so iterate as returned and take the first match.
         last_retrain = None
         last_promotion = None
-        for ev in reversed(da.retrain_events(_db_path, limit=500)):
+        for ev in da.retrain_events(_db_path, limit=500):
             if ev.get("symbol") not in (symbol, None):
                 continue
             if last_retrain is None:
@@ -399,8 +418,8 @@ def pro_price_calls(symbol: str, limit: int = 20):
     calls, and the running score - see webapp/price_call.py. Reads the
     dashboard-owned analytics db, NOT trading_system.db."""
     try:
-        from webapp.price_call import PriceCallBook
-        book = PriceCallBook()
+        from webapp.price_call import get_book
+        book = get_book()
         return {
             "symbol": symbol,
             "open_call": book.open_call(symbol),
@@ -422,11 +441,7 @@ def pro_patterns(symbol: str, timeframe: str = "1h"):
     if timeframe not in da.TIMEFRAMES:
         raise HTTPException(status_code=400, detail=f"timeframe must be one of {da.TIMEFRAMES}")
     try:
-        import pandas as pd
-        from trading_assistant.analysis.chart_patterns import detect_patterns
-        raw = da.fetch_ohlcv(_config, symbol, timeframe, limit=300)
-        frame = pd.DataFrame(raw).iloc[:-1]  # closed candles only
-        return {"symbol": symbol, "timeframe": timeframe, "patterns": detect_patterns(frame)}
+        return {"symbol": symbol, "timeframe": timeframe, "patterns": da.detected_patterns(_config, symbol, timeframe)}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Could not detect patterns: {exc}") from exc
 
@@ -451,7 +466,7 @@ def pro_decisions(symbol: str, limit: int = 200):
     chart overlays as BUY/SELL markers on the candles they happened in."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         decisions = journal.recent_decisions(symbol=symbol, limit=limit, exclude_paper=True)
         return {
             "symbol": symbol,
@@ -477,7 +492,7 @@ def pro_position(symbol: str):
     itself trades against, not a separate/derived view."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         snapshot = journal.latest_equity_snapshot()
         position = (snapshot or {}).get("positions", {}).get(symbol)
         if not snapshot or not position or not position.get("quantity"):
