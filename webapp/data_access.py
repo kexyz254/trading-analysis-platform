@@ -52,6 +52,20 @@ TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d
 _EQUITY_ACCOUNTING_FIX_CUTOFF = "2026-07-09T22:35:26+00:00"
 
 
+def _matches_mode(row_is_live: Any, is_live: bool) -> bool:
+    """Mode filter with NULL-is-testnet semantics IN THE READ PATH. A NULL
+    is_live row was written before the column existed (or by a call site
+    that didn't say) - semantically testnet for this system's entire
+    history, per Journal._migrate's backfill rationale. The engine's writer
+    journal still backfills NULL->0, but dashboard journals are PURE
+    READERS (initialize=False - no migrations, see Journal.__init__), so a
+    reader can no longer rely on that backfill having run; without this,
+    a NULL row is invisible in BOTH views instead of landing in testnet."""
+    if is_live:
+        return row_is_live == 1
+    return row_is_live in (0, None)
+
+
 def _clean_real_equity_curve(journal: Journal, is_live: bool, limit: int = 5000) -> List[Dict[str, Any]]:
     """recent_equity_snapshots filtered to _EQUITY_ACCOUNTING_FIX_CUTOFF AND
     the CURRENT mode - the single source both real_portfolio_metrics and
@@ -69,10 +83,9 @@ def _clean_real_equity_curve(journal: Journal, is_live: bool, limit: int = 5000)
     ever ran before its first live cycle), not a guess.
     """
     snapshots = journal.recent_equity_snapshots(limit=limit)
-    target = 1 if is_live else 0
     return [
         s for s in snapshots
-        if s["timestamp"] >= _EQUITY_ACCOUNTING_FIX_CUTOFF and s.get("is_live") == target
+        if s["timestamp"] >= _EQUITY_ACCOUNTING_FIX_CUTOFF and _matches_mode(s.get("is_live"), is_live)
     ]
 
 
@@ -104,12 +117,11 @@ def _clean_trade_pnls(journal: Journal, is_live: bool, limit: int = 5000) -> Lis
     is_live is required, not optional. The single source both
     real_portfolio_metrics and readiness_report use."""
     trades = journal.recent_trades(limit=limit)
-    target = 1 if is_live else 0
     return [
         t["pnl"] for t in trades
         if t.get("pnl") is not None
         and t["timestamp"] >= _TRADE_PNL_ACCOUNTING_FIX_CUTOFF
-        and t.get("is_live") == target
+        and _matches_mode(t.get("is_live"), is_live)
     ]
 
 
@@ -390,9 +402,8 @@ def journal_snapshot(db_path: str, is_live: bool) -> Dict[str, Any]:
         # (see their docstrings) - a real testnet trade must never appear
         # in what's supposed to be "your real live trading history" once
         # this system has switched to live mode, or vice versa.
-        target = 1 if is_live else 0
         raw_trades = journal.recent_trades(limit=200)
-        mode_trades = [t for t in raw_trades if t.get("is_live") == target]
+        mode_trades = [t for t in raw_trades if _matches_mode(t.get("is_live"), is_live)]
         return {
             # Filtered to _EQUITY_ACCOUNTING_FIX_CUTOFF - this feeds the
             # dashboard's live equity chart and "PnL today" stat directly,
