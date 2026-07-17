@@ -430,6 +430,17 @@ def pro_price_calls(symbol: str, limit: int = 20):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.get("/api/pro/tournament/{symbol:path}")
+def pro_tournament(symbol: str):
+    """Model Tournament: per-regime champion, why it was selected, its
+    validated metrics, the candidate leaderboard (voting), stability, and
+    the promotion bar - all from the engine's own tournament journal."""
+    try:
+        return da.tournament_summary(_db_path, _config, symbol)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/api/pro/interpreter/{symbol:path}")
 def pro_interpreter(symbol: str, timeframe: str = "1h"):
     """AI Market Interpreter: a real-metric-driven read of the market state,

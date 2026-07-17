@@ -120,6 +120,21 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .pred-row .pos { color: var(--accent); }
 .pred-row .neg { color: var(--danger); }
 
+/* Model Tournament */
+.trn-regime { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.trn-regime-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.trn-regime-name { font-size: 0.78rem; text-transform: capitalize; opacity: 0.85; }
+.trn-champ { font-size: 0.74rem; font-weight: bold; }
+.trn-champ.has { color: var(--accent); }
+.trn-champ.none { color: #EAEAEA; opacity: 0.4; }
+.trn-metrics { font-size: 0.7rem; opacity: 0.6; margin-top: 2px; }
+.trn-reason { font-size: 0.68rem; opacity: 0.45; margin-top: 2px; line-height: 1.35; }
+.trn-lb-title { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 1px; opacity: 0.5; margin: 8px 0 4px; }
+.trn-lb-row { display: flex; justify-content: space-between; font-size: 0.74rem; padding: 2px 0; }
+.trn-lb-name { opacity: 0.8; }
+.trn-lb-sharpe { opacity: 0.5; }
+.trn-lb-sharpe.pass { color: var(--accent); opacity: 1; }
+
 /* Decision Pipeline */
 .pipe-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 0.78rem; }
 .pipe-icon { width: 16px; text-align: center; font-weight: bold; }

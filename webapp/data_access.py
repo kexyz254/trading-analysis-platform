@@ -279,6 +279,88 @@ def market_interpretation(config: Config, symbol: str, timeframe: str) -> Dict[s
     return _cache.get_or_set(("interpret", symbol, timeframe), ttl_seconds=10, factory=_fetch)
 
 
+def tournament_summary(db_path: str, config: Config, symbol: str) -> Dict[str, Any]:
+    """The Model Tournament view for a symbol: per-regime champion (with the
+    manager's own 'why selected' reason and the champion's validated
+    metrics), every candidate's per-regime median Sharpe for side-by-side
+    voting, the per-regime stability score, and the promotion bar from
+    config so 'why' is contextualized. All real journal data - nothing
+    fabricated; regimes/candidates with no validated result say so."""
+    def _fetch():
+        journal = Journal(db_path, initialize=False)
+        try:
+            event = journal.latest_tournament_event(symbol)
+        except Exception:  # noqa: BLE001 - schema-behind reader
+            event = None
+        histories = winner_histories(db_path).get(symbol, {})
+
+        bar = {
+            "min_sharpe": config.learning.min_sharpe_to_promote,
+            "min_folds": config.learning.min_folds_required,
+            "min_pct_profitable": config.learning.min_pct_folds_profitable,
+        }
+        if not event:
+            return {"symbol": symbol, "available": False, "bar": bar, "regimes": [], "candidates": []}
+
+        winners = event.get("winners", {})
+        report = event.get("report", {})
+        candidates = report.get("candidates", [])
+
+        regimes = []
+        for regime, sel in winners.items():
+            history = histories.get(regime, [])
+            champ = sel.get("winner")
+            champ_metrics = None
+            if champ:
+                for c in candidates:
+                    m = c.get("by_regime", {}).get(regime)
+                    if c.get("name") == champ and m:
+                        champ_metrics = m
+                        break
+            regimes.append({
+                "regime": regime,
+                "champion": champ,
+                "reason": sel.get("reason"),
+                "metrics": champ_metrics,
+                "stability": _stability(history),
+                "runs": len(history),
+            })
+
+        # Candidate leaderboard: best (max across regimes) median Sharpe each.
+        leaderboard = []
+        for c in candidates:
+            by_regime = c.get("by_regime", {})
+            best = max((m.get("median_sharpe", 0.0) for m in by_regime.values()), default=None)
+            leaderboard.append({
+                "name": c.get("name"),
+                "kind": c.get("kind"),
+                "best_sharpe": best,
+                "by_regime": {r: m.get("median_sharpe") for r, m in by_regime.items()},
+            })
+        leaderboard.sort(key=lambda x: (x["best_sharpe"] is not None, x["best_sharpe"] or 0), reverse=True)
+
+        return {
+            "symbol": symbol,
+            "available": True,
+            "bar": bar,
+            "as_of": event.get("timestamp"),
+            "regimes": regimes,
+            "candidates": leaderboard,
+        }
+
+    return _cache.get_or_set(("tournament", db_path, symbol), ttl_seconds=15, factory=_fetch)
+
+
+def _stability(history: List[Optional[str]]) -> Optional[float]:
+    # Same definition as StrategyManager.compute_stability_score (fraction
+    # of consecutive runs that kept the same winner), inlined to avoid
+    # constructing a StrategyManager just to call a static method.
+    if len(history) < 2:
+        return None
+    matches = sum(1 for i in range(1, len(history)) if history[i] == history[i - 1])
+    return matches / (len(history) - 1)
+
+
 def pipeline_status(config: Config, db_path: str, symbol: str) -> Dict[str, Any]:
     """TTL-cached Decision Pipeline read (see webapp/market_interpreter.py).
     Short TTL because it reflects the engine's latest journaled decision,

@@ -151,6 +151,7 @@ async function refreshCards() {
             loadStatusBadge(),
             loadPipeline(),
             loadInterpreter(),
+            loadTournament(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
     // WS watchdog: if no kline arrived in 45s the browser's Binance socket
@@ -627,6 +628,50 @@ async function loadPrediction() {
                 <div class="pred-row"><span>Champion</span><span>${data.champion || 'none'}</span></div>
             </div>`;
         document.getElementById('champion-info').textContent = data.champion ? `♛ ${data.champion}` : '—';
+    } catch (e) { /* ignore */ }
+}
+
+// --- Model Tournament ---
+async function loadTournament() {
+    try {
+        const d = await apiScoped(`/api/pro/tournament/${currentSymbol}`);
+        if (d === null) return;
+        const content = document.getElementById('tournament-content');
+        if (!d.available) {
+            content.textContent = 'No tournament run recorded for this symbol yet';
+            return;
+        }
+        const bar = d.bar;
+        const regimes = d.regimes.map(r => {
+            const m = r.metrics;
+            const metricStr = m
+                ? `Sharpe ${m.median_sharpe.toFixed(2)} · ${(m.pct_folds_profitable * 100).toFixed(0)}% folds+ · ${m.num_folds} folds`
+                : '—';
+            const stab = r.stability != null ? `${(r.stability * 100).toFixed(0)}% stable` : `${r.runs} run${r.runs === 1 ? '' : 's'}`;
+            return `
+                <div class="trn-regime">
+                    <div class="trn-regime-head">
+                        <span class="trn-regime-name">${r.regime.replace('_', ' ')}</span>
+                        <span class="trn-champ ${r.champion ? 'has' : 'none'}">${r.champion || 'no champion'}</span>
+                    </div>
+                    <div class="trn-metrics">${metricStr} · ${stab}</div>
+                    ${r.reason ? `<div class="trn-reason">${r.reason}</div>` : ''}
+                </div>`;
+        }).join('');
+
+        const lb = d.candidates.slice(0, 8).map(c => {
+            const s = c.best_sharpe != null ? c.best_sharpe.toFixed(2) : '—';
+            const cleared = c.best_sharpe != null && c.best_sharpe >= bar.min_sharpe;
+            return `<div class="trn-lb-row">
+                <span class="trn-lb-name">${c.name}</span>
+                <span class="trn-lb-sharpe ${cleared ? 'pass' : ''}">${s}</span>
+            </div>`;
+        }).join('');
+
+        content.innerHTML = `
+            ${regimes}
+            <div class="trn-lb-title">Candidate voting — best Sharpe (bar ≥ ${bar.min_sharpe})</div>
+            ${lb}`;
     } catch (e) { /* ignore */ }
 }
 
