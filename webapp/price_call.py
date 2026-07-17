@@ -105,6 +105,12 @@ class PriceCallBook:
             parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
             conn.executescript(_SCHEMA)
+            # `voided` was added after the first deploy created this table -
+            # CREATE TABLE IF NOT EXISTS is a no-op against an existing db,
+            # so an explicit ALTER is needed (same pattern as Journal._migrate).
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(price_calls)").fetchall()}
+            if "voided" not in columns:
+                conn.execute("ALTER TABLE price_calls ADD COLUMN voided INTEGER NOT NULL DEFAULT 0")
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
