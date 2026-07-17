@@ -149,6 +149,9 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .pipe-decision { margin-top: 6px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 8px; }
 .pipe-decision .pipe-stage, .pipe-decision .pipe-detail { opacity: 1; }
 .pipe-reason { margin-top: 8px; font-size: 0.72rem; color: var(--warning); background: rgba(255,184,0,0.08); border-radius: 4px; padding: 6px 8px; line-height: 1.4; }
+.pipe-tf { margin-top: 6px; font-size: 0.64rem; opacity: 0.4; text-transform: uppercase; letter-spacing: 1px; }
+.pipe-icon.blocked, .pipe-icon.stale { color: var(--danger); }
+.interp-tf { font-size: 0.64rem; opacity: 0.45; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
 
 /* Market Interpreter */
 .interp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }

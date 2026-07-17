@@ -21,6 +21,7 @@ Design rules held here, matching the platform's principles:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -135,9 +136,18 @@ def interpret_market(config: Config, symbol: str, timeframe: str) -> Dict[str, A
     pressure = _pressure_score(row)
     structure = _clip(_f(row, "smc_structure_state") + _f(row, "smc_bos") * 0.3 + _f(row, "smc_mss") * 0.2)
 
-    # --- Non-directional magnitudes, [0, 1] ---
-    volatility = _clip(atr_pct / 0.08 * 0.6 + min(bb_width, 0.2) / 0.2 * 0.4, 0.0, 1.0)
-    liquidity = _clip(rel_volume / 2.0, 0.0, 1.0)  # 1.0 == 2x the 20-bar average
+    # --- Non-directional magnitudes as PERCENTILES of this market's own
+    #     recent history (not a hardcoded constant): 0.5 == a perfectly
+    #     ordinary reading for THIS symbol on THIS timeframe, 0.9 == higher
+    #     than 90% of the last ~200 bars. Timeframe-agnostic and truly
+    #     market-relative - fixes a fixed ATR scale reading "low" on 1m and
+    #     "high" on 1d for identical conditions. ---
+    atr_hist = featured["atr_pct"].dropna().tail(200)
+    volatility = (float((atr_hist <= atr_pct).mean())
+                  if len(atr_hist) >= 30 else _clip(atr_pct / 0.08, 0.0, 1.0))
+    vol_hist = featured["relative_volume"].dropna().tail(200)
+    liquidity = (float((vol_hist <= rel_volume).mean())
+                 if len(vol_hist) >= 30 else _clip(rel_volume / 2.0, 0.0, 1.0))
 
     # --- Reading clarity (is there a directional edge) + interpreter
     #     confidence (do the indicators AGREE) - related but distinct. ---
@@ -410,15 +420,22 @@ def _watch_items(row: pd.Series, close: Optional[float], rsi: float, bb_width: f
 # Decision Pipeline
 # ---------------------------------------------------------------------------
 
-_STAGES = ["market_data", "market_interpreter", "feature_extraction", "model_voting", "risk_check"]
+def _ago(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "—"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds / 60)}m ago"
+    return f"{int(seconds / 3600)}h ago"
 
 
 def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, Any]:
-    """Where the current recommendation stands, stage by stage, plus the
-    plain reason for a HOLD. Reads the interpreter (above) and the engine's
-    own journal (pure reader) - never writes, never trades."""
-    interp = interpret_market(config, symbol, config.timeframe)
-
+    """Where the ENGINE's recommendation stands, stage by stage, plus the
+    plain reason for a HOLD. Derived ENTIRELY from the engine's own journaled
+    cycle (pure reader) so every stage describes the same decision on the
+    same (engine) timeframe - never mixed with a separate live read, which
+    is what produced contradictory regimes across the panel. Read-only."""
     journal = Journal(db_path, initialize=False)
     try:
         decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
@@ -438,13 +455,30 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
     signal = decision["signal"] if decision else None
     champion = details.get("champion")
     prob_up = details.get("probability_up")
-    regime = details.get("regime") or interp.get("regime")
+    regime = details.get("regime")
     risk_approved = decision.get("risk_approved") if decision else None
     risk_reason = decision.get("risk_reason") if decision else None
     breaker_tripped = bool(breaker["tripped"]) if breaker else False
+    # The engine records a market-condition sit-out in risk_reason
+    # (e.g. "market_condition:illiquid"); surface it as a first-class state.
+    condition = None
+    if risk_reason and "market_condition" in risk_reason:
+        condition = risk_reason.split(":")[-1].strip()
 
     buy_t = config.prediction.buy_threshold
     sell_t = config.prediction.sell_threshold
+
+    # Feed freshness: how long since the engine last journaled a cycle for
+    # this symbol, in poll-interval units. Stale => the engine feed/loop is
+    # behind, which the operator should see rather than a false "live".
+    fresh = True
+    age_seconds = None
+    if decision:
+        try:
+            age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(decision["timestamp"])).total_seconds()
+            fresh = age_seconds <= max(config.poll_interval_seconds * 3, 900)
+        except Exception:  # noqa: BLE001
+            fresh = True
 
     position = None
     if snapshot:
@@ -457,22 +491,33 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
     def add(name: str, state: str, detail: str) -> None:
         stages.append({"stage": name, "state": state, "detail": detail})
 
-    add("market_data", "ok" if interp["available"] else "pending",
-        "live candles" if interp["available"] else "insufficient history")
-    add("market_interpreter", "ok" if interp["available"] else "pending",
-        f"regime: {interp.get('regime', '—')}" if interp["available"] else "—")
-    add("feature_extraction", "ok" if interp["available"] else "pending",
-        "features computed" if interp["available"] else "—")
+    if decision is None:
+        add("market_data", "pending", "no engine cycle recorded yet")
+    elif not fresh:
+        add("market_data", "blocked", f"stale — last cycle {_ago(age_seconds)}")
+    else:
+        add("market_data", "ok", f"last cycle {_ago(age_seconds)}")
 
-    if interp.get("condition") in ("panic", "illiquid"):
-        add("model_voting", "blocked", f"sitting out ({interp['condition']})")
+    add("market_interpreter", "ok" if regime else "pending",
+        f"regime: {regime.replace('_', ' ')}" if regime else "no regime recorded")
+    add("feature_extraction", "ok" if decision is not None else "pending",
+        "features computed" if decision is not None else "—")
+
+    if condition:
+        add("model_voting", "blocked", f"sitting out ({condition})")
     elif champion:
         add("model_voting", "ok", f"champion: {champion}")
+    elif decision is not None:
+        add("model_voting", "pending", f"no champion for {(regime or 'current regime').replace('_', ' ')}")
     else:
-        add("model_voting", "pending", f"no champion for {regime or 'current regime'}")
+        add("model_voting", "pending", "—")
 
     if breaker_tripped:
         add("risk_check", "blocked", "circuit breaker tripped")
+    elif condition:
+        # Sat out upstream on market conditions - risk was never evaluated;
+        # don't claim "approved".
+        add("risk_check", "pending", "not reached (sat out)")
     elif risk_approved is False:
         add("risk_check", "blocked", risk_reason or "risk engine blocked")
     elif decision is not None:
@@ -480,7 +525,7 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
     else:
         add("risk_check", "pending", "no decision yet")
 
-    # --- Terminal decision + honest HOLD reason ---
+    # --- Terminal decision + honest HOLD reason (same regime throughout) ---
     hold_reason = None
     if signal in ("BUY", "SELL"):
         decision_label = signal
@@ -488,10 +533,10 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
         decision_label = "HOLD"
         if breaker_tripped:
             hold_reason = "circuit breaker tripped — trading halted"
-        elif interp.get("condition") in ("panic", "illiquid"):
-            hold_reason = f"sitting out — {interp['condition']} conditions"
+        elif condition:
+            hold_reason = f"sitting out — {condition} conditions (no directional edge worth risking)"
         elif champion is None and decision is not None:
-            hold_reason = f"no promoted model for the current regime ({regime or '—'})"
+            hold_reason = f"no promoted model for the current regime ({(regime or '—').replace('_', ' ')})"
         elif risk_approved is False:
             hold_reason = f"risk engine blocked: {risk_reason or 'unspecified'}"
         elif prob_up is not None and sell_t < prob_up < buy_t:
@@ -506,6 +551,7 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
 
     return {
         "symbol": symbol,
+        "engine_timeframe": config.timeframe,
         "stages": stages,
         "decision": decision_label,
         "hold_reason": hold_reason,

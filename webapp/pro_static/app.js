@@ -706,7 +706,8 @@ async function loadPipeline() {
                 <span class="pipe-detail">${d.execution}</span>
             </div>`;
         const reason = d.hold_reason ? `<div class="pipe-reason">${d.hold_reason}</div>` : '';
-        content.innerHTML = rows + decRow + reason;
+        const tfNote = `<div class="pipe-tf">engine decision · ${d.engine_timeframe} timeframe</div>`;
+        content.innerHTML = rows + decRow + reason + tfNote;
     } catch (e) { /* ignore */ }
 }
 
@@ -747,9 +748,12 @@ async function loadInterpreter() {
               st = d.structure, vo = d.volatility, li = d.liquidity, cl = d.clarity,
               cf = d.interpreter_confidence;
 
-        // Market summary + clarity headline
+        // Market summary + clarity headline. The reading is on the VIEWED
+        // timeframe, which can legitimately differ from the engine's 1h
+        // decision - label it so the two are never read as contradictory.
         const clarityColor = cl.value >= 0.66 ? '#00FFC2' : cl.value >= 0.33 ? '#FFB800' : '#FF3366';
-        let html = `<div class="interp-summary">${d.summary}</div>`;
+        let html = `<div class="interp-tf">reading ${d.timeframe} · live market</div>`;
+        html += `<div class="interp-summary">${d.summary}</div>`;
         html += `<div class="interp-clarity-head"><span>Market Clarity</span>
                  <span style="color:${clarityColor}"><strong>${(cl.value*100).toFixed(0)}%</strong></span></div>
                  <div class="iv-meaning">${cl.meaning}</div>`;
