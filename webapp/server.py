@@ -430,6 +430,30 @@ def pro_price_calls(symbol: str, limit: int = 20):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.get("/api/pro/interpreter/{symbol:path}")
+def pro_interpreter(symbol: str, timeframe: str = "1h"):
+    """AI Market Interpreter: a real-metric-driven read of the market state,
+    trend, momentum, structure, buyer/seller pressure, volatility, liquidity
+    and a templated plain-language explanation - see market_interpreter.py."""
+    if timeframe not in da.TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of {da.TIMEFRAMES}")
+    try:
+        return da.market_interpretation(_config, symbol, timeframe)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Could not interpret market: {exc}") from exc
+
+
+@app.get("/api/pro/pipeline/{symbol:path}")
+def pro_pipeline(symbol: str):
+    """Decision Pipeline: where the current recommendation stands stage by
+    stage (data -> interpreter -> features -> voting -> risk -> decision ->
+    execution), with the honest reason for a HOLD - see market_interpreter.py."""
+    try:
+        return da.pipeline_status(_config, _db_path, symbol)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/api/pro/patterns/{symbol:path}")
 def pro_patterns(symbol: str, timeframe: str = "1h"):
     """Classical chart patterns present at the right edge of the chart,

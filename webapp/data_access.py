@@ -267,6 +267,29 @@ def detected_patterns(config: Config, symbol: str, timeframe: str) -> List[Dict[
     return _cache.get_or_set(("patterns", symbol, timeframe), ttl_seconds=10, factory=_fetch)
 
 
+def market_interpretation(config: Config, symbol: str, timeframe: str) -> Dict[str, Any]:
+    """TTL-cached Market Interpreter read (see webapp/market_interpreter.py).
+    Runs build_features over the recent window; cached so multiple browsers
+    polling every 10s don't each recompute it inside the CPU-capped
+    dashboard container. Output only changes when a candle closes."""
+    def _fetch():
+        from webapp.market_interpreter import interpret_market
+        return interpret_market(config, symbol, timeframe)
+
+    return _cache.get_or_set(("interpret", symbol, timeframe), ttl_seconds=10, factory=_fetch)
+
+
+def pipeline_status(config: Config, db_path: str, symbol: str) -> Dict[str, Any]:
+    """TTL-cached Decision Pipeline read (see webapp/market_interpreter.py).
+    Short TTL because it reflects the engine's latest journaled decision,
+    which changes at most once per poll cycle."""
+    def _fetch():
+        from webapp.market_interpreter import decision_pipeline
+        return decision_pipeline(config, db_path, symbol)
+
+    return _cache.get_or_set(("pipeline", db_path, symbol), ttl_seconds=5, factory=_fetch)
+
+
 def active_symbols(db_path: str, config_symbols: List[str]) -> List[str]:
     """The actual currently-tracked universe, derived from recent decisions -
     not the static config seed list, which symbol_discovery expands on at

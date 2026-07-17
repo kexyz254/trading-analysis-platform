@@ -149,6 +149,8 @@ async function refreshCards() {
             loadModelInfo(),
             loadPatterns(),
             loadStatusBadge(),
+            loadPipeline(),
+            loadInterpreter(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
     // WS watchdog: if no kline arrived in 45s the browser's Binance socket
@@ -625,6 +627,79 @@ async function loadPrediction() {
                 <div class="pred-row"><span>Champion</span><span>${data.champion || 'none'}</span></div>
             </div>`;
         document.getElementById('champion-info').textContent = data.champion ? `♛ ${data.champion}` : '—';
+    } catch (e) { /* ignore */ }
+}
+
+// --- Decision Pipeline ---
+const PIPELINE_LABELS = {
+    market_data: 'Market Data', market_interpreter: 'Market Interpreter',
+    feature_extraction: 'Feature Extraction', model_voting: 'Model Voting', risk_check: 'Risk Check',
+};
+const STATE_ICON = { ok: '✓', pending: '◦', blocked: '✕' };
+
+async function loadPipeline() {
+    try {
+        const d = await apiScoped(`/api/pro/pipeline/${currentSymbol}`);
+        if (d === null) return;
+        const content = document.getElementById('pipeline-content');
+        const rows = d.stages.map(s => `
+            <div class="pipe-row">
+                <span class="pipe-icon ${s.state}">${STATE_ICON[s.state] || '◦'}</span>
+                <span class="pipe-stage">${PIPELINE_LABELS[s.stage] || s.stage}</span>
+                <span class="pipe-detail">${s.detail}</span>
+            </div>`).join('');
+        const decCls = d.decision === 'BUY' ? 'buy' : d.decision === 'SELL' ? 'sell' : 'hold';
+        const decRow = `
+            <div class="pipe-row pipe-decision">
+                <span class="pipe-icon ${decCls}">→</span>
+                <span class="pipe-stage">Decision</span>
+                <span class="pipe-detail pred-${decCls === 'hold' ? '' : decCls}"><strong>${d.decision}</strong></span>
+            </div>
+            <div class="pipe-row">
+                <span class="pipe-icon">▸</span>
+                <span class="pipe-stage">Execution</span>
+                <span class="pipe-detail">${d.execution}</span>
+            </div>`;
+        const reason = d.hold_reason ? `<div class="pipe-reason">${d.hold_reason}</div>` : '';
+        content.innerHTML = rows + decRow + reason;
+    } catch (e) { /* ignore */ }
+}
+
+// --- Market Interpreter ---
+function dnaBar(label, value) {
+    // value in [-1,1] for directional, [0,1] for magnitude; render a
+    // center-anchored bar so direction reads at a glance.
+    const pct = Math.round(Math.abs(value) * 50);
+    const pos = value >= 0;
+    const color = label === 'volatility' || label === 'liquidity'
+        ? '#FFB800' : (pos ? '#00FFC2' : '#FF3366');
+    const fill = (label === 'volatility' || label === 'liquidity')
+        ? `<div class="dna-fill" style="left:50%;width:${Math.round(value*50)}%;background:${color}"></div>`
+        : `<div class="dna-fill" style="${pos ? 'left:50%' : 'right:50%'};width:${pct}%;background:${color}"></div>`;
+    return `<div class="dna-row"><span class="dna-label">${label}</span>
+        <span class="dna-track"><span class="dna-center"></span>${fill}</span></div>`;
+}
+
+async function loadInterpreter() {
+    try {
+        const d = await apiScoped(`/api/pro/interpreter/${currentSymbol}?timeframe=${currentTimeframe}`);
+        if (d === null) return;
+        const content = document.getElementById('interpreter-content');
+        if (!d.available) { content.textContent = 'Not enough history to read this timeframe yet'; return; }
+        const m = d.metrics;
+        const chips = `
+            <div class="interp-chips">
+                <span class="interp-chip">${d.regime.replace('_', ' ')}</span>
+                <span class="interp-chip">${m.pressure.label}</span>
+                <span class="interp-chip">momentum ${m.momentum.label}</span>
+                ${d.condition ? `<span class="interp-chip warn">${d.condition}</span>` : ''}
+            </div>`;
+        const dna = Object.entries(d.dna).map(([k, v]) => dnaBar(k, v)).join('');
+        content.innerHTML = `
+            ${chips}
+            <div class="interp-explanation">${d.explanation}</div>
+            <div class="dna-block"><div class="dna-title">Market DNA</div>${dna}</div>
+            <div class="interp-clarity">reading clarity: ${(d.reading_clarity * 100).toFixed(0)}%</div>`;
     } catch (e) { /* ignore */ }
 }
 

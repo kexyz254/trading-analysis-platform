@@ -120,6 +120,35 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .pred-row .pos { color: var(--accent); }
 .pred-row .neg { color: var(--danger); }
 
+/* Decision Pipeline */
+.pipe-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 0.78rem; }
+.pipe-icon { width: 16px; text-align: center; font-weight: bold; }
+.pipe-icon.ok { color: var(--accent); }
+.pipe-icon.pending { color: #EAEAEA; opacity: 0.4; }
+.pipe-icon.blocked { color: var(--danger); }
+.pipe-icon.buy { color: var(--accent); }
+.pipe-icon.sell { color: var(--danger); }
+.pipe-icon.hold { color: var(--warning); }
+.pipe-stage { width: 118px; opacity: 0.85; }
+.pipe-detail { flex: 1; opacity: 0.6; }
+.pipe-decision { margin-top: 6px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 8px; }
+.pipe-decision .pipe-stage, .pipe-decision .pipe-detail { opacity: 1; }
+.pipe-reason { margin-top: 8px; font-size: 0.72rem; color: var(--warning); background: rgba(255,184,0,0.08); border-radius: 4px; padding: 6px 8px; line-height: 1.4; }
+
+/* Market Interpreter */
+.interp-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.interp-chip { font-size: 0.68rem; padding: 2px 8px; border-radius: 10px; background: rgba(0,255,196,0.1); color: var(--accent); text-transform: capitalize; }
+.interp-chip.warn { background: rgba(255,51,102,0.12); color: var(--danger); }
+.interp-explanation { font-size: 0.78rem; line-height: 1.5; opacity: 0.9; }
+.dna-block { margin-top: 10px; }
+.dna-title { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 1px; opacity: 0.5; margin-bottom: 4px; }
+.dna-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.dna-label { width: 74px; font-size: 0.7rem; opacity: 0.7; text-transform: capitalize; }
+.dna-track { position: relative; flex: 1; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; }
+.dna-center { position: absolute; left: 50%; top: -1px; width: 1px; height: 8px; background: rgba(255,255,255,0.25); }
+.dna-fill { position: absolute; top: 0; height: 6px; border-radius: 3px; }
+.interp-clarity { margin-top: 8px; font-size: 0.68rem; opacity: 0.45; }
+
 /* Model Info panel */
 .mi-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.76rem; }
 .mi-row span:first-child { opacity: 0.6; }
