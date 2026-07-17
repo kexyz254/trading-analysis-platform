@@ -13,6 +13,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
@@ -61,7 +64,47 @@ _args = _parse_args()
 _config = load_config(_args.config)
 _db_path = _args.db
 
-app = FastAPI(title="Trading System Dashboard API")
+logger = logging.getLogger(__name__)
+
+
+async def _price_call_loop() -> None:
+    """Background loop for the self-scoring 5-minute price calls (see
+    webapp/price_call.py). Runs in this dashboard process so the track
+    record accumulates 24/7 whether or not anyone is watching; each pass
+    is run in a worker thread because it does blocking exchange I/O and
+    (at most every 30 min per symbol) model training.
+
+    CRITICAL: this writes to the dashboard-owned analytics database ONLY
+    (price_call.DEFAULT_ANALYTICS_DB), never to trading_system.db - the
+    dashboard must stay strictly read-only on the shared trading journal.
+    See price_call.py's storage note for the production corruption this
+    rule exists to prevent."""
+    from webapp import price_call
+    while True:
+        try:
+            await asyncio.to_thread(price_call.run_once, _config)
+        except Exception:  # noqa: BLE001 - the loop must survive any single pass failing
+            logger.exception("price call loop pass failed")
+        await asyncio.sleep(60)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # The Task reference is deliberately held for the app's lifetime:
+    # asyncio keeps only weak references to tasks, so a bare
+    # create_task(...) can be garbage-collected mid-flight and the loop
+    # silently stops - no exception, no log. Cancelled (and awaited) on
+    # shutdown so SIGTERM doesn't kill a pass mid-write to analytics.db.
+    task = asyncio.create_task(_price_call_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+app = FastAPI(title="Trading System Dashboard API", lifespan=_lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -219,25 +262,32 @@ def survivorship_bias():
 # ---------------------------------------------------------------------------
 # NEW: Professional Dashboard API (read‑only, journal‑backed)
 # ---------------------------------------------------------------------------
+# Every {symbol} below uses the `:path` converter, not the default `str`
+# one - symbols are exchange pairs like "BTC/USDT", and Starlette's default
+# path converter refuses to match a "/" inside a single segment, so a plain
+# {symbol} route 404s on every real symbol before the handler ever runs.
 
-@app.get("/api/pro/ohlcv/{symbol}")
+@app.get("/api/pro/ohlcv/{symbol:path}")
 def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
-    """Return OHLCV bars persisted by the engine for charting."""
+    """OHLCV bars the ENGINE persisted to the journal (its own configured
+    timeframe only, one bar per poll cycle) - a research record of what the
+    engine actually saw. NOT the chart's data source: the pro frontend
+    charts from /api/ohlcv (exchange-backed, all timeframes)."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         bars = journal.get_ohlcv_history(symbol, timeframe, limit)
         return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/prediction/{symbol}")
+@app.get("/api/pro/prediction/{symbol:path}")
 def pro_prediction(symbol: str):
     """Latest real decision for the symbol (signal, confidence, regime, etc.)."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
         if not decisions:
             return {"signal": "HOLD", "confidence": None}
@@ -255,12 +305,12 @@ def pro_prediction(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/features/{symbol}")
+@app.get("/api/pro/features/{symbol:path}")
 def pro_features(symbol: str):
     """Latest SHAP feature importance for the champion model."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         importance = journal.latest_feature_importance(symbol)
         if not importance:
             return {"features": []}
@@ -270,24 +320,24 @@ def pro_features(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/trades/{symbol}")
+@app.get("/api/pro/trades/{symbol:path}")
 def pro_trades(symbol: str, limit: int = 50):
     """Real trade history for the symbol."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         trades = journal.recent_trades(symbol=symbol, limit=limit)
         return {"symbol": symbol, "trades": trades}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
 
-@app.get("/api/pro/candidates/{symbol}")
+@app.get("/api/pro/candidates/{symbol:path}")
 def pro_candidates(symbol: str):
     """Paper‑trading leaderboard for the symbol (most recent snapshot per candidate)."""
     try:
         from trading_assistant.persistence.journal import Journal
-        journal = Journal(_db_path)
+        journal = Journal(_db_path, initialize=False)
         latest = journal.latest_paper_equity_by_candidate(symbol)
         candidates = []
         for name, snap in latest.items():
@@ -299,6 +349,162 @@ def pro_candidates(symbol: str):
                 "timestamp": snap["timestamp"],
             })
         return {"symbol": symbol, "candidates": candidates}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/model-info/{symbol:path}")
+def pro_model_info(symbol: str):
+    """The system's REAL per-symbol model state - the promoted tournament
+    champion / PredictionAgent output that actually drives live trading,
+    not the dashboard's own analytics models. Everything here is read from
+    the engine's own journal (the decisions/retrain_events/feature_importance
+    it writes), so it reflects exactly what the live engine decided, on the
+    engine's configured timeframe."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path, initialize=False)
+
+        decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
+        decision = decisions[0] if decisions else None
+        details = (decision or {}).get("details", {}) or {}
+
+        # Most recent retrain attempt for this symbol, and the most recent
+        # one that actually promoted - "last retrain" vs "last promotion"
+        # are different questions and the config notes promotions are rare.
+        # da.retrain_events returns rows newest-first (ORDER BY id DESC in
+        # _read_events), so iterate as returned and take the first match.
+        last_retrain = None
+        last_promotion = None
+        for ev in da.retrain_events(_db_path, limit=500):
+            if ev.get("symbol") not in (symbol, None):
+                continue
+            if last_retrain is None:
+                last_retrain = ev
+            if ev.get("promoted") and last_promotion is None:
+                last_promotion = ev
+            if last_retrain is not None and last_promotion is not None:
+                break
+
+        importance = journal.latest_feature_importance(symbol)
+        feature_count = len(importance["importance"]) if importance else 0
+
+        prob_up = details.get("probability_up")
+        signal = decision["signal"] if decision else "HOLD"
+        return {
+            "symbol": symbol,
+            "timeframe": _config.timeframe,
+            "signal": signal,
+            "champion": details.get("champion"),
+            "regime": details.get("regime"),
+            "confidence": decision.get("confidence") if decision else None,
+            "probability_up": prob_up,
+            "probability_down": (1 - prob_up) if prob_up is not None else None,
+            "decision_at": decision["timestamp"] if decision else None,
+            "buy_threshold": _config.prediction.buy_threshold,
+            "sell_threshold": _config.prediction.sell_threshold,
+            "feature_count": feature_count,
+            "last_retrain_at": last_retrain["timestamp"] if last_retrain else None,
+            "last_promotion_at": last_promotion["timestamp"] if last_promotion else None,
+            "retrain_interval_hours": _config.learning.retrain_interval_hours,
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/pro/price-calls/{symbol:path}")
+def pro_price_calls(symbol: str, limit: int = 20):
+    """The symbol's current open 5-minute price call, its recent settled
+    calls, and the running score - see webapp/price_call.py. Reads the
+    dashboard-owned analytics db, NOT trading_system.db."""
+    try:
+        from webapp.price_call import get_book
+        book = get_book()
+        return {
+            "symbol": symbol,
+            "open_call": book.open_call(symbol),
+            "recent": book.recent_settled(symbol, limit=limit),
+            "stats": book.stats(symbol),
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/pro/patterns/{symbol:path}")
+def pro_patterns(symbol: str, timeframe: str = "1h"):
+    """Classical chart patterns present at the right edge of the chart,
+    with drawable trendline segments extended a few bars forward - see
+    trading_assistant/analysis/chart_patterns.py. Confidence is geometry
+    quality, not a prediction; the forecast models consume these same
+    patterns as features, and their holdout hit rate is the honest measure
+    of whether the patterns predict anything."""
+    if timeframe not in da.TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of {da.TIMEFRAMES}")
+    try:
+        return {"symbol": symbol, "timeframe": timeframe, "patterns": da.detected_patterns(_config, symbol, timeframe)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Could not detect patterns: {exc}") from exc
+
+
+@app.get("/api/pro/forecast/{symbol:path}")
+def pro_forecast(symbol: str, timeframe: str = "1h"):
+    """Direction forecast for the next 1/2/3 closed candles of the given
+    timeframe, each with its own out-of-sample hit rate - see
+    webapp/forecast.py for what these numbers do and don't claim."""
+    if timeframe not in da.TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"timeframe must be one of {da.TIMEFRAMES}")
+    try:
+        from webapp.forecast import get_forecast
+        return get_forecast(_config, symbol, timeframe)
+    except Exception as exc:  # noqa: BLE001 - surface as a clean API error, not a 500 stack trace
+        raise HTTPException(status_code=502, detail=f"Could not build forecast: {exc}") from exc
+
+
+@app.get("/api/pro/decisions/{symbol:path}")
+def pro_decisions(symbol: str, limit: int = 200):
+    """Recent REAL decisions for the symbol - the prediction history the
+    chart overlays as BUY/SELL markers on the candles they happened in."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path, initialize=False)
+        decisions = journal.recent_decisions(symbol=symbol, limit=limit, exclude_paper=True)
+        return {
+            "symbol": symbol,
+            "decisions": [
+                {
+                    "timestamp": d["timestamp"],
+                    "signal": d["signal"],
+                    "confidence": d["confidence"],
+                    "price": d["price"],
+                    "action": d["action"],
+                }
+                for d in decisions
+            ],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/pro/position/{symbol:path}")
+def pro_position(symbol: str):
+    """Current real-portfolio position for the symbol, from the most recent
+    mark-to-market equity snapshot - the same source of truth the engine
+    itself trades against, not a separate/derived view."""
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(_db_path, initialize=False)
+        snapshot = journal.latest_equity_snapshot()
+        position = (snapshot or {}).get("positions", {}).get(symbol)
+        if not snapshot or not position or not position.get("quantity"):
+            return {"symbol": symbol, "open": False}
+        return {
+            "symbol": symbol,
+            "open": True,
+            "quantity": position["quantity"],
+            "price": position["price"],
+            "unexplained_quantity": position.get("unexplained_quantity", 0.0),
+            "as_of": snapshot["timestamp"],
+        }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
@@ -327,6 +533,21 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # Mount the pro static assets (CSS, JS, etc.)
 app.mount("/pro/static", StaticFiles(directory=str(PRO_STATIC_DIR)), name="pro_static")
 
+# Same mtime-derived cache busting as the main dashboard (_static_asset_version
+# above documents the real mobile incident that motivated it). ws.js lives in
+# STATIC_DIR but is loaded by the pro page too, so it's versioned here as well.
+_PRO_CACHE_BUSTED_ASSETS = ("style.css", "app.js")
+
+
+def _pro_asset_version() -> str:
+    paths = [PRO_STATIC_DIR / name for name in _PRO_CACHE_BUSTED_ASSETS]
+    paths.append(STATIC_DIR / "ws.js")
+    mtimes = [p.stat().st_mtime for p in paths if p.exists()]
+    return str(int(max(mtimes))) if mtimes else "0"
+
+
+_PRO_ASSET_VERSION = _pro_asset_version()
+
 
 @app.get("/pro", response_class=HTMLResponse)
 def pro_dashboard():
@@ -334,4 +555,8 @@ def pro_dashboard():
     html_path = PRO_STATIC_DIR / "index.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="Pro dashboard not found. Ensure webapp/pro_static/index.html exists.")
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    html = html_path.read_text(encoding="utf-8")
+    for asset in _PRO_CACHE_BUSTED_ASSETS:
+        html = html.replace(f'/pro/static/{asset}"', f'/pro/static/{asset}?v={_PRO_ASSET_VERSION}"')
+    html = html.replace('/static/ws.js"', f'/static/ws.js?v={_PRO_ASSET_VERSION}"')
+    return HTMLResponse(html)

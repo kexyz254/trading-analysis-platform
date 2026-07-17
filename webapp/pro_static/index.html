@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>ATS Pro Terminal</title>
     <link rel="stylesheet" href="/pro/static/style.css">
-    <!-- Lightweight Charts (TradingView open‑source library) -->
-    <script src="https://unpkg.com/lightweight-charts@5.0.1/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- Lightweight Charts (TradingView open-source library). Pinned to
+         v4.2.0: app.js uses the v4 API (addCandlestickSeries, setMarkers)
+         which v5 removed in favor of addSeries()/createSeriesMarkers. -->
+    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
     <div id="app">
@@ -16,12 +18,9 @@
                 <h1 class="logo">ATS</h1>
                 <div class="symbol-selector">
                     <select id="symbol-select"></select>
-                    <div class="timeframe-tabs" id="timeframe-tabs">
-                        <button data-tf="15m">15m</button>
-                        <button data-tf="1h" class="active">1h</button>
-                        <button data-tf="4h">4h</button>
-                        <button data-tf="1d">1d</button>
-                    </div>
+                    <!-- Populated from /api/timeframes so the tabs always
+                         match exactly what the backend can serve. -->
+                    <div class="timeframe-tabs" id="timeframe-tabs"></div>
                 </div>
             </div>
             <div class="tb-center">
@@ -46,31 +45,55 @@
                 <a href="#" class="nav-item" data-panel="logs">📝 Logs</a>
             </nav>
 
-            <!-- Chart Panel -->
+            <!-- Chart Panel (volume renders inside the main chart on its
+                 own price scale — see setupChart in app.js) -->
             <section id="chart-panel" class="panel">
                 <div id="chart-container">
                     <div id="chart"></div>
                 </div>
-                <div id="volume-chart"></div>
             </section>
 
             <!-- Right Panel -->
             <aside id="right-panel">
-                <div class="card" id="prediction-card">
-                    <h3>AI Prediction</h3>
-                    <div class="card-content" id="prediction-content">Loading...</div>
+                <!-- The system's REAL model (promoted champion / PredictionAgent) -->
+                <div class="card system-model" id="prediction-card">
+                    <h3>AI Prediction <span class="src-badge live">live model</span></h3>
+                    <div class="card-content" id="prediction-content">Loading…</div>
+                </div>
+                <div class="card system-model" id="model-info-card">
+                    <h3>Model Info</h3>
+                    <div class="card-content" id="model-info-content">Loading…</div>
                 </div>
                 <div class="card" id="position-card">
                     <h3>Current Position</h3>
                     <div class="card-content" id="position-content">No open position</div>
                 </div>
+
+                <!-- Dashboard-side analytics: NOT the live trading model -->
+                <div class="card analytics" id="call-card">
+                    <h3>5-Min Price Call <span class="src-badge analytics-badge">dashboard analytics</span></h3>
+                    <div class="card-content" id="call-content">Waiting for first call…</div>
+                </div>
+                <div class="card analytics" id="forecast-card">
+                    <h3>Next 3 Candles <span id="forecast-tf" class="tf-label"></span> <span class="src-badge analytics-badge">dashboard analytics</span></h3>
+                    <div class="card-content" id="forecast-content">Training model…</div>
+                </div>
+                <div class="card analytics" id="patterns-card">
+                    <h3>Chart Patterns <span class="src-badge analytics-badge">geometry</span></h3>
+                    <div class="card-content" id="patterns-content">Scanning…</div>
+                </div>
+
                 <div class="card" id="features-card">
-                    <h3>Top Features</h3>
+                    <h3>Top Features <span class="tf-label">live model</span></h3>
                     <div class="card-content" id="features-content">No model promoted yet</div>
                 </div>
                 <div class="card" id="trades-card">
                     <h3>Recent Trades</h3>
                     <div class="card-content" id="trades-content">No trades yet</div>
+                </div>
+                <div class="card" id="candidates-card">
+                    <h3>Paper Candidates</h3>
+                    <div class="card-content" id="candidates-content">Loading…</div>
                 </div>
             </aside>
         </div>
@@ -85,6 +108,9 @@
         </footer>
     </div>
 
+    <!-- Shared live-market-data module (browser -> Binance WebSocket),
+         same one the main dashboard uses. Must load before app.js. -->
+    <script src="/static/ws.js"></script>
     <script src="/pro/static/app.js"></script>
 </body>
 </html>

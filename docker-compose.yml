@@ -80,7 +80,27 @@ services:
       - "100.93.64.23:8000:8000"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      # SINGLE-FILE mount + SQLite WAL hazard: WAL keeps its sidecar files
+      # (-wal/-shm) NEXT TO the database, which under a single-file mount
+      # means each container's own private overlay fs, not the shared host
+      # file. That is survivable for a reader, but a SECOND WRITER through
+      # a private WAL corrupts the main file ("database disk image is
+      # malformed" - happened in production 2026-07-16). The dashboard must
+      # therefore stay STRICTLY READ-ONLY on this database; anything the
+      # dashboard needs to persist goes in dashboard_data/ below. Enforced
+      # in code: every dashboard-side Journal is constructed with
+      # initialize=False (no schema DDL, no migrations - see Journal.__init__).
+      # TODO(deep fix): migrate trading_system.db into a shared DIRECTORY
+      # mount (e.g. ./data:/app/data for both services) so the WAL sidecars
+      # live on the host for both containers - that removes this whole class
+      # of hazard instead of guarding it. Requires moving the db file on the
+      # host plus updating both services' paths and the backup cron in one
+      # deliberate maintenance step.
       - ./trading_system.db:/app/trading_system.db
+      # Dashboard-owned analytics (price calls etc.): a DIRECTORY mount, so
+      # the analytics db's WAL sidecars live inside the shared directory and
+      # there is exactly one writer (this container) - the supported setup.
+      - ./dashboard_data:/app/dashboard_data
     # Read-only, low-traffic web process - far lighter than the engine's
     # retrain/tournament workload, but still uncapped by default without
     # this. 256m was too tight in practice: /api/markets and /api/ohlcv

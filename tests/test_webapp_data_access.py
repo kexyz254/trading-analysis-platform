@@ -261,11 +261,15 @@ def test_real_portfolio_metrics_does_not_mix_testnet_and_live_equity(tmp_path):
 
 def test_trade_recorded_without_is_live_is_treated_as_testnet_not_invisible(tmp_path):
     """A trade inserted via record_trade with is_live left as None (the
-    parameter's default) stores SQL NULL - Journal._migrate() idempotently
-    backfills any NULL is_live row to 0 (testnet) on every Journal()
-    construction, the same safe default used for this system's entire
-    pre-live history. It must land in the testnet view, not vanish from
-    both, and never leak into the live view."""
+    parameter's default) stores SQL NULL. It must land in the testnet view,
+    not vanish from both, and never leak into the live view.
+
+    Mechanism note: dashboard reads used to depend on Journal._migrate's
+    NULL->0 backfill running as a construction side effect - but dashboard
+    journals are now PURE READERS (initialize=False, no migrations), so the
+    NULL-is-testnet rule lives in the read filter itself
+    (data_access._matches_mode). This test is what guards that a NULL row
+    can never become invisible in both views again."""
     db_path = str(tmp_path / "journal.db")
     journal = Journal(db_path=db_path)
     journal.record_trade(symbol="ETH/USDT", side="buy", price=3000.0, quantity=0.01, pnl=None)

@@ -11,6 +11,8 @@ __pycache__/
 *.db-shm
 *.db-wal
 logs/
+# Dashboard-owned analytics database (price calls) - runtime state
+dashboard_data/
 trading_assistant/models/*.joblib
 run_system.lock
 

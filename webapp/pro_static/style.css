@@ -37,7 +37,7 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .logo { font-size: 20px; font-weight: 700; color: var(--accent); letter-spacing: 2px; }
 .symbol-selector { display: flex; align-items: center; gap: 10px; }
 #symbol-select { width: 120px; }
-.timeframe-tabs { display: flex; gap: 2px; }
+.timeframe-tabs { display: flex; gap: 2px; overflow-x: auto; max-width: 42vw; }
 .timeframe-tabs button { padding: 4px 10px; border-radius: 4px; font-size: 0.8rem; background: rgba(255,255,255,0.05); }
 .timeframe-tabs button.active { background: var(--accent); color: #000; font-weight: bold; }
 .tb-center { display: flex; align-items: center; gap: 12px; }
@@ -71,9 +71,9 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .nav-item:hover, .nav-item.active { opacity: 1; background: rgba(0,255,196,0.1); border-left-color: var(--accent); }
 
 /* === CHART PANEL === */
-#chart-panel { display: flex; flex-direction: column; }
-#chart-container { flex: 3; }
-#volume-chart { flex: 1; border-top: 1px solid rgba(255,255,255,0.08); }
+#chart-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#chart-container { flex: 1; min-height: 0; position: relative; }
+#chart { position: absolute; inset: 0; }
 
 /* === RIGHT PANEL === */
 #right-panel {
@@ -92,16 +92,73 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
     padding: 12px;
     backdrop-filter: blur(8px);
 }
-.card h3 { font-size: 0.85rem; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+.card h3 { font-size: 0.85rem; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .card-content { font-size: 0.8rem; }
 .prediction-buy { color: var(--accent); font-weight: bold; }
 .prediction-sell { color: var(--danger); font-weight: bold; }
+
+/* System-model vs dashboard-analytics cards are visually distinct so a
+   generic analytic is never mistaken for the live trading model. */
+.card.system-model { border-left: 3px solid var(--accent); }
+.card.analytics { border-left: 3px solid rgba(255,184,0,0.5); }
+.src-badge { font-size: 0.6rem; padding: 2px 6px; border-radius: 3px; text-transform: none; letter-spacing: 0; font-weight: normal; }
+.src-badge.live { background: rgba(0,255,196,0.15); color: var(--accent); }
+.src-badge.analytics-badge { background: rgba(255,184,0,0.15); color: var(--warning); }
+
+/* AI Prediction panel */
+.pred-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pred-signal { font-size: 1.5rem; font-weight: 800; letter-spacing: 1px; }
+.pred-signal.buy { color: var(--accent); }
+.pred-signal.sell { color: var(--danger); }
+.pred-signal.hold { color: var(--warning); }
+.gauge { width: 120px; height: 74px; }
+.gauge-val { font-size: 20px; font-weight: 800; }
+.gauge-lbl { font-size: 8px; fill: #EAEAEA; opacity: 0.5; text-transform: uppercase; letter-spacing: 1px; }
+.gauge-none { font-size: 0.65rem; opacity: 0.5; text-align: center; line-height: 1.4; }
+.pred-rows { margin-top: 10px; }
+.pred-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.pred-row .pos { color: var(--accent); }
+.pred-row .neg { color: var(--danger); }
+
+/* Model Info panel */
+.mi-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.76rem; }
+.mi-row span:first-child { opacity: 0.6; }
+.mi-val { color: var(--accent); text-align: right; }
 .feature-list { list-style: none; }
 .feature-list li { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .trades-table { width: 100%; font-size: 0.7rem; border-collapse: collapse; }
 .trades-table th, .trades-table td { padding: 2px 4px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .trades-table .positive { color: var(--accent); }
 .trades-table .negative { color: var(--danger); }
+.warn { color: var(--warning); font-size: 0.75rem; margin-top: 4px; }
+
+/* === FORECAST CARD === */
+.forecast-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.forecast-step { opacity: 0.6; width: 24px; }
+.forecast-arrow { font-weight: bold; width: 72px; }
+.forecast-arrow.up { color: var(--accent); }
+.forecast-arrow.down { color: var(--danger); }
+.forecast-hit { font-size: 0.72rem; opacity: 0.85; }
+.forecast-hit.no-edge { opacity: 0.4; }
+.forecast-note { font-size: 0.68rem; opacity: 0.5; margin-top: 6px; line-height: 1.4; }
+.tf-label { color: #EAEAEA; opacity: 0.6; text-transform: none; letter-spacing: 0; }
+
+/* === PRICE CALL CARD === */
+.call-main { font-size: 1.0rem; font-weight: bold; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.call-main.up { color: var(--accent); }
+.call-main.down { color: var(--danger); }
+.call-countdown { font-size: 0.72rem; font-weight: normal; color: #EAEAEA; opacity: 0.7; }
+.call-sub { font-size: 0.72rem; opacity: 0.6; margin-top: 4px; }
+.call-score { font-size: 0.78rem; margin-top: 8px; }
+.call-dots { margin-top: 4px; letter-spacing: 2px; font-size: 0.8rem; }
+.call-dot.hit { color: var(--accent); }
+.call-dot.miss { color: var(--danger); opacity: 0.8; }
+
+/* === CHART PATTERNS CARD === */
+.pattern-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+.pattern-name { font-weight: bold; flex: 1; }
+.pattern-bias { font-size: 0.68rem; opacity: 0.6; }
+.pattern-conf { font-size: 0.68rem; opacity: 0.6; }
 
 /* === BOTTOM BAR === */
 #bottombar {
@@ -121,9 +178,12 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 
 /* === RESPONSIVENESS === */
 @media (max-width: 900px) {
-    #main-container { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+    /* Chart gets a guaranteed 45vh row; the cards take the rest and
+       scroll within it (right-panel already has overflow-y: auto). */
+    #main-container { grid-template-columns: 1fr; grid-template-rows: auto minmax(300px, 45vh) 1fr; }
     #sidebar { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 4px 8px; }
     #right-panel { border-left: none; border-top: 1px solid var(--border); }
+    .timeframe-tabs { max-width: 55vw; }
 }
 
 @keyframes pulse {

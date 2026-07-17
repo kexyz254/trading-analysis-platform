@@ -36,6 +36,7 @@ _PRUNABLE_TABLES = (
     # for dedupe_key Y", which has zero value once far older than any
     # realistic cooldown_seconds).
     "alert_delivery",
+    "ohlcv",
 )
 
 _SCHEMA = """
@@ -231,6 +232,30 @@ CREATE TABLE IF NOT EXISTS alert_delivery (
     timestamp TEXT NOT NULL,
     PRIMARY KEY (channel, dedupe_key)
 );
+
+-- One row per (symbol, timeframe, bar timestamp), upserted - the
+-- orchestrator persists the latest bar once per poll_interval_seconds,
+-- which is far more often than a new candle actually closes, so the same
+-- in-progress bar is written repeatedly. The UNIQUE constraint plus
+-- ON CONFLICT DO UPDATE in record_ohlcv_snapshot keeps exactly one row
+-- per bar instead of growing an unbounded number of duplicates. Feeds the
+-- professional dashboard's chart only - never consulted by any trading
+-- or promotion decision, so it belongs in _PRUNABLE_TABLES like its
+-- sibling operational tables.
+CREATE TABLE IF NOT EXISTS ohlcv (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    UNIQUE (symbol, timeframe, timestamp)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_timeframe ON ohlcv (symbol, timeframe, timestamp);
 """
 
 
@@ -252,12 +277,25 @@ class DecisionRecord:
 class Journal:
     """A small, dependency-free audit log backed by SQLite."""
 
-    def __init__(self, db_path: str = "trading_system.db"):
+    def __init__(self, db_path: str = "trading_system.db", initialize: bool = True):
+        """initialize=False constructs a PURE READER: no schema DDL, no
+        migrations, no directory creation - required for any process that
+        must never write this database. The dashboard opens the engine's
+        journal through a single-FILE docker bind mount, where SQLite's WAL
+        sidecars land in each container's own private overlay fs; a schema
+        write from the dashboard (e.g. CREATE TABLE for a table added in a
+        newer deploy) therefore commits through a private WAL that diverges
+        from the engine's and corrupts the shared main file ("database disk
+        image is malformed", production 2026-07-16). Readers querying a
+        table that doesn't exist yet get sqlite3.OperationalError - the
+        correct, honest failure for a schema-behind database."""
         self.db_path = db_path
-        parent = Path(db_path).parent
-        if str(parent) not in ("", "."):
-            parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        self._reader = not initialize
+        if initialize:
+            parent = Path(db_path).parent
+            if str(parent) not in ("", "."):
+                parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -269,8 +307,13 @@ class Journal:
         # this dashboard process both open independent connections to the
         # same file constantly. busy_timeout makes any remaining contention
         # wait-and-retry (up to 5s) instead of raising immediately.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        if not self._reader:
+            # Writer-only pragmas. journal_mode=WAL is a WRITE on any
+            # database not already in WAL mode (it rewrites the header) - a
+            # pure reader must never issue it. Reading a WAL database does
+            # not require setting the mode; it's a property of the file.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
@@ -817,6 +860,48 @@ class Journal:
         with closing(self._connect()) as conn:
             rows = conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
+
+    def record_ohlcv_snapshot(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        timestamp: str,
+        open: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> int:
+        """Upsert one bar. Called once per poll cycle with the latest bar
+        the engine has - see the ohlcv table's own docstring in _SCHEMA for
+        why ON CONFLICT DO UPDATE (not a plain INSERT) is required here."""
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO ohlcv (symbol, timeframe, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (symbol, timeframe, timestamp) DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume
+                """,
+                (symbol, timeframe, timestamp, open, high, low, close, volume),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def get_ohlcv_history(self, symbol: str, timeframe: str, limit: int = 200) -> List[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ohlcv WHERE symbol = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT ?",
+                (symbol, timeframe, limit),
+            ).fetchall()
+        bars = [dict(row) for row in rows]
+        bars.reverse()
+        return bars
 
     def record_trade_audit(
         self,

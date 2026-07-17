@@ -52,6 +52,20 @@ TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d
 _EQUITY_ACCOUNTING_FIX_CUTOFF = "2026-07-09T22:35:26+00:00"
 
 
+def _matches_mode(row_is_live: Any, is_live: bool) -> bool:
+    """Mode filter with NULL-is-testnet semantics IN THE READ PATH. A NULL
+    is_live row was written before the column existed (or by a call site
+    that didn't say) - semantically testnet for this system's entire
+    history, per Journal._migrate's backfill rationale. The engine's writer
+    journal still backfills NULL->0, but dashboard journals are PURE
+    READERS (initialize=False - no migrations, see Journal.__init__), so a
+    reader can no longer rely on that backfill having run; without this,
+    a NULL row is invisible in BOTH views instead of landing in testnet."""
+    if is_live:
+        return row_is_live == 1
+    return row_is_live in (0, None)
+
+
 def _clean_real_equity_curve(journal: Journal, is_live: bool, limit: int = 5000) -> List[Dict[str, Any]]:
     """recent_equity_snapshots filtered to _EQUITY_ACCOUNTING_FIX_CUTOFF AND
     the CURRENT mode - the single source both real_portfolio_metrics and
@@ -69,10 +83,9 @@ def _clean_real_equity_curve(journal: Journal, is_live: bool, limit: int = 5000)
     ever ran before its first live cycle), not a guess.
     """
     snapshots = journal.recent_equity_snapshots(limit=limit)
-    target = 1 if is_live else 0
     return [
         s for s in snapshots
-        if s["timestamp"] >= _EQUITY_ACCOUNTING_FIX_CUTOFF and s.get("is_live") == target
+        if s["timestamp"] >= _EQUITY_ACCOUNTING_FIX_CUTOFF and _matches_mode(s.get("is_live"), is_live)
     ]
 
 
@@ -104,12 +117,11 @@ def _clean_trade_pnls(journal: Journal, is_live: bool, limit: int = 5000) -> Lis
     is_live is required, not optional. The single source both
     real_portfolio_metrics and readiness_report use."""
     trades = journal.recent_trades(limit=limit)
-    target = 1 if is_live else 0
     return [
         t["pnl"] for t in trades
         if t.get("pnl") is not None
         and t["timestamp"] >= _TRADE_PNL_ACCOUNTING_FIX_CUTOFF
-        and t.get("is_live") == target
+        and _matches_mode(t.get("is_live"), is_live)
     ]
 
 
@@ -237,6 +249,24 @@ def fetch_ohlcv(config: Config, symbol: str, timeframe: str, limit: int = 300) -
     return _cache.get_or_set(("ohlcv", symbol, timeframe, limit), ttl_seconds=5, factory=_fetch)
 
 
+def detected_patterns(config: Config, symbol: str, timeframe: str) -> List[Dict[str, Any]]:
+    """Chart patterns at the right edge of the latest closed candles.
+    TTL-cached: detection runs pivot extraction plus repeated line fits, and
+    its output can only change when a candle closes - without this, every
+    open browser tab re-runs the full geometry pass on each 10s poll inside
+    the CPU-capped dashboard container."""
+    def _fetch():
+        import pandas as pd
+        from trading_assistant.analysis.chart_patterns import detect_patterns
+        raw = fetch_ohlcv(config, symbol, timeframe, limit=300)
+        frame = pd.DataFrame(raw).iloc[:-1]  # closed candles only
+        if frame.empty:
+            return []
+        return detect_patterns(frame)
+
+    return _cache.get_or_set(("patterns", symbol, timeframe), ttl_seconds=10, factory=_fetch)
+
+
 def active_symbols(db_path: str, config_symbols: List[str]) -> List[str]:
     """The actual currently-tracked universe, derived from recent decisions -
     not the static config seed list, which symbol_discovery expands on at
@@ -264,7 +294,7 @@ def paper_leaderboard(db_path: str, symbols: List[str], paper_capital: float) ->
     capital (config.tournament.paper_capital), not the real portfolio's."""
 
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         rows = []
         for symbol in symbols:
             latest = journal.latest_paper_equity_by_candidate(symbol)
@@ -289,7 +319,7 @@ def paper_leaderboard(db_path: str, symbols: List[str], paper_capital: float) ->
 
 def paper_equity_history(db_path: str, symbol: str, candidate: Optional[str] = None) -> List[Dict[str, Any]]:
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         return journal.recent_paper_equity_snapshots(symbol=symbol, candidate=candidate, limit=2000)
 
     return _cache.get_or_set(("paper_equity_history", db_path, symbol, candidate), ttl_seconds=5, factory=_fetch)
@@ -297,7 +327,7 @@ def paper_equity_history(db_path: str, symbol: str, candidate: Optional[str] = N
 
 def recent_alerts(db_path: str, limit: int = 100) -> List[Dict[str, Any]]:
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         return journal.recent_alerts(limit=limit)
 
     return _cache.get_or_set(("recent_alerts", db_path, limit), ttl_seconds=5, factory=_fetch)
@@ -311,7 +341,7 @@ def execution_quality_summary(db_path: str, limit: int = 500) -> Dict[str, Any]:
     the exchange's own order responses."""
 
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         records = journal.recent_execution_quality(limit=limit)
         by_symbol: Dict[str, List[Dict[str, Any]]] = {}
         for r in records:
@@ -345,7 +375,7 @@ def trade_audit_records(db_path: str, limit: int = 200) -> List[Dict[str, Any]]:
     is still present immediately below it in this same feed, never hidden."""
 
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         records = journal.recent_trade_audit(limit=limit)
         records.reverse()  # most-recent-first for the dashboard table
         return records
@@ -355,7 +385,7 @@ def trade_audit_records(db_path: str, limit: int = 200) -> List[Dict[str, Any]]:
 
 def journal_snapshot(db_path: str, is_live: bool) -> Dict[str, Any]:
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         # Paper trading logs one candidate decision per candidate per
         # symbol per cycle (ChampionChallengerAgent) into the SAME
         # decisions table as the one real decision - a real incident
@@ -372,9 +402,8 @@ def journal_snapshot(db_path: str, is_live: bool) -> Dict[str, Any]:
         # (see their docstrings) - a real testnet trade must never appear
         # in what's supposed to be "your real live trading history" once
         # this system has switched to live mode, or vice versa.
-        target = 1 if is_live else 0
         raw_trades = journal.recent_trades(limit=200)
-        mode_trades = [t for t in raw_trades if t.get("is_live") == target]
+        mode_trades = [t for t in raw_trades if _matches_mode(t.get("is_live"), is_live)]
         return {
             # Filtered to _EQUITY_ACCOUNTING_FIX_CUTOFF - this feeds the
             # dashboard's live equity chart and "PnL today" stat directly,
@@ -478,7 +507,7 @@ def real_portfolio_metrics(db_path: str, is_live: bool) -> Dict[str, Any]:
     ChallengerReport already uses - the real portfolio deserves the same
     quality of performance reporting, not less."""
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         equity_snapshots = _clean_real_equity_curve(journal, is_live=is_live)
         equity_curve = [s["total_equity"] for s in equity_snapshots]
         trade_pnls = _clean_trade_pnls(journal, is_live=is_live)
@@ -515,7 +544,7 @@ def system_health(db_path: str, poll_interval_seconds: float) -> Dict[str, Any]:
     as unknown/unavailable, not defaulted to "healthy"."""
 
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         start = journal.latest_heartbeat_start()
         latest_cycle = journal.latest_heartbeat_cycle()
         recent_cycles = journal.recent_heartbeat_cycles(limit=20)
@@ -578,7 +607,7 @@ def drift_status(db_path: str, symbols: List[str]) -> List[Dict[str, Any]]:
     fabricated as "no drift"."""
 
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         rows = []
         for symbol in symbols:
             events = journal.recent_drift_events(symbol=symbol, limit=1)
@@ -631,7 +660,7 @@ def backtest_live_correlation_records(
     readiness criterion. See trading_assistant.validation.backtest_correlation."""
 
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         tournament_reports, _winners, live_performance = _fetch_tournament_and_live_performance(journal, symbols)
         records = build_records(tournament_reports, live_performance, min_live_trades=min_live_trades)
         return [r.to_dict() for r in records]
@@ -654,7 +683,7 @@ def survivorship_bias_records(
     baseline to hold live performance to."""
 
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         tournament_reports, winners, live_performance = _fetch_tournament_and_live_performance(journal, symbols)
         records = build_survivorship_records(tournament_reports, winners, live_performance, min_live_trades=min_live_trades)
         return [r.to_dict() for r in records]
@@ -668,7 +697,7 @@ def readiness_report(
     db_path: str, config: ReadinessConfig, is_live: bool, symbols: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     def _fetch():
-        journal = Journal(db_path=db_path)
+        journal = Journal(db_path=db_path, initialize=False)
         histories = winner_histories(db_path)
         metrics = real_portfolio_metrics(db_path, is_live=is_live)
         equity_snapshots = _clean_real_equity_curve(journal, is_live=is_live)
