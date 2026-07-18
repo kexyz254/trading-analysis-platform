@@ -409,9 +409,12 @@ def pro_model_info(symbol: str):
         age_seconds = None
         if decision:
             from datetime import datetime, timezone
+            from webapp.market_interpreter import expected_decision_max_age_seconds
             try:
                 age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(decision["timestamp"])).total_seconds()
-                stale = age_seconds > max(_config.poll_interval_seconds * 3, 900)
+                # Timeframe-aware: the engine decides on candle closes, so a
+                # 1h engine's decision is fresh up to ~1h old. See the helper.
+                stale = age_seconds > expected_decision_max_age_seconds(_config)
             except Exception:  # noqa: BLE001
                 pass
         return {

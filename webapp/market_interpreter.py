@@ -466,6 +466,18 @@ def _watch_items(row: pd.Series, close: Optional[float], rsi: float, bb_width: f
 # Decision Pipeline
 # ---------------------------------------------------------------------------
 
+def expected_decision_max_age_seconds(config: Config) -> float:
+    """How old the engine's newest journaled decision can be while still
+    being FRESH. The engine decides on candle closes, not every poll, so on
+    a 1h timeframe a decision is legitimately up to ~1h old - a flat
+    poll-interval threshold cried "stale" on a perfectly healthy engine.
+    Two candle intervals (one you're waiting on + one you may have just
+    missed) plus poll lag is the principled bound: a normal 1h engine never
+    trips it, a genuinely stopped one (hours idle) still does."""
+    tf_seconds = _TF_SECONDS.get(config.timeframe, 3600)
+    return tf_seconds * 2 + config.poll_interval_seconds
+
+
 def _ago(seconds: Optional[float]) -> str:
     if seconds is None:
         return "—"
@@ -519,10 +531,11 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
     # behind, which the operator should see rather than a false "live".
     fresh = True
     age_seconds = None
+    max_age = expected_decision_max_age_seconds(config)
     if decision:
         try:
             age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(decision["timestamp"])).total_seconds()
-            fresh = age_seconds <= max(config.poll_interval_seconds * 3, 900)
+            fresh = age_seconds <= max_age
         except Exception:  # noqa: BLE001
             fresh = True
 
@@ -540,9 +553,10 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
     if decision is None:
         add("market_data", "pending", "no engine cycle recorded yet")
     elif not fresh:
-        add("market_data", "blocked", f"stale — last cycle {_ago(age_seconds)}")
+        _exp = f"{int(max_age // 3600)}h{int((max_age % 3600) // 60):02d}m"
+        add("market_data", "blocked", f"stale — last decision {_ago(age_seconds)} (expected within {_exp})")
     else:
-        add("market_data", "ok", f"last cycle {_ago(age_seconds)}")
+        add("market_data", "ok", f"last decision {_ago(age_seconds)}")
 
     add("market_interpreter", "ok" if regime else "pending",
         f"regime: {regime.replace('_', ' ')}" if regime else "no regime recorded")
