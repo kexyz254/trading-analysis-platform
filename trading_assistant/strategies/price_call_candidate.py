@@ -31,14 +31,33 @@ import pandas as pd
 from trading_assistant.agents.features_15m import build_features_15m
 from trading_assistant.backtesting.framework import BacktestEngineV2, OrderDirection
 from trading_assistant.market_data.feed_15m import FifteenMinuteFeed
-# Reuse the exact calibration and cost-aware gate the 15m candidate uses, so
-# the two share one battle-tested implementation rather than drifting.
-from trading_assistant.strategies.ml_15m_candidate import (
-    cost_aware_signal,
-    train_calibrated_binary,
-)
+# Reuse the exact calibration the 15m candidate uses so the two share one
+# battle-tested implementation. The *signal* gate, however, is deliberately
+# NOT shared: the 15m candidate's cost_aware_signal is an ATR risk/reward gate
+# tuned for swing trades, and a price call is a pure directional prediction -
+# see directional_signal below.
+from trading_assistant.strategies.ml_15m_candidate import train_calibrated_binary
 
 logger = logging.getLogger(__name__)
+
+
+def directional_signal(prob_up: float, prob_down: float, config: Dict[str, Any]) -> int:
+    """A pure directional call: LONG (1), EXIT/short-bias (-1), or HOLD (0).
+
+    A price call predicts *direction at a fixed horizon*, not a tradeable
+    ATR-sized swing, so it must NOT be filtered through the 15m candidate's
+    risk/reward gate (whose rr_ratio is capped below its own min_rr threshold,
+    making it never fire - which is exactly why every price-call fold scored a
+    flat zero). Here we simply act on the calibrated lean: go/stay long when
+    the up-probability clears the confidence floor and leads the down-
+    probability; signal an exit when the down side leads and clears the floor.
+    """
+    min_conf = config.get("min_confidence", 0.52)
+    if prob_up >= min_conf and prob_up >= prob_down:
+        return 1
+    if prob_down >= min_conf and prob_down > prob_up:
+        return -1
+    return 0
 
 
 def make_price_call_targets(
@@ -76,13 +95,15 @@ def _empty_metrics() -> Dict[str, float]:
 
 
 def _default_config() -> Dict[str, Any]:
+    # min_confidence is the directional-lean floor (see directional_signal):
+    # a calibrated up/down probability just above 0.5 is already a real lean
+    # at a fixed horizon, so 0.52 lets the strategy actually take positions and
+    # build a track record - the walk-forward Sharpe bar still decides whether
+    # that lean is worth promoting. fee_rate is charged by the backtest engine.
     return {
         "horizon_bars": 1,
-        "min_confidence": 0.55,
-        "min_rr_ratio": 2.0,
+        "min_confidence": 0.52,
         "fee_rate": 0.0015,
-        "stop_loss_atr_mult": 2.0,
-        "take_profit_atr_mult": 3.0,
     }
 
 
@@ -179,8 +200,7 @@ def backtest_price_call(
         feats = row[feature_cols].to_frame().T
         prob_up = float(model_up.predict_proba(feats)[0][1])
         prob_down = float(model_down.predict_proba(feats)[0][1])
-        atr = float(feat_df.loc[idx, "atr"]) if ("atr" in feat_df.columns and idx in feat_df.index) else 0.0
-        signal = cost_aware_signal(prob_up, prob_down, price, atr, cfg)
+        signal = directional_signal(prob_up, prob_down, cfg)
         if signal == 1 and position is None:
             qty = (engine.capital * 0.1) / price
             if engine.open_position(symbol, OrderDirection.LONG, price, idx, quantity=qty):

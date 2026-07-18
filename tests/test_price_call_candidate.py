@@ -20,6 +20,7 @@ import pytest
 from trading_assistant.strategies.price_call_candidate import (
     _empty_metrics,
     backtest_price_call,
+    directional_signal,
     make_price_call_targets,
     predict_live_probability,
 )
@@ -85,6 +86,20 @@ def test_make_price_call_targets_multibar_horizon():
     assert up.iloc[:-3].notna().all()
 
 
+# ------------------------------------------------------------------ directional signal
+def test_directional_signal_acts_on_the_lean():
+    cfg = {"min_confidence": 0.52}
+    # Confident up, up leads -> long
+    assert directional_signal(0.6, 0.3, cfg) == 1
+    # Confident down, down leads -> exit / short-bias
+    assert directional_signal(0.3, 0.6, cfg) == -1
+    # Below the floor either way -> hold
+    assert directional_signal(0.51, 0.50, cfg) == 0
+    # Up clears floor and ties/leads down -> long (not blocked by an
+    # impossible risk/reward gate, which was the promotion-killing bug)
+    assert directional_signal(0.53, 0.53, cfg) == 1
+
+
 # ------------------------------------------------------------------ training / live prediction
 def test_predict_live_probability_returns_calibrated_probs():
     bars = _synthetic_15m()
@@ -125,6 +140,32 @@ def test_backtest_price_call_returns_valid_metrics():
         assert np.isfinite(metrics[key])
     # profit_factor may be inf (no losses) but never NaN.
     assert not np.isnan(metrics["profit_factor"])
+
+
+def test_backtest_price_call_actually_trades_on_a_trend():
+    """Regression for the promotion-killing bug: the ATR risk/reward gate made
+    every fold open ZERO trades (uniform sharpe=0, pct_profit=0), so the
+    candidate could never clear the bar. On a clean uptrend the directional
+    model must lean up and open at least one position."""
+    rng = np.random.default_rng(11)
+    n = 900
+    idx = pd.date_range("2024-01-01", periods=n, freq="15min", tz="UTC")
+    # Strong, steady uptrend with light noise so the up-classifier leans up.
+    close = 100.0 * np.exp(np.cumsum(rng.normal(0.0015, 0.002, size=n)))
+    high = close * (1 + np.abs(rng.normal(0, 0.0008, size=n)))
+    low = close * (1 - np.abs(rng.normal(0, 0.0008, size=n)))
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    bars = pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close,
+         "volume": rng.uniform(10, 100, size=n)},
+        index=idx,
+    )
+    feed = _FakeFeed(bars)
+    metrics = backtest_price_call(
+        "BTC/USDT", feed, bars.index[200], bars.index[600],
+        bars.index[600], bars.index[800], {"horizon_bars": 1},
+    )
+    assert metrics["num_trades"] >= 1
 
 
 def test_backtest_price_call_empty_feed_degrades_gracefully():
