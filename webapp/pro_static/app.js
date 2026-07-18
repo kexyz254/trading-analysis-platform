@@ -156,6 +156,7 @@ async function refreshCards() {
             loadPipeline(),
             loadInterpreter(),
             loadTournament(),
+            loadAiPerformance(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
     // WS watchdog: if no kline arrived in 45s the browser's Binance socket
@@ -547,6 +548,68 @@ async function loadDecisionMarkers() {
             .sort((a, b) => a.time - b.time);
         candleSeries.setMarkers(markers);
     } catch (e) { /* ignore */ }
+}
+
+// --- AI Performance: measured track record of the AI's price calls ---
+// Draws the cumulative-accuracy path as an inline SVG sparkline (segments
+// colored by which engine made each call), the 50% coin-flip reference, and
+// headline hit rate / cumulative edge / count. All real, self-scoring data.
+function aiPerfSparkline(path) {
+    const W = 260, H = 56, pad = 3;
+    if (!path || path.length < 2) {
+        return `<svg class="aiperf-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"></svg>`;
+    }
+    const n = path.length;
+    const x = i => pad + (i / (n - 1)) * (W - 2 * pad);
+    const y = a => pad + (1 - a) * (H - 2 * pad);   // accuracy 0..1 -> bottom..top
+    const midY = y(0.5);
+    // Color each segment by the engine that produced the newer of its points.
+    let segs = '';
+    for (let i = 1; i < n; i++) {
+        const col = path[i].champion_backed ? '#00FFC2' : '#FFB800';
+        segs += `<line x1="${x(i - 1).toFixed(1)}" y1="${y(path[i - 1].accuracy).toFixed(1)}" `
+              + `x2="${x(i).toFixed(1)}" y2="${y(path[i].accuracy).toFixed(1)}" stroke="${col}" stroke-width="1.6"/>`;
+    }
+    const lastA = path[n - 1].accuracy;
+    return `<svg class="aiperf-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        <line x1="${pad}" y1="${midY.toFixed(1)}" x2="${W - pad}" y2="${midY.toFixed(1)}"
+              stroke="rgba(255,255,255,0.25)" stroke-width="1" stroke-dasharray="3 3"/>
+        ${segs}
+        <circle cx="${x(n - 1).toFixed(1)}" cy="${y(lastA).toFixed(1)}" r="2.4"
+                fill="${path[n - 1].champion_backed ? '#00FFC2' : '#FFB800'}"/>
+    </svg>`;
+}
+
+function _pct(v) { return v === null || v === undefined ? '—' : `${(v * 100).toFixed(0)}%`; }
+
+async function loadAiPerformance() {
+    const el = document.getElementById('ai-perf-content');
+    if (!el) return;
+    try {
+        const d = await apiScoped(`/api/pro/ai-performance/${currentSymbol}`);
+        if (d === null) return;  // request superseded by a symbol switch
+        if (!d.n) {
+            el.innerHTML = '<div class="call-sub dim">No settled calls yet — the track record builds as calls settle.</div>';
+            return;
+        }
+        const edge = d.cum_edge_pct;
+        const edgeCls = edge > 0.01 ? 'pos' : edge < -0.01 ? 'neg' : 'flat';
+        const hitCls = d.hit_rate >= 0.55 ? 'pos' : d.hit_rate <= 0.45 ? 'neg' : 'flat';
+        const champ = d.champion || {}, heur = d.heuristic || {};
+        el.innerHTML = `
+            ${aiPerfSparkline(d.path)}
+            <div class="aiperf-metrics">
+                <div class="aiperf-metric"><div class="m-val ${hitCls}">${_pct(d.hit_rate)}</div><div class="m-lbl">hit rate</div></div>
+                <div class="aiperf-metric"><div class="m-val ${edgeCls}">${edge >= 0 ? '+' : ''}${edge.toFixed(2)}%</div><div class="m-lbl">cum. edge</div></div>
+                <div class="aiperf-metric"><div class="m-val flat">${d.n}</div><div class="m-lbl">decisions</div></div>
+            </div>
+            <div class="aiperf-split">
+                <div class="sp champion">🏆 Champion <b>${_pct(champ.hit_rate)}</b><span class="call-sub dim">${champ.n || 0} calls</span></div>
+                <div class="sp">📐 Heuristic <b>${_pct(heur.hit_rate)}</b><span class="call-sub dim">${heur.n || 0} calls</span></div>
+            </div>`;
+    } catch (e) {
+        el.textContent = 'AI performance unavailable';
+    }
 }
 
 // --- Top bar / status ---

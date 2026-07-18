@@ -74,6 +74,25 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 #chart-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #chart-container { flex: 1; min-height: 0; position: relative; }
 #chart { position: absolute; inset: 0; }
+/* On-chart legend: names the real overlays (SMA/Bollinger/AI markers). */
+.chart-legend { position: absolute; top: 8px; left: 10px; z-index: 3; display: flex; flex-wrap: wrap; gap: 10px;
+    padding: 4px 8px; background: rgba(10,14,20,0.7); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 5px; font-size: 0.6rem; pointer-events: none; backdrop-filter: blur(2px); }
+.chart-legend .lg-item { display: inline-flex; align-items: center; gap: 4px; opacity: 0.85; letter-spacing: 0.3px; }
+.chart-legend .lg-swatch { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.chart-legend .lg-swatch.lg-dash { background: repeating-linear-gradient(90deg,rgba(0,255,196,0.6) 0 3px,transparent 3px 5px) !important; }
+
+/* AI Performance panel: cumulative-accuracy sparkline + headline metrics. */
+.aiperf-spark { width: 100%; height: 56px; display: block; margin: 6px 0 8px; }
+.aiperf-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; }
+.aiperf-metric { background: rgba(255,255,255,0.04); border-radius: 5px; padding: 6px 8px; text-align: center; }
+.aiperf-metric .m-val { font-size: 1.02rem; font-weight: 800; }
+.aiperf-metric .m-lbl { font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.6px; opacity: 0.55; margin-top: 2px; }
+.aiperf-split { display: flex; gap: 8px; font-size: 0.64rem; }
+.aiperf-split .sp { flex: 1; padding: 5px 7px; border-radius: 5px; background: rgba(255,255,255,0.03); }
+.aiperf-split .sp.champion { box-shadow: 0 0 0 1px rgba(0,255,196,0.3) inset; }
+.aiperf-split .sp b { display: block; font-size: 0.82rem; margin-top: 1px; }
+.m-val.pos { color: var(--accent); } .m-val.neg { color: var(--danger); } .m-val.flat { color: #9FB0C0; }
 
 /* === RIGHT PANEL === */
 #right-panel {

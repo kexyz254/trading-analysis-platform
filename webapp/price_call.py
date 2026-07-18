@@ -265,6 +265,94 @@ class PriceCallBook:
             "avg_miss_pct": sum(r["miss_pct"] for r in rows) / n,
         }
 
+    def settled_calls(self, symbol: str, horizon_label: Optional[str] = None,
+                      limit: int = 300) -> List[Dict[str, Any]]:
+        """Settled, non-voided calls for the symbol ordered OLDEST -> newest,
+        across all horizons (or one). The raw material for the AI performance
+        path - each row carries the real outcome (correct, actual vs call
+        price) and which engine made it (champion_backed)."""
+        query = (
+            "SELECT * FROM price_calls WHERE symbol = ? AND settled_at IS NOT NULL AND voided = 0"
+        )
+        params: List[Any] = [symbol]
+        if horizon_label is not None:
+            query += " AND horizon_label = ?"
+            params.append(horizon_label)
+        # Take the most recent `limit` by id, then present oldest-first so the
+        # cumulative path reads left-to-right in time.
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(query, params).fetchall()
+        records = [dict(row) for row in rows]
+        records.reverse()
+        return records
+
+
+def _signed_return(row: Dict[str, Any]) -> Optional[float]:
+    """Realized return of a settled call in the direction it predicted, as a
+    fraction: positive when the price moved the way the call said. This is the
+    honest per-call PnL of 'trade every call' - no assumptions, just the
+    recorded call price vs the settled price."""
+    price0 = row.get("price_at_call")
+    price1 = row.get("actual_price")
+    if not price0 or price1 is None:
+        return None
+    move = (price1 - price0) / price0
+    return move if row.get("direction") == "UP" else -move
+
+
+def performance_summary(book: "PriceCallBook", symbol: str, limit: int = 300) -> Dict[str, Any]:
+    """Measure the AI's price-call track record from REAL settled calls: the
+    cumulative-accuracy and cumulative-edge paths over time, headline hit rate
+    and edge, and a champion-vs-heuristic split (using the champion_backed flag
+    each call was stamped with). All derived - nothing fabricated; an empty
+    history simply reports n=0."""
+    calls = book.settled_calls(symbol, limit=limit)
+
+    path: List[Dict[str, Any]] = []
+    hits = 0
+    cum_edge = 0.0
+    champ_n = champ_hits = 0
+    heur_n = heur_hits = 0
+    for i, row in enumerate(calls, start=1):
+        correct = int(row.get("correct") or 0)
+        hits += correct
+        sr = _signed_return(row)
+        if sr is not None:
+            cum_edge += sr
+        champion_backed = bool(row.get("champion_backed"))
+        if champion_backed:
+            champ_n += 1
+            champ_hits += correct
+        else:
+            heur_n += 1
+            heur_hits += correct
+        path.append({
+            "t": row.get("settled_at"),
+            "n": i,
+            "accuracy": hits / i,
+            "cum_edge_pct": cum_edge * 100.0,
+            "correct": bool(correct),
+            "champion_backed": champion_backed,
+            "horizon": row.get("horizon_label"),
+        })
+
+    n = len(calls)
+
+    def _rate(h: int, d: int) -> Optional[float]:
+        return (h / d) if d else None
+
+    return {
+        "symbol": symbol,
+        "n": n,
+        "hit_rate": _rate(hits, n),
+        "cum_edge_pct": cum_edge * 100.0,
+        "champion": {"n": champ_n, "hit_rate": _rate(champ_hits, champ_n)},
+        "heuristic": {"n": heur_n, "hit_rate": _rate(heur_hits, heur_n)},
+        "path": path,
+    }
+
 
 def _aligned_due_iso(horizon_seconds: int, now: Optional[datetime] = None) -> str:
     """The next WALL-CLOCK boundary for this horizon, so calls settle on the

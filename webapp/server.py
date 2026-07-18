@@ -474,6 +474,19 @@ def pro_price_calls(symbol: str, limit: int = 20):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.get("/api/pro/ai-performance/{symbol:path}")
+def pro_ai_performance(symbol: str, limit: int = 300):
+    """The AI's measured price-call track record for the symbol: cumulative
+    accuracy and cumulative-edge paths over time, headline hit rate/edge, and
+    a champion-vs-heuristic split - all from REAL settled calls in the
+    dashboard-owned analytics db (never trading_system.db)."""
+    try:
+        from webapp.price_call import get_book, performance_summary
+        return performance_summary(get_book(), symbol, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.get("/api/pro/tournament/{symbol:path}")
 def pro_tournament(symbol: str):
     """Model Tournament: per-regime champion, why it was selected, its

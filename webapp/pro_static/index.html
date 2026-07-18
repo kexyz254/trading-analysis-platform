@@ -49,6 +49,16 @@
                  own price scale — see setupChart in app.js) -->
             <section id="chart-panel" class="panel">
                 <div id="chart-container">
+                    <!-- Legend identifying the real overlays on the chart so
+                         the SMA / Bollinger lines and AI markers aren't
+                         anonymous. Positioned over the chart's top-left. -->
+                    <div id="chart-legend" class="chart-legend">
+                        <span class="lg-item"><span class="lg-swatch" style="background:#FFB800"></span>SMA 20</span>
+                        <span class="lg-item"><span class="lg-swatch" style="background:#AA66FF"></span>SMA 50</span>
+                        <span class="lg-item"><span class="lg-swatch lg-dash" style="background:rgba(0,255,196,0.6)"></span>Bollinger</span>
+                        <span class="lg-item"><span class="lg-swatch" style="background:#00FFC2"></span>AI buy</span>
+                        <span class="lg-item"><span class="lg-swatch" style="background:#FF3366"></span>AI sell</span>
+                    </div>
                     <div id="chart"></div>
                 </div>
             </section>
@@ -70,6 +80,13 @@
                 <div class="card system-model" id="prediction-card">
                     <h3>AI Prediction <span class="src-badge live">live model</span></h3>
                     <div class="card-content" id="prediction-content">Loading…</div>
+                </div>
+                <!-- AI Performance: the AI's REAL measured track record from
+                     settled price calls - cumulative accuracy path, hit rate,
+                     cumulative edge, and champion-vs-heuristic split. -->
+                <div class="card system-model" id="ai-perf-card">
+                    <h3>AI Performance <span class="src-badge live">measured</span></h3>
+                    <div class="card-content" id="ai-perf-content">Measuring…</div>
                 </div>
                 <div class="card system-model" id="model-info-card">
                     <h3>Model Info</h3>
