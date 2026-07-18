@@ -48,6 +48,10 @@ async function initTerminal() {
     _lastKlineAt = Date.now(); // start the WS watchdog clock from "just loaded"
     startLiveCandles();
     startPolling();
+    // Capital hits the real exchange balance API - poll it on a slower
+    // cadence (30s) than the 10s card refresh to respect rate limits.
+    loadCapital();
+    if (!_capitalTimer) _capitalTimer = setInterval(loadCapital, 30000);
 
     document.getElementById('symbol-select').addEventListener('change', async (e) => {
         currentSymbol = e.target.value;
@@ -858,6 +862,46 @@ async function loadModelInfo() {
             `<div class="mi-row"><span>${k}</span><span class="mi-val">${v}</span></div>`
         ).join('');
     } catch (e) { /* ignore */ }
+}
+
+function money(v) {
+    if (v == null) return '—';
+    return v >= 1000 ? `$${v.toLocaleString(undefined, {maximumFractionDigits: 0})}`
+         : v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`;
+}
+
+// Capital polls the real exchange (rate-limited): refresh it on its own
+// slower cadence, not every 10s card refresh.
+let _capitalTimer = null;
+async function loadCapital() {
+    try {
+        const d = await api('/api/pro/capital');
+        const content = document.getElementById('capital-content');
+        const tradeable = d.tradeable_quote;
+        const locked = d.earn_locked_value;
+        const reserved = d.reserved_quote;
+        const spot = d.other_spot_value;
+
+        // Honest verdict about whether the engine can actually trade.
+        let verdict, vcls;
+        if (tradeable >= 10) { verdict = 'Sufficient free balance to trade.'; vcls = 'ok'; }
+        else if (tradeable + spot >= 10) { verdict = 'Free quote balance is low; most funds are in non-quote spot assets.'; vcls = 'warn'; }
+        else { verdict = 'Below typical exchange minimums — the engine cannot open new positions.'; vcls = 'bad'; }
+
+        let rows = `
+            <div class="cap-main ${vcls}">${money(tradeable)} <span class="cap-lbl">free ${d.quote_currency} · tradeable</span></div>
+            <div class="cap-row"><span>Reserved (open orders)</span><span>${money(reserved)}</span></div>
+            <div class="cap-row"><span>Locked in Earn</span><span>${money(locked)}</span></div>
+            <div class="cap-row"><span>Other spot assets</span><span>${money(spot)}</span></div>`;
+        if (d.earn_holdings && d.earn_holdings.length) {
+            rows += `<div class="cap-sub">Earn-locked (not tradeable): ` +
+                d.earn_holdings.map(h => `${h.asset} ${money(h.value)}`).join(' · ') + `</div>`;
+        }
+        rows += `<div class="cap-verdict ${vcls}">${verdict}</div>`;
+        content.innerHTML = rows;
+    } catch (e) {
+        document.getElementById('capital-content').textContent = 'Balance unavailable';
+    }
 }
 
 async function loadPosition() {

@@ -353,6 +353,17 @@ def pro_candidates(symbol: str):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+@app.get("/api/pro/capital")
+def pro_capital(quote: str = "USDT"):
+    """Tradeable-capital breakdown: free quote balance vs funds locked in
+    Binance Earn or resting orders - the honest 'what can the engine
+    actually trade with' figure. See data_access.capital_status."""
+    try:
+        return da.capital_status(_config, quote_currency=quote)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Could not read capital: {exc}") from exc
+
+
 @app.get("/api/pro/model-info/{symbol:path}")
 def pro_model_info(symbol: str):
     """The system's REAL per-symbol model state - the promoted tournament

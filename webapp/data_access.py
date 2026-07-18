@@ -237,6 +237,77 @@ def real_wallet_balance(config: Config, quote_currency: str = "USDT") -> Dict[st
     return _cache.get_or_set(("real_wallet_balance", quote_currency), ttl_seconds=15, factory=_fetch)
 
 
+def capital_status(config: Config, quote_currency: str = "USDT") -> Dict[str, Any]:
+    """What the account can ACTUALLY trade with right now, from the real
+    exchange balance (ccxt free/used/total per asset) - distinct from the
+    plain 'total wallet' figure, which mixes in funds that cannot be
+    traded. This exists because a live account can look funded while the
+    engine sits idle: the tradeable quote balance is near zero and the rest
+    is locked in Binance Earn (LD-prefixed tokens) or resting orders. No
+    fabricated numbers - Earn tokens are priced via their UNDERLYING (LDBTC
+    -> BTC/USDT) and clearly labelled as locked/estimated, never as spot."""
+    def _fetch():
+        exchange = get_exchange(config)
+        balance = exchange.fetch_balance()
+        tickers = exchange.fetch_tickers()
+
+        def price_of(asset: str) -> Optional[float]:
+            t = tickers.get(f"{asset}/{quote_currency}")
+            return float(t["last"]) if t and t.get("last") else None
+
+        q = balance.get(quote_currency, {}) if isinstance(balance.get(quote_currency), dict) else {}
+        tradeable_quote = float(q.get("free") or 0.0)     # the engine's real trading capital
+        reserved_quote = float(q.get("used") or 0.0)      # tied up in resting orders
+
+        earn_locked_value = 0.0
+        other_spot_value = 0.0
+        earn_holdings: List[Dict[str, Any]] = []
+        spot_holdings: List[Dict[str, Any]] = []
+        unpriced = False
+
+        for asset, amounts in balance.items():
+            if not isinstance(amounts, dict) or "total" not in amounts or asset == quote_currency:
+                continue
+            total = float(amounts.get("total") or 0.0)
+            if total <= 0:
+                continue
+            # Binance Earn positions surface as LD-prefixed pseudo-assets
+            # (e.g. LDBTC = flexible/locked BTC). They are 1:1 claims on the
+            # underlying but are NOT spot-tradeable until redeemed.
+            is_earn = asset.startswith("LD") and price_of(asset[2:]) is not None
+            underlying = asset[2:] if is_earn else asset
+            price = price_of(underlying)
+            value = total * price if price is not None else None
+            if value is None:
+                unpriced = True
+            rec = {"asset": asset, "underlying": underlying if is_earn else None,
+                   "quantity": total, "price": price, "value": value,
+                   "free": float(amounts.get("free") or 0.0), "locked": float(amounts.get("used") or 0.0)}
+            if is_earn:
+                earn_holdings.append(rec)
+                earn_locked_value += value or 0.0
+            else:
+                spot_holdings.append(rec)
+                other_spot_value += value or 0.0
+
+        earn_holdings.sort(key=lambda a: -(a["value"] or 0.0))
+        spot_holdings.sort(key=lambda a: -(a["value"] or 0.0))
+
+        return {
+            "quote_currency": quote_currency,
+            "tradeable_quote": tradeable_quote,
+            "reserved_quote": reserved_quote,
+            "earn_locked_value": earn_locked_value,
+            "other_spot_value": other_spot_value,
+            "earn_holdings": earn_holdings,
+            "spot_holdings": spot_holdings,
+            "has_unpriced_assets": unpriced,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+        }
+
+    return _cache.get_or_set(("capital_status", quote_currency), ttl_seconds=15, factory=_fetch)
+
+
 def fetch_ohlcv(config: Config, symbol: str, timeframe: str, limit: int = 300) -> List[Dict[str, Any]]:
     def _fetch():
         exchange = get_exchange(config)

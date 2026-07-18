@@ -190,6 +190,19 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .watch-item { font-size: 0.71rem; opacity: 0.7; padding: 2px 0; line-height: 1.4; }
 .interp-conf { margin-top: 10px; font-size: 0.7rem; opacity: 0.55; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 6px; }
 
+/* Capital Status */
+.cap-main { font-size: 1.3rem; font-weight: 800; margin-bottom: 6px; }
+.cap-main.ok { color: var(--accent); }
+.cap-main.warn { color: var(--warning); }
+.cap-main.bad { color: var(--danger); }
+.cap-lbl { font-size: 0.66rem; font-weight: normal; opacity: 0.55; text-transform: uppercase; letter-spacing: 1px; }
+.cap-row { display: flex; justify-content: space-between; font-size: 0.75rem; padding: 2px 0; opacity: 0.8; }
+.cap-sub { font-size: 0.68rem; opacity: 0.55; margin-top: 6px; line-height: 1.4; }
+.cap-verdict { margin-top: 8px; font-size: 0.72rem; border-radius: 4px; padding: 6px 8px; line-height: 1.4; }
+.cap-verdict.ok { color: var(--accent); background: rgba(0,255,196,0.08); }
+.cap-verdict.warn { color: var(--warning); background: rgba(255,184,0,0.08); }
+.cap-verdict.bad { color: var(--danger); background: rgba(255,51,102,0.1); }
+
 /* Model Info panel */
 .mi-row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.76rem; }
 .mi-row span:first-child { opacity: 0.6; }
