@@ -344,17 +344,23 @@ function renderHorizon(h) {
         _callDueAt[h.horizon] = Date.parse(call.due_at);
         // Settle time in the viewer's own clock (East Africa Time etc.).
         const settleClock = new Date(_callDueAt[h.horizon]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        // Price to beat = the reference the FINAL price at settlement must
+        // cross: an UP call wins if the final price is above it, DOWN below.
+        const beat = call.price_at_call;
         html += `<div class="call-main ${up ? 'up' : 'down'}">
                 ${up ? '▲' : '▼'} ${call.direction} → $${formatPrice(call.projected_price)}
                 <span class="call-countdown" data-hz="${h.horizon}"></span></div>
-            <div class="call-sub">settles at <strong>${settleClock}</strong> · from $${formatPrice(call.price_at_call)} · confidence ${(call.probability * 100).toFixed(0)}% · typ. move ${(call.expected_move_pct * 100).toFixed(2)}%</div>`;
+            <div class="call-beat">Price to beat <strong>$${formatPrice(beat)}</strong>
+                <span class="beat-cond ${up ? 'up' : 'down'}">final must be ${up ? 'above ↑' : 'below ↓'}</span></div>
+            <div class="call-sub">settles at <strong>${settleClock}</strong> · target $${formatPrice(call.projected_price)} · confidence ${(call.probability * 100).toFixed(0)}%</div>`;
+        // The beat line on the chart: watch the live candle cross it.
         _callPriceLines[h.horizon] = candleSeries.createPriceLine({
-            price: call.projected_price,
+            price: beat,
             color: up ? '#00FFC2' : '#FF3366',
             lineWidth: 1,
-            lineStyle: LightweightCharts.LineStyle.Dashed,
+            lineStyle: LightweightCharts.LineStyle.Solid,
             axisLabelVisible: true,
-            title: `${h.horizon} ${call.direction}`,
+            title: `${h.horizon} beat`,
         });
     } else {
         html += '<div class="call-sub">Opening first call…</div>';

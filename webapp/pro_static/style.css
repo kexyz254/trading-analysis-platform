@@ -240,6 +240,11 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .call-horizon:last-child { border-bottom: none; }
 .call-hz-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 1px; opacity: 0.5; margin-bottom: 4px; }
 .call-sub.dim { opacity: 0.4; }
+.call-beat { font-size: 0.76rem; margin-top: 2px; }
+.call-beat strong { font-variant-numeric: tabular-nums; }
+.beat-cond { font-size: 0.64rem; opacity: 0.75; margin-left: 4px; }
+.beat-cond.up { color: var(--accent); }
+.beat-cond.down { color: var(--danger); }
 .acc-edge { color: var(--accent); }
 .acc-poor { color: var(--danger); }
 .acc-flat { color: var(--warning); }
