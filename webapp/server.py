@@ -405,18 +405,18 @@ def pro_model_info(symbol: str):
         # Staleness: a journaled regime hours old must not be presented as
         # "current" without a flag - the engine may be behind/stopped, and
         # the live interpreter can already read a different market.
-        stale = False
+        # "Stale" means the ENGINE isn't cycling (heartbeat), NOT merely that
+        # a 1h engine hasn't re-decided recently - see engine_is_alive.
+        from datetime import datetime, timezone
+        from webapp.market_interpreter import engine_is_alive
         age_seconds = None
         if decision:
-            from datetime import datetime, timezone
-            from webapp.market_interpreter import expected_decision_max_age_seconds
             try:
                 age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(decision["timestamp"])).total_seconds()
-                # Timeframe-aware: the engine decides on candle closes, so a
-                # 1h engine's decision is fresh up to ~1h old. See the helper.
-                stale = age_seconds > expected_decision_max_age_seconds(_config)
             except Exception:  # noqa: BLE001
                 pass
+        alive = engine_is_alive(_config, journal)
+        stale = alive is False  # None (no heartbeat) is not "stale", just unknown
         return {
             "symbol": symbol,
             "timeframe": _config.timeframe,

@@ -466,16 +466,29 @@ def _watch_items(row: pd.Series, close: Optional[float], rsi: float, bb_width: f
 # Decision Pipeline
 # ---------------------------------------------------------------------------
 
-def expected_decision_max_age_seconds(config: Config) -> float:
-    """How old the engine's newest journaled decision can be while still
-    being FRESH. The engine decides on candle closes, not every poll, so on
-    a 1h timeframe a decision is legitimately up to ~1h old - a flat
-    poll-interval threshold cried "stale" on a perfectly healthy engine.
-    Two candle intervals (one you're waiting on + one you may have just
-    missed) plus poll lag is the principled bound: a normal 1h engine never
-    trips it, a genuinely stopped one (hours idle) still does."""
-    tf_seconds = _TF_SECONDS.get(config.timeframe, 3600)
-    return tf_seconds * 2 + config.poll_interval_seconds
+def engine_liveness_bound_seconds(config: Config) -> float:
+    """Max heartbeat age for the engine to count as ALIVE. Heartbeats land
+    every completed cycle (~every poll_interval), so three missed cycles is
+    a generous "the loop has stopped" bound - independent of the trading
+    timeframe, since liveness is about the loop running, not about how often
+    a given symbol is re-decided."""
+    return max(config.poll_interval_seconds * 3, 900)
+
+
+def engine_is_alive(config: Config, journal: "Journal") -> Optional[bool]:
+    """True/False if a heartbeat exists, None if none recorded yet. Shared
+    by the pipeline and Model Info so both agree on "is the engine up"."""
+    try:
+        hb = journal.latest_heartbeat_cycle() or journal.latest_heartbeat_start()
+    except Exception:  # noqa: BLE001
+        return None
+    if not hb:
+        return None
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(hb["timestamp"])).total_seconds()
+        return age <= engine_liveness_bound_seconds(config)
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _ago(seconds: Optional[float]) -> str:
@@ -507,6 +520,14 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
         snapshot = journal.latest_equity_snapshot()
     except Exception:  # noqa: BLE001
         snapshot = None
+    # Engine liveness comes from the HEARTBEAT (written every completed
+    # cycle, ~every poll), NOT from when this symbol was last decided. A 1h
+    # engine cycling happily may not re-decide BTC for up to an hour, or
+    # while it sits out - that is not the engine being down.
+    try:
+        heartbeat = journal.latest_heartbeat_cycle() or journal.latest_heartbeat_start()
+    except Exception:  # noqa: BLE001
+        heartbeat = None
 
     decision = decisions[0] if decisions else None
     details = (decision or {}).get("details", {}) or {}
@@ -526,18 +547,21 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
     buy_t = config.prediction.buy_threshold
     sell_t = config.prediction.sell_threshold
 
-    # Feed freshness: how long since the engine last journaled a cycle for
-    # this symbol, in poll-interval units. Stale => the engine feed/loop is
-    # behind, which the operator should see rather than a false "live".
-    fresh = True
-    age_seconds = None
-    max_age = expected_decision_max_age_seconds(config)
-    if decision:
+    now = datetime.now(timezone.utc)
+
+    def _age(ts: Optional[str]) -> Optional[float]:
+        if not ts:
+            return None
         try:
-            age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(decision["timestamp"])).total_seconds()
-            fresh = age_seconds <= max_age
+            return (now - datetime.fromisoformat(ts)).total_seconds()
         except Exception:  # noqa: BLE001
-            fresh = True
+            return None
+
+    # Engine liveness = heartbeat age vs a poll-interval bound (heartbeats
+    # land every cycle). Decision age is separate, informational context.
+    engine_age = _age(heartbeat.get("timestamp")) if heartbeat else None
+    engine_alive = engine_age is None or engine_age <= engine_liveness_bound_seconds(config)
+    age_seconds = _age(decision["timestamp"]) if decision else None
 
     position = None
     if snapshot:
@@ -550,13 +574,17 @@ def decision_pipeline(config: Config, db_path: str, symbol: str) -> Dict[str, An
     def add(name: str, state: str, detail: str) -> None:
         stages.append({"stage": name, "state": state, "detail": detail})
 
-    if decision is None:
-        add("market_data", "pending", "no engine cycle recorded yet")
-    elif not fresh:
-        _exp = f"{int(max_age // 3600)}h{int((max_age % 3600) // 60):02d}m"
-        add("market_data", "blocked", f"stale — last decision {_ago(age_seconds)} (expected within {_exp})")
+    if heartbeat is None and decision is None:
+        add("market_data", "pending", "no engine heartbeat yet")
+    elif not engine_alive:
+        add("market_data", "blocked", f"engine not cycling — last heartbeat {_ago(engine_age)}")
     else:
-        add("market_data", "ok", f"last decision {_ago(age_seconds)}")
+        # Engine is live; the decision age is just context (a 1h engine
+        # re-decides at most hourly, and not at all while sitting out).
+        detail = "engine live"
+        if age_seconds is not None:
+            detail += f" · last decision {_ago(age_seconds)}"
+        add("market_data", "ok", detail)
 
     add("market_interpreter", "ok" if regime else "pending",
         f"regime: {regime.replace('_', ' ')}" if regime else "no regime recorded")
