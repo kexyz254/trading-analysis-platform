@@ -114,8 +114,17 @@ def train_calibrated_binary(
     # Train on training set
     model.fit(X_train, y_train)
 
-    # Calibrate on calibration set (Platt scaling)
-    calibrator = CalibratedClassifierCV(model, method="sigmoid", cv="prefit")
+    # Calibrate on the held-out calibration set (Platt scaling). The API for
+    # calibrating an already-fitted estimator changed across sklearn versions:
+    # <=1.5 used cv="prefit"; 1.6 introduced FrozenEstimator and 1.9 removed
+    # "prefit" entirely. Prefer FrozenEstimator when present so the same code
+    # calibrates cleanly on both old and new installs.
+    try:
+        from sklearn.frozen import FrozenEstimator  # sklearn >= 1.6
+
+        calibrator = CalibratedClassifierCV(FrozenEstimator(model), method="sigmoid")
+    except ImportError:  # pragma: no cover - exercised only on older sklearn
+        calibrator = CalibratedClassifierCV(model, method="sigmoid", cv="prefit")
     calibrator.fit(X_calib, y_calib)
     return calibrator
 
