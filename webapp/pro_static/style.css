@@ -239,6 +239,10 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .call-horizon { padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .call-horizon:last-child { border-bottom: none; }
 .call-hz-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 1px; opacity: 0.5; margin-bottom: 4px; }
+/* Which engine produced the call: promoted champion vs heuristic fallback. */
+.call-engine { font-size: 0.58rem; font-weight: 700; letter-spacing: 0.5px; padding: 1px 5px; border-radius: 3px; margin-left: 4px; opacity: 1; }
+.call-engine.champion { color: var(--accent); background: rgba(0,255,196,0.14); box-shadow: 0 0 0 1px rgba(0,255,196,0.35) inset; }
+.call-engine.heuristic { color: var(--warning); background: rgba(255,184,0,0.12); }
 .call-sub.dim { opacity: 0.4; }
 .call-beat { font-size: 0.76rem; margin-top: 2px; }
 .call-beat strong { font-variant-numeric: tabular-nums; }

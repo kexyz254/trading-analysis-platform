@@ -329,7 +329,14 @@ function renderHorizon(h) {
     const call = h.open_call;
     const stats = h.stats || {};
     const sig = h.signal;
-    let html = `<div class="call-horizon"><div class="call-hz-label">${h.horizon} call</div>`;
+    // Which engine made this call: a promoted, walk-forward-validated
+    // tournament champion, or the unvalidated heuristic forecast fallback.
+    const champ = h.champion_backed === true;
+    const engineBadge = `<span class="call-engine ${champ ? 'champion' : 'heuristic'}" `
+        + `title="${champ ? 'Direction from a promoted, walk-forward-validated tournament champion model'
+                          : 'Direction from the unvalidated heuristic forecast — no champion promoted yet'}">`
+        + `${champ ? '🏆 ML Champion' : '📐 Heuristic'}</span>`;
+    let html = `<div class="call-horizon"><div class="call-hz-label">${h.horizon} call ${engineBadge}</div>`;
 
     // Confidence signal (only present when confidence >= threshold).
     if (sig) {

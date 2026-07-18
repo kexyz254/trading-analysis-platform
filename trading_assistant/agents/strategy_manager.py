@@ -60,7 +60,10 @@ from trading_assistant.strategies.implementations import (
     VWAPReversionStrategy,
 )
 from trading_assistant.strategies.ml_15m_candidate import backtest_ml_15m
-from trading_assistant.strategies.price_call_candidate import backtest_price_call
+# NB: backtest_price_call is imported lazily inside _backtest_price_call_candidate.
+# A top-level import here forms a cycle (price_call_candidate -> agents.__init__
+# -> champion_challenger -> strategy_manager) whenever price_call_candidate is
+# imported before this module.
 # -- NEW research-layer imports --
 from trading_assistant.evaluation.recorder import CandidatePerformanceRecorder
 from trading_assistant.persistence.champion_registry import ChampionRegistry
@@ -758,6 +761,8 @@ class StrategyManager:
         }
         config.update(self.ml_15m_config)
         config.update(candidate.params or {})
+
+        from trading_assistant.strategies.price_call_candidate import backtest_price_call
 
         return backtest_price_call(
             symbol=symbol,

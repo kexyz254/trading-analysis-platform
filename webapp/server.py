@@ -82,7 +82,10 @@ async def _price_call_loop() -> None:
     from webapp import price_call
     while True:
         try:
-            await asyncio.to_thread(price_call.run_once, _config)
+            await asyncio.to_thread(
+                price_call.run_once, _config,
+                price_call.DEFAULT_ANALYTICS_DB, None, _db_path,
+            )
         except Exception:  # noqa: BLE001 - the loop must survive any single pass failing
             logger.exception("price call loop pass failed")
         await asyncio.sleep(60)
@@ -454,9 +457,14 @@ def pro_price_calls(symbol: str, limit: int = 20):
         for _seconds, label, _tf in HORIZONS:
             open_call = book.open_call(symbol, label)
             stats = book.stats(symbol, label)
+            # True when the current open call's direction came from a promoted
+            # tournament champion rather than the unvalidated heuristic. Sourced
+            # from the call row so it reflects the engine that actually made it.
+            champion_backed = bool(open_call.get("champion_backed")) if open_call else False
             horizons.append({
                 "horizon": label,
                 "open_call": open_call,
+                "champion_backed": champion_backed,
                 "signal": signal_for(open_call, stats),
                 "stats": stats,
                 "recent": book.recent_settled(symbol, label, limit=limit),

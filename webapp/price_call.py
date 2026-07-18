@@ -88,7 +88,11 @@ CREATE TABLE IF NOT EXISTS price_calls (
     -- independently. Added after the first single-horizon deploy - existing
     -- rows are backfilled to the original 5m horizon (see the migration).
     horizon_seconds INTEGER NOT NULL DEFAULT 300,
-    horizon_label TEXT NOT NULL DEFAULT '5m'
+    horizon_label TEXT NOT NULL DEFAULT '5m',
+    -- 1 when the direction came from a promoted tournament champion
+    -- (price_call_{horizon}); 0 when it came from the unvalidated heuristic
+    -- forecast fallback. Lets the dashboard say which engine made the call.
+    champion_backed INTEGER NOT NULL DEFAULT 0
 );
 """
 # The index is created AFTER the column migration in __init__, not here: on
@@ -131,6 +135,10 @@ class PriceCallBook:
                 conn.execute("ALTER TABLE price_calls ADD COLUMN horizon_seconds INTEGER NOT NULL DEFAULT 300")
             if "horizon_label" not in columns:
                 conn.execute("ALTER TABLE price_calls ADD COLUMN horizon_label TEXT NOT NULL DEFAULT '5m'")
+            # champion_backed added when the price-call engine learned to defer
+            # to a promoted tournament champion; legacy rows were all heuristic.
+            if "champion_backed" not in columns:
+                conn.execute("ALTER TABLE price_calls ADD COLUMN champion_backed INTEGER NOT NULL DEFAULT 0")
             conn.execute(_INDEX_SQL)  # after the ALTERs, so the column exists
             conn.commit()
 
@@ -158,6 +166,7 @@ class PriceCallBook:
         expected_move_pct: float,
         horizon_seconds: int = 300,
         horizon_label: str = "5m",
+        champion_backed: bool = False,
         made_at: Optional[str] = None,
         due_at: Optional[str] = None,
     ) -> int:
@@ -168,11 +177,13 @@ class PriceCallBook:
                 """
                 INSERT INTO price_calls
                     (symbol, made_at, due_at, price_at_call, direction, probability,
-                     hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds, horizon_label)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds,
+                     horizon_label, champion_backed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (symbol, made, due, price_at_call, direction, probability,
-                 hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds, horizon_label),
+                 hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds,
+                 horizon_label, 1 if champion_backed else 0),
             )
             conn.commit()
             return int(cursor.lastrowid)
@@ -309,8 +320,104 @@ def signal_for(open_call: Optional[Dict[str, Any]], stats: Dict[str, Any]) -> Op
     }
 
 
+# How much 15m history the champion model trains on per call, and the floor
+# below which there isn't enough to train honestly. The champion's look-ahead
+# (horizon_bars) is NOT hardcoded here - it is read from the candidate's own
+# registered params (see _champion_horizon_bars).
+_CHAMPION_HISTORY_BARS = 600
+_CHAMPION_MIN_BARS = 200
+# Default trading-system db the tournament writes its promotions to. The
+# dashboard is a pure READER of this file (never a writer - see the storage
+# note at the top of this module); server.py threads its own --db path in.
+DEFAULT_TRADING_DB = "trading_system.db"
+
+
+@lru_cache(maxsize=8)
+def _champion_horizon_bars(horizon_label: str) -> int:
+    """The look-ahead (in 15m bars) for this horizon's price-call champion,
+    read from the candidate's registered params so it matches the tournament
+    exactly and is never hardcoded in two places."""
+    from trading_assistant.agents.strategy_manager import default_candidates
+
+    name = f"price_call_{horizon_label}"
+    for candidate in default_candidates():
+        if candidate.name == name:
+            return int(candidate.params.get("horizon_bars", 1))
+    return 1
+
+
+def get_champion_prediction(
+    config: Config,
+    symbol: str,
+    horizon_label: str,
+    *,
+    journal: Optional[Any] = None,
+    trading_db_path: str = DEFAULT_TRADING_DB,
+) -> Optional[Dict[str, Any]]:
+    """The promoted price-call champion's live prediction for (symbol,
+    horizon), or None when no champion is promoted.
+
+    A price_call_{horizon} candidate is 'promoted' exactly when the tournament
+    has selected it as the winner for at least one regime in the symbol's
+    latest tournament event - i.e. it cleared the identical walk-forward
+    promotion bar every candidate must clear. When that holds, we train the
+    candidate's own calibrated up/down models on live 15m history and return
+    the latest closed bar's probability. When it doesn't, we return None and
+    the caller falls back to the unvalidated heuristic.
+
+    Reads the trading-system journal READ-ONLY (initialize=False); it never
+    writes to that database.
+    """
+    candidate_name = f"price_call_{horizon_label}"
+
+    j = journal
+    if j is None:
+        from trading_assistant.persistence.journal import Journal
+
+        j = Journal(trading_db_path, initialize=False)
+    try:
+        event = j.latest_tournament_event(symbol)
+    except Exception:  # noqa: BLE001 - a schema-behind / missing journal is just "no champion"
+        return None
+    if not event:
+        return None
+    winners = event.get("winners") or {}
+    promoted = any(
+        (sel or {}).get("winner") == candidate_name for sel in winners.values()
+    )
+    if not promoted:
+        return None
+
+    # Champion is promoted -> produce its real prediction from live 15m data.
+    import pandas as pd
+    from trading_assistant.strategies.price_call_candidate import predict_live_probability
+
+    raw = da.fetch_ohlcv(config, symbol, "15m", limit=_CHAMPION_HISTORY_BARS)
+    if not raw or len(raw) < _CHAMPION_MIN_BARS:
+        return None
+    frame = pd.DataFrame(raw)
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
+    frame = frame.set_index("timestamp")[["open", "high", "low", "close", "volume"]]
+    frame = frame.iloc[:-1]  # drop the in-progress candle; predict from the last CLOSED bar
+
+    horizon_bars = _champion_horizon_bars(horizon_label)
+    pred = predict_live_probability(frame, {"horizon_bars": horizon_bars})
+    if pred is None:
+        return None
+    p_up = float(pred["probability_up"])
+    return {
+        "probability_up": p_up,
+        "direction": "UP" if p_up >= 0.5 else "DOWN",
+        "confidence": max(p_up, 1.0 - p_up),
+        "champion_name": candidate_name,
+        "trained_rows": int(pred["trained_rows"]),
+    }
+
+
 def _make_call(config: Config, book: PriceCallBook, symbol: str,
-               horizon_seconds: int, horizon_label: str, forecast_tf: str) -> int:
+               horizon_seconds: int, horizon_label: str, forecast_tf: str,
+               *, journal: Optional[Any] = None,
+               trading_db_path: str = DEFAULT_TRADING_DB) -> int:
     from webapp.forecast import get_forecast
 
     forecast = get_forecast(config, symbol, forecast_tf)
@@ -324,27 +431,51 @@ def _make_call(config: Config, book: PriceCallBook, symbol: str,
     expected_move_pct = statistics.median(moves)
 
     price_now = _current_price(config, symbol)
-    p_up = next_candle["probability_up"]
-    up = p_up >= 0.5
+
+    # Prefer the promoted champion; fall back to the heuristic forecast when no
+    # champion is promoted for this (symbol, horizon). The magnitude is always
+    # the typical-move median - both engines predict DIRECTION only.
+    champion = None
+    try:
+        champion = get_champion_prediction(
+            config, symbol, horizon_label,
+            journal=journal, trading_db_path=trading_db_path,
+        )
+    except Exception:  # noqa: BLE001 - champion lookup must never block a heuristic call
+        logger.exception("champion lookup failed for %s %s", symbol, horizon_label)
+
+    if champion is not None:
+        direction = champion["direction"]
+        probability = champion["confidence"]
+        champion_backed = True
+    else:
+        p_up = next_candle["probability_up"]
+        direction = "UP" if p_up >= 0.5 else "DOWN"
+        probability = max(p_up, 1 - p_up)
+        champion_backed = False
+
+    up = direction == "UP"
     projected = price_now * (1 + expected_move_pct) if up else price_now * (1 - expected_move_pct)
 
     return book.create(
         symbol=symbol,
         price_at_call=price_now,
-        direction="UP" if up else "DOWN",
-        probability=max(p_up, 1 - p_up),
+        direction=direction,
+        probability=probability,
         hit_rate_at_call=next_candle["hit_rate"],
         projected_price=projected,
         expected_move_pct=expected_move_pct,
         horizon_seconds=horizon_seconds,
         horizon_label=horizon_label,
+        champion_backed=champion_backed,
         # Settle on the next wall-clock boundary (e.g. next :05 / :15), not
         # "now + horizon", so the call matches the clock time the user sees.
         due_at=_aligned_due_iso(horizon_seconds),
     )
 
 
-def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optional[List[str]] = None) -> None:
+def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optional[List[str]] = None,
+             trading_db_path: str = DEFAULT_TRADING_DB) -> None:
     """One pass of the call loop: settle everything due, then open a fresh
     call for any (symbol, horizon) without one. Runs every ~60s from the
     dashboard's background task, so settlement lands within a minute of due
@@ -357,6 +488,16 @@ def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optio
     """
     book = get_book(db_path)
     now = datetime.now(timezone.utc)
+
+    # Build one read-only journal for the whole pass so the champion lookup
+    # doesn't reopen the trading-system db once per (symbol, horizon).
+    journal = None
+    try:
+        from trading_assistant.persistence.journal import Journal
+        journal = Journal(trading_db_path, initialize=False)
+    except Exception:  # noqa: BLE001 - no journal just means "no champion", stay on heuristic
+        logger.exception("could not open trading journal at %s for champion lookup", trading_db_path)
+
     for call in book.due_unsettled():
         try:
             overdue = (now - datetime.fromisoformat(call["due_at"])).total_seconds()
@@ -375,6 +516,7 @@ def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optio
         for horizon_seconds, label, forecast_tf in HORIZONS:
             try:
                 if book.open_call(symbol, label) is None:
-                    _make_call(config, book, symbol, horizon_seconds, label, forecast_tf)
+                    _make_call(config, book, symbol, horizon_seconds, label, forecast_tf,
+                               journal=journal, trading_db_path=trading_db_path)
             except Exception:  # noqa: BLE001
                 logger.exception("failed to make %s price call for %s", label, symbol)
