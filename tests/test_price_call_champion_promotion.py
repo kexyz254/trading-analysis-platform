@@ -88,11 +88,20 @@ def test_champion_is_horizon_specific(tmp_path, monkeypatch):
     assert pc.get_champion_prediction(None, "BTC/USDT", "15m", journal=journal) is None
 
 
-def test_make_call_marks_champion_backed(tmp_path, monkeypatch):
+def _contract(symbol, open_ms=1_700_000_000_000):
+    from webapp.price_contract import Contract
+    return Contract(
+        symbol=symbol, horizon_label="5m", horizon_seconds=300,
+        contract_id=f"{symbol}|5m|{open_ms}", open_time_ms=open_ms,
+        close_time_ms=open_ms + 300_000, price_to_beat=100.0,
+        locked_at_ms=open_ms + 500, server_time_ms=open_ms + 480, source="wallclock",
+    )
+
+
+def test_prediction_marks_champion_backed_and_uses_price_to_beat(tmp_path, monkeypatch):
     book = pc.PriceCallBook(str(tmp_path / "analytics.db"))
 
     # Heuristic pieces stubbed so the test is deterministic and fast.
-    monkeypatch.setattr(pc, "_current_price", lambda cfg, sym: 100.0)
     monkeypatch.setattr(da, "fetch_ohlcv",
                         lambda *a, **k: [{"close": 100.0 + i * 0.01} for i in range(60)])
     import webapp.forecast as fc
@@ -102,23 +111,51 @@ def test_make_call_marks_champion_backed(tmp_path, monkeypatch):
         raising=False,
     )
 
-    # 1) Champion present -> champion_backed call, champion's direction wins.
+    # 1) Champion present -> champion_backed call, champion's direction wins,
+    #    and the recorded reference IS the contract's locked Price to Beat.
     monkeypatch.setattr(
         pc, "get_champion_prediction",
         lambda *a, **k: {"direction": "UP", "confidence": 0.9,
                          "probability_up": 0.9, "champion_name": "price_call_5m",
                          "trained_rows": 300},
     )
-    call_id = pc._make_call(None, book, "BTC/USDT", 300, "5m", "5m")
+    c = _contract("BTC/USDT")
+    call_id = pc._predict_for_contract(None, book, c, "5m")
     row = book.open_call("BTC/USDT", "5m")
     assert row["id"] == call_id
     assert row["champion_backed"] == 1
     assert row["direction"] == "UP"  # champion overrides the heuristic's DOWN lean
     assert abs(row["probability"] - 0.9) < 1e-9
+    assert abs(row["price_at_call"] - c.price_to_beat) < 1e-9
+    assert row["contract_id"] == c.contract_id
+    assert row["open_time_ms"] == c.open_time_ms and row["close_time_ms"] == c.close_time_ms
 
     # 2) No champion -> heuristic fallback, champion_backed=0.
     monkeypatch.setattr(pc, "get_champion_prediction", lambda *a, **k: None)
-    pc._make_call(None, book, "ETH/USDT", 300, "5m", "5m")
+    pc._predict_for_contract(None, book, _contract("ETH/USDT"), "5m")
     row2 = book.open_call("ETH/USDT", "5m")
     assert row2["champion_backed"] == 0
     assert row2["direction"] == "DOWN"  # p_up=0.4 -> DOWN
+
+
+def test_duplicate_contract_prediction_prevented(tmp_path, monkeypatch):
+    """A second prediction for the same contract_id must be a no-op - the
+    engine (and the UNIQUE index) enforce exactly one call per round."""
+    book = pc.PriceCallBook(str(tmp_path / "analytics.db"))
+    monkeypatch.setattr(da, "fetch_ohlcv",
+                        lambda *a, **k: [{"close": 100.0 + i * 0.01} for i in range(60)])
+    import webapp.forecast as fc
+    monkeypatch.setattr(fc, "get_forecast",
+                        lambda *a, **k: {"horizons": [{"probability_up": 0.6, "hit_rate": 0.5}]},
+                        raising=False)
+    monkeypatch.setattr(pc, "get_champion_prediction", lambda *a, **k: None)
+
+    c = _contract("BTC/USDT")
+    first = pc._predict_for_contract(None, book, c, "5m")
+    assert first is not None
+    assert book.has_contract(c.contract_id)
+    second = pc._predict_for_contract(None, book, c, "5m")  # same contract again
+    assert second is None
+    # exactly one row for the contract
+    assert len(book.settled_calls("BTC/USDT")) == 0  # none settled yet
+    assert book.open_call("BTC/USDT", "5m")["id"] == first

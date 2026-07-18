@@ -1,19 +1,32 @@
-"""Self-scoring 5-minute price calls for the pro dashboard.
+"""Contract-synchronized, self-scoring price calls for the pro dashboard.
 
-Every 5 minutes, for each configured symbol, this records a "call": the
-current price, a direction (from the same 5m-timeframe model the forecast
-card uses), and a projected target price = current price moved by the
-symbol's TYPICAL recent 5-minute move (median absolute close-to-close
-change) in the predicted direction. The magnitude is deliberately a
-median, not a model output - the models predict direction only, and
-dressing a direction call up as a precise price prediction would be
-fabrication.
+The engine synchronizes to prediction-contract lifecycles instead of anchoring
+to the continuously drifting spot price. For each (symbol, horizon) it runs an
+event-driven state machine (see PriceCallEngine): detect the current contract
+(a clock-aligned 5m / 15m round), LOCK its "Price to Beat" - the reference
+price at the round's open - along with the contract id and millisecond open/
+close/server timestamps, run AI inference ONCE against that locked reference,
+record the prediction, then at the round's close settle the real price against
+the SAME locked Price to Beat, log the result, and roll to the next contract.
+Exactly one prediction is recorded per contract (enforced by a UNIQUE index).
 
-What makes this usable rather than decorative: every call is SETTLED
-against the real price when its 5 minutes are up, and the API returns the
-running score (percent correct, average miss) alongside the current call.
-The track record accumulates 24/7 in the background regardless of whether
-anyone has the dashboard open.
+Live spot market data is still used - but only as INPUT FEATURES to the model
+(RSI, momentum, volatility, moving averages, order flow, via webapp.forecast
+and the promoted champion). The decision THRESHOLD and the projection
+reference are the locked Price to Beat, not live spot, so a call answers the
+contract's exact question: "will the price be above/below the Price to Beat
+when this round closes?" The projected target magnitude is the symbol's
+typical per-candle move (a median, not a model output - the models predict
+direction only; dressing a direction up as a precise price would be
+fabrication).
+
+What makes this usable rather than decorative: every call is SETTLED against
+the real price when its contract closes, and the API returns the running score
+(percent correct, average miss) alongside the current call. The track record
+accumulates 24/7 in the background regardless of whether anyone has the
+dashboard open. The contract lifecycle itself lives in webapp/price_contract.py
+behind a provider seam (WebSocket-preferred / polling-fallback is the
+provider's concern), so the engine is agnostic to how contracts are sourced.
 
 Storage note - this MUST live in its own database file, never in
 trading_system.db. docker-compose bind-mounts trading_system.db as a
@@ -38,10 +51,13 @@ from functools import lru_cache
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from trading_assistant.config import Config
 from webapp import data_access as da
+
+if TYPE_CHECKING:  # imported for annotations only; avoids any import-time coupling
+    from webapp.price_contract import Contract, ContractProvider
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +108,32 @@ CREATE TABLE IF NOT EXISTS price_calls (
     -- 1 when the direction came from a promoted tournament champion
     -- (price_call_{horizon}); 0 when it came from the unvalidated heuristic
     -- forecast fallback. Lets the dashboard say which engine made the call.
-    champion_backed INTEGER NOT NULL DEFAULT 0
+    champion_backed INTEGER NOT NULL DEFAULT 0,
+    -- Prediction-contract lifecycle (see webapp/price_contract.py). A call is
+    -- now one prediction for one contract: contract_id is unique so exactly
+    -- one prediction is ever recorded per round (duplicate prevention). The
+    -- *_ms columns carry millisecond-precision timing; price_at_call holds the
+    -- LOCKED Price to Beat (the contract's open reference). Legacy rows made
+    -- before contracts have NULL here.
+    contract_id TEXT,
+    open_time_ms INTEGER,
+    close_time_ms INTEGER,
+    server_time_ms INTEGER,
+    locked_at_ms INTEGER
 );
 """
-# The index is created AFTER the column migration in __init__, not here: on
-# a legacy db it references horizon_label before the ALTER has added it.
+# Indexes are created AFTER the column migration in __init__, not here: on a
+# legacy db they reference columns before the ALTER has added them.
 _INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_price_calls_symbol_horizon ON price_calls (symbol, horizon_label, id)"
+# The unique index is what actually enforces "one prediction per contract" at
+# the storage layer - a second insert for the same contract_id fails with
+# IntegrityError, which create() turns into a no-op. NULL contract_id (legacy /
+# non-contract rows) is exempt: SQLite treats NULLs as distinct in a UNIQUE
+# index, so any number of them coexist.
+_CONTRACT_UNIQUE_SQL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_price_calls_contract_id "
+    "ON price_calls (contract_id) WHERE contract_id IS NOT NULL"
+)
 
 
 # Default path for the dashboard-owned analytics database - inside the
@@ -139,7 +175,19 @@ class PriceCallBook:
             # to a promoted tournament champion; legacy rows were all heuristic.
             if "champion_backed" not in columns:
                 conn.execute("ALTER TABLE price_calls ADD COLUMN champion_backed INTEGER NOT NULL DEFAULT 0")
-            conn.execute(_INDEX_SQL)  # after the ALTERs, so the column exists
+            # Contract-lifecycle columns added when the engine became
+            # contract-synchronized; legacy rows keep NULL (pre-contract).
+            for col, decl in (
+                ("contract_id", "TEXT"),
+                ("open_time_ms", "INTEGER"),
+                ("close_time_ms", "INTEGER"),
+                ("server_time_ms", "INTEGER"),
+                ("locked_at_ms", "INTEGER"),
+            ):
+                if col not in columns:
+                    conn.execute(f"ALTER TABLE price_calls ADD COLUMN {col} {decl}")
+            conn.execute(_INDEX_SQL)  # after the ALTERs, so the columns exist
+            conn.execute(_CONTRACT_UNIQUE_SQL)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -169,24 +217,49 @@ class PriceCallBook:
         champion_backed: bool = False,
         made_at: Optional[str] = None,
         due_at: Optional[str] = None,
-    ) -> int:
+        contract_id: Optional[str] = None,
+        open_time_ms: Optional[int] = None,
+        close_time_ms: Optional[int] = None,
+        server_time_ms: Optional[int] = None,
+        locked_at_ms: Optional[int] = None,
+    ) -> Optional[int]:
+        """Record one prediction. Returns the new row id, or None if a row for
+        this contract_id already exists (duplicate prevention: the UNIQUE index
+        on contract_id makes a second insert for the same round a no-op rather
+        than a double count)."""
         made = made_at or self._now_iso()
         due = due_at or (datetime.fromisoformat(made) + timedelta(seconds=horizon_seconds)).isoformat()
         with closing(self._connect()) as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO price_calls
-                    (symbol, made_at, due_at, price_at_call, direction, probability,
+            try:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO price_calls
+                        (symbol, made_at, due_at, price_at_call, direction, probability,
+                         hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds,
+                         horizon_label, champion_backed, contract_id, open_time_ms,
+                         close_time_ms, server_time_ms, locked_at_ms)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (symbol, made, due, price_at_call, direction, probability,
                      hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds,
-                     horizon_label, champion_backed)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (symbol, made, due, price_at_call, direction, probability,
-                 hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds,
-                 horizon_label, 1 if champion_backed else 0),
-            )
-            conn.commit()
-            return int(cursor.lastrowid)
+                     horizon_label, 1 if champion_backed else 0, contract_id, open_time_ms,
+                     close_time_ms, server_time_ms, locked_at_ms),
+                )
+                conn.commit()
+                return int(cursor.lastrowid)
+            except sqlite3.IntegrityError:
+                # Another prediction for this contract already exists - the
+                # round has been called. Idempotent no-op.
+                return None
+
+    def has_contract(self, contract_id: str) -> bool:
+        """Whether a prediction has already been recorded for this contract -
+        the state check the engine uses to avoid re-predicting a round."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM price_calls WHERE contract_id = ? LIMIT 1", (contract_id,)
+            ).fetchone()
+        return row is not None
 
     def open_call(self, symbol: str, horizon_label: str = "5m") -> Optional[Dict[str, Any]]:
         with closing(self._connect()) as conn:
@@ -502,12 +575,50 @@ def get_champion_prediction(
     }
 
 
-def _make_call(config: Config, book: PriceCallBook, symbol: str,
-               horizon_seconds: int, horizon_label: str, forecast_tf: str,
-               *, journal: Optional[Any] = None,
-               trading_db_path: str = DEFAULT_TRADING_DB) -> int:
+def _server_time_ms(config: Config) -> Optional[int]:
+    """Exchange server clock in epoch ms, best-effort. Recorded alongside each
+    locked contract so timing can be audited against the exchange, not just the
+    dashboard host clock. Never raises - server time is metadata."""
+    try:
+        exchange = da.get_exchange(config)
+        t = exchange.fetch_time()
+        return int(t) if t is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _build_provider(config: Config) -> "ContractProvider":
+    """The default contract source: clock-aligned exchange candles (see
+    price_contract.WallClockContractProvider). WebSocket-vs-polling is the
+    provider's concern; the engine only asks 'what's the current contract?'."""
+    from webapp.price_contract import WallClockContractProvider
+
+    return WallClockContractProvider(
+        kline_fetch=lambda sym, tf, limit: da.fetch_ohlcv(config, sym, tf, limit=limit),
+        server_time_fetch=lambda: _server_time_ms(config),
+    )
+
+
+def _predict_for_contract(
+    config: Config,
+    book: PriceCallBook,
+    contract: "Contract",
+    forecast_tf: str,
+    *,
+    journal: Optional[Any] = None,
+    trading_db_path: str = DEFAULT_TRADING_DB,
+) -> Optional[int]:
+    """Run AI inference for ONE contract and record exactly one prediction
+    against its LOCKED Price to Beat. Direction is the promoted champion's if
+    one exists for this (symbol, horizon), else the heuristic forecast's
+    (marked unvalidated). The projected target is the Price to Beat moved by
+    the symbol's typical per-candle move - both engines predict direction only.
+
+    Returns the new row id, or None if this contract was already predicted
+    (duplicate prevention) or there was not enough data to infer."""
     from webapp.forecast import get_forecast
 
+    symbol = contract.symbol
     forecast = get_forecast(config, symbol, forecast_tf)
     next_candle = forecast["horizons"][0]
 
@@ -518,19 +629,14 @@ def _make_call(config: Config, book: PriceCallBook, symbol: str,
     moves = [abs(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
     expected_move_pct = statistics.median(moves)
 
-    price_now = _current_price(config, symbol)
-
-    # Prefer the promoted champion; fall back to the heuristic forecast when no
-    # champion is promoted for this (symbol, horizon). The magnitude is always
-    # the typical-move median - both engines predict DIRECTION only.
     champion = None
     try:
         champion = get_champion_prediction(
-            config, symbol, horizon_label,
+            config, symbol, contract.horizon_label,
             journal=journal, trading_db_path=trading_db_path,
         )
     except Exception:  # noqa: BLE001 - champion lookup must never block a heuristic call
-        logger.exception("champion lookup failed for %s %s", symbol, horizon_label)
+        logger.exception("champion lookup failed for %s %s", symbol, contract.horizon_label)
 
     if champion is not None:
         direction = champion["direction"]
@@ -542,43 +648,160 @@ def _make_call(config: Config, book: PriceCallBook, symbol: str,
         probability = max(p_up, 1 - p_up)
         champion_backed = False
 
-    up = direction == "UP"
-    projected = price_now * (1 + expected_move_pct) if up else price_now * (1 - expected_move_pct)
+    # The decision threshold and the projection reference are BOTH the locked
+    # Price to Beat - not live spot - so the call answers the contract's exact
+    # question ("above/below the Price to Beat at close?").
+    ptb = contract.price_to_beat
+    projected = ptb * (1 + expected_move_pct) if direction == "UP" else ptb * (1 - expected_move_pct)
 
     return book.create(
         symbol=symbol,
-        price_at_call=price_now,
+        price_at_call=ptb,
         direction=direction,
         probability=probability,
         hit_rate_at_call=next_candle["hit_rate"],
         projected_price=projected,
         expected_move_pct=expected_move_pct,
-        horizon_seconds=horizon_seconds,
-        horizon_label=horizon_label,
+        horizon_seconds=contract.horizon_seconds,
+        horizon_label=contract.horizon_label,
         champion_backed=champion_backed,
-        # Settle on the next wall-clock boundary (e.g. next :05 / :15), not
-        # "now + horizon", so the call matches the clock time the user sees.
-        due_at=_aligned_due_iso(horizon_seconds),
+        due_at=contract.close_iso,   # settle exactly at the contract's close boundary
+        contract_id=contract.contract_id,
+        open_time_ms=contract.open_time_ms,
+        close_time_ms=contract.close_time_ms,
+        server_time_ms=contract.server_time_ms,
+        locked_at_ms=contract.locked_at_ms,
     )
+
+
+class PriceCallEngine:
+    """Event-driven state machine that keeps price calls synchronized to
+    prediction-contract lifecycles.
+
+    Per (symbol, horizon) it walks: WAIT for the current contract -> if not yet
+    predicted, LOCK its Price to Beat + timing and run inference to record ONE
+    prediction (PREDICTED) -> when the contract closes, SETTLE the real price
+    against the locked Price to Beat and log the result -> repeat for the next
+    contract. The analytics db is the state store: a contract is 'predicted'
+    iff a row with its contract_id exists, and 'settled' iff that row has a
+    settled_at - so the machine is crash-safe and resumes cleanly.
+
+    One tick() is one pass; the dashboard calls it every ~60s. It is idempotent
+    and duplicate-safe: re-ticking the same contract does nothing.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        book: PriceCallBook,
+        provider: "ContractProvider",
+        *,
+        symbols: Optional[List[str]] = None,
+        journal: Optional[Any] = None,
+        trading_db_path: str = DEFAULT_TRADING_DB,
+        now_fn: Optional[Any] = None,
+    ):
+        self.config = config
+        self.book = book
+        self.provider = provider
+        self._symbols = symbols
+        self.journal = journal
+        self.trading_db_path = trading_db_path
+        # Injectable clock so settlement timing is deterministic under test.
+        self._now = now_fn or (lambda: datetime.now(timezone.utc))
+
+    def symbols(self) -> List[str]:
+        return list(self._symbols) if self._symbols is not None else list(self.config.symbols)
+
+    def tick(self) -> None:
+        # Settlement first: close out finished contracts before opening the
+        # next round's prediction, so a symbol never carries two live calls.
+        self._settle_due()
+        for symbol in self.symbols():
+            for horizon_seconds, label, forecast_tf in HORIZONS:
+                self._advance(symbol, horizon_seconds, label, forecast_tf)
+
+    def _advance(self, symbol: str, horizon_seconds: int, label: str, forecast_tf: str) -> None:
+        try:
+            contract = self.provider.current_contract(symbol, horizon_seconds, label)
+            if contract is None:
+                logger.debug("no %s contract for %s yet (awaiting candle)", label, symbol)
+                return
+            if self.book.has_contract(contract.contract_id):
+                return  # already PREDICTED this round - nothing to do
+            row_id = _predict_for_contract(
+                self.config, self.book, contract, forecast_tf,
+                journal=self.journal, trading_db_path=self.trading_db_path,
+            )
+            if row_id is None:
+                # Either a concurrent tick won the race (dup prevented) or there
+                # wasn't enough data to infer; both are safe no-ops.
+                logger.info("contract %s not recorded (duplicate or insufficient data)",
+                            contract.contract_id)
+                return
+            logger.info(
+                "PREDICTED contract=%s ptb=%.8g open=%s close=%s lock_latency_ms=%d server_time_ms=%s",
+                contract.contract_id, contract.price_to_beat, contract.open_iso,
+                contract.close_iso, contract.lock_latency_ms, contract.server_time_ms,
+            )
+        except Exception:  # noqa: BLE001 - one (symbol, horizon) failure must not block the rest
+            logger.exception("failed to advance %s %s contract", symbol, label)
+
+    def _settle_due(self) -> None:
+        now = self._now()
+        for call in self.book.due_unsettled(now_iso=now.isoformat()):
+            try:
+                self._settle_one(call, now)
+            except Exception:  # noqa: BLE001 - one symbol's failure must not block the rest
+                logger.exception("failed to settle price call %s", call["id"])
+
+    def _settle_one(self, call: Dict[str, Any], now: datetime) -> None:
+        overdue = (now - datetime.fromisoformat(call["due_at"])).total_seconds()
+        if overdue > SETTLE_GRACE_SECONDS:
+            # Contract closed while the process was down - the only price
+            # available is long past the settle mark; scoring it would
+            # contaminate the track record, so void it instead.
+            self.book.void(call["id"])
+            logger.info("VOIDED call=%s contract=%s (%.0fs overdue)",
+                        call["id"], call.get("contract_id"), overdue)
+            return
+
+        # Prefer the contract's own closing candle (exact, exchange-recorded
+        # price at the close boundary); fall back to the freshest spot price
+        # while still inside the grace window.
+        settle_price: Optional[float] = None
+        if call.get("open_time_ms") is not None and call.get("close_time_ms") is not None:
+            settle_price = self.provider.settlement_price(
+                call["symbol"], call["horizon_label"],
+                int(call["open_time_ms"]), int(call["close_time_ms"]),
+            )
+        if settle_price is None:
+            settle_price = _current_price(self.config, call["symbol"])
+
+        self.book.settle(call["id"], settle_price)
+        logger.info(
+            "SETTLED call=%s contract=%s price_to_beat=%.8g settle_price=%.8g",
+            call["id"], call.get("contract_id"), call["price_at_call"], settle_price,
+        )
 
 
 def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optional[List[str]] = None,
              trading_db_path: str = DEFAULT_TRADING_DB) -> None:
-    """One pass of the call loop: settle everything due, then open a fresh
-    call for any (symbol, horizon) without one. Runs every ~60s from the
-    dashboard's background task, so settlement lands within a minute of due
-    time and a new call opens right after the old one settles - one call per
-    symbol per horizon (5m, 15m), each tracked and scored independently.
+    """One tick of the contract-synchronized Price Call Engine: settle every
+    contract that has closed, then for each (symbol, horizon) detect the
+    current prediction contract and, if it has not been predicted yet, lock its
+    Price to Beat and record exactly one prediction.
 
-    Calls are made only for the config seed symbols, not the full discovery
-    universe: each costs a cached forecast model and the dashboard container
-    has a hard memory cap.
+    Runs every ~60s from the dashboard's background task. Idempotent and
+    duplicate-safe - re-running a tick never double-records a contract. Calls
+    are made only for the config seed symbols (each costs a cached forecast
+    model and the dashboard container has a hard memory cap), not the full
+    discovery universe. Signature preserved for the caller in server.py.
     """
     book = get_book(db_path)
-    now = datetime.now(timezone.utc)
 
-    # Build one read-only journal for the whole pass so the champion lookup
-    # doesn't reopen the trading-system db once per (symbol, horizon).
+    # One read-only journal for the whole tick so the champion lookup doesn't
+    # reopen the trading-system db per (symbol, horizon).
     journal = None
     try:
         from trading_assistant.persistence.journal import Journal
@@ -586,19 +809,12 @@ def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optio
     except Exception:  # noqa: BLE001 - no journal just means "no champion", stay on heuristic
         logger.exception("could not open trading journal at %s for champion lookup", trading_db_path)
 
-    for call in book.due_unsettled():
-        try:
-            overdue = (now - datetime.fromisoformat(call["due_at"])).total_seconds()
-            if overdue > SETTLE_GRACE_SECONDS:
-                # Came due while the process was down - the only price we have
-                # is from far past the settle mark; scoring it would
-                # contaminate the track record, so void it instead.
-                book.void(call["id"])
-                logger.info("voided price call %s (%.0fs overdue)", call["id"], overdue)
-                continue
-            book.settle(call["id"], _current_price(config, call["symbol"]))
-        except Exception:  # noqa: BLE001 - one symbol's failure must not block the rest
-            logger.exception("failed to settle price call %s", call["id"])
+    provider = _build_provider(config)
+    engine = PriceCallEngine(
+        config, book, provider,
+        symbols=symbols, journal=journal, trading_db_path=trading_db_path,
+    )
+    engine.tick()
 
     for symbol in symbols or config.symbols:
         for horizon_seconds, label, forecast_tf in HORIZONS:
