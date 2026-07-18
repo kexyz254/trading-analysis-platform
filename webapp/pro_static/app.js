@@ -302,9 +302,11 @@ function updatePriceHeader() {
     }
 }
 
-// --- 5-minute self-scoring price call card ---
-let _callPriceLine = null;
-let _callDueAt = null;
+// --- Price Call Engine: 5m + 15m, self-scoring, with confidence signals ---
+// Chart price lines for the currently-open calls (one per horizon), and the
+// due-times keyed by horizon so the countdowns tick independently.
+let _callPriceLines = {};   // horizon -> priceLine
+let _callDueAt = {};        // horizon -> epoch ms
 
 async function loadPriceCall() {
     try {
@@ -312,54 +314,75 @@ async function loadPriceCall() {
         if (data === null) return;
         const content = document.getElementById('call-content');
 
-        if (_callPriceLine) { candleSeries.removePriceLine(_callPriceLine); _callPriceLine = null; }
-        _callDueAt = null;
+        // Clear old chart lines/countdowns; rebuild from the fresh payload.
+        Object.values(_callPriceLines).forEach(l => { try { candleSeries.removePriceLine(l); } catch (e) {} });
+        _callPriceLines = {};
+        _callDueAt = {};
 
-        const parts = [];
-        const call = data.open_call;
-        if (call) {
-            const up = call.direction === 'UP';
-            _callDueAt = Date.parse(call.due_at);
-            parts.push(`
-                <div class="call-main ${up ? 'up' : 'down'}">
-                    ${up ? '▲' : '▼'} ${call.direction} to $${formatPrice(call.projected_price)}
-                    <span class="call-countdown" id="call-countdown"></span>
-                </div>
-                <div class="call-sub">from $${formatPrice(call.price_at_call)} · model ${(call.probability * 100).toFixed(0)}% · typical 5m move ${(call.expected_move_pct * 100).toFixed(2)}%</div>`);
-            _callPriceLine = candleSeries.createPriceLine({
-                price: call.projected_price,
-                color: up ? '#00FFC2' : '#FF3366',
-                lineWidth: 1,
-                lineStyle: LightweightCharts.LineStyle.Dashed,
-                axisLabelVisible: true,
-                title: `5m ${call.direction}`,
-            });
-        } else {
-            parts.push('<div class="call-sub">No open call (calls run for configured symbols only)</div>');
-        }
-
-        if (data.stats && data.stats.n > 0) {
-            const acc = (data.stats.accuracy * 100).toFixed(0);
-            const miss = (data.stats.avg_miss_pct * 100).toFixed(2);
-            const dots = data.recent.map(r =>
-                `<span class="call-dot ${r.correct ? 'hit' : 'miss'}" title="${r.direction} ${r.correct ? 'correct' : 'wrong'}">${r.correct ? '✓' : '✗'}</span>`
-            ).join('');
-            parts.push(`<div class="call-score">Last ${data.stats.n}: <strong>${acc}%</strong> correct · avg miss ${miss}%</div>`);
-            parts.push(`<div class="call-dots">${dots}</div>`);
-        } else {
-            parts.push('<div class="call-sub">No settled calls yet — score appears after the first few settle.</div>');
-        }
-        content.innerHTML = parts.join('');
+        const blocks = (data.horizons || []).map(h => renderHorizon(h)).join('');
+        content.innerHTML = blocks || '<div class="call-sub">No calls yet (runs for configured symbols only)</div>';
         updateCallCountdown();
     } catch (e) { /* ignore */ }
 }
 
+function renderHorizon(h) {
+    const call = h.open_call;
+    const stats = h.stats || {};
+    const sig = h.signal;
+    let html = `<div class="call-horizon"><div class="call-hz-label">${h.horizon} call</div>`;
+
+    // Confidence signal (only present when confidence >= threshold).
+    if (sig) {
+        const scls = sig.side === 'BUY' ? 'buy' : 'sell';
+        html += `<div class="call-signal ${scls} ${sig.validated ? 'validated' : ''}">
+            ⚡ ${sig.side} SIGNAL · ${(sig.confidence * 100).toFixed(0)}%
+            <span class="call-sig-note">${sig.note}</span></div>`;
+    }
+
+    if (call) {
+        const up = call.direction === 'UP';
+        _callDueAt[h.horizon] = Date.parse(call.due_at);
+        html += `<div class="call-main ${up ? 'up' : 'down'}">
+                ${up ? '▲' : '▼'} ${call.direction} → $${formatPrice(call.projected_price)}
+                <span class="call-countdown" data-hz="${h.horizon}"></span></div>
+            <div class="call-sub">from $${formatPrice(call.price_at_call)} · confidence ${(call.probability * 100).toFixed(0)}% · typ. move ${(call.expected_move_pct * 100).toFixed(2)}%</div>`;
+        _callPriceLines[h.horizon] = candleSeries.createPriceLine({
+            price: call.projected_price,
+            color: up ? '#00FFC2' : '#FF3366',
+            lineWidth: 1,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `${h.horizon} ${call.direction}`,
+        });
+    } else {
+        html += '<div class="call-sub">Opening first call…</div>';
+    }
+
+    // Performance for this horizon.
+    if (stats.n > 0) {
+        const acc = (stats.accuracy * 100).toFixed(0);
+        const miss = (stats.avg_miss_pct * 100).toFixed(2);
+        const edge = stats.accuracy >= 0.55 ? 'edge' : stats.accuracy <= 0.45 ? 'poor' : 'flat';
+        const dots = (h.recent || []).map(r =>
+            `<span class="call-dot ${r.correct ? 'hit' : 'miss'}">${r.correct ? '✓' : '✗'}</span>`).join('');
+        html += `<div class="call-score">Last ${stats.n}: <strong class="acc-${edge}">${acc}%</strong> correct · avg miss ${miss}%</div>
+                 <div class="call-dots">${dots}</div>`;
+    } else {
+        html += '<div class="call-sub dim">score builds as calls settle…</div>';
+    }
+    html += '</div>';
+    return html;
+}
+
 function updateCallCountdown() {
-    const el = document.getElementById('call-countdown');
-    if (!el || !_callDueAt) return;
-    const remaining = Math.max(0, Math.floor((_callDueAt - Date.now()) / 1000));
-    const m = Math.floor(remaining / 60), s = remaining % 60;
-    el.textContent = remaining > 0 ? `settles in ${m}:${String(s).padStart(2, '0')}` : 'settling…';
+    document.querySelectorAll('.call-countdown').forEach(el => {
+        const hz = el.dataset.hz;
+        const due = _callDueAt[hz];
+        if (!due) return;
+        const remaining = Math.max(0, Math.floor((due - Date.now()) / 1000));
+        const m = Math.floor(remaining / 60), s = remaining % 60;
+        el.textContent = remaining > 0 ? `settles in ${m}:${String(s).padStart(2, '0')}` : 'settling…';
+    });
 }
 setInterval(updateCallCountdown, 1000);
 

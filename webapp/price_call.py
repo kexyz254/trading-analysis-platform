@@ -45,15 +45,27 @@ from webapp import data_access as da
 
 logger = logging.getLogger(__name__)
 
-CALL_HORIZON_SECONDS = 300
+# The horizons this engine calls, each independently tracked and scored:
+# (seconds-to-settle, display label, forecast timeframe the direction model
+# is trained on). Both are driven by the same real per-timeframe forecast
+# models (webapp.forecast) and settled against the real price at expiry.
+HORIZONS = [(300, "5m", "5m"), (900, "15m", "15m")]
+
 # A due call settled more than this long after its due time is VOIDED, not
-# scored - the loop runs every ~60s, so anything later than this means the
-# process was down and the only available price is from long after the
-# 5-minute mark.
+# scored - the loop runs every ~60s, so anything later means the process was
+# down and the only price available is from long after the settle mark.
 SETTLE_GRACE_SECONDS = 120
-# Median |5m move| is computed over this many recent closed candles.
+# Median |per-candle move| window (bars of the forecast timeframe).
 _MOVE_WINDOW_BARS = 120
 _STATS_WINDOW = 50
+
+# A call becomes a tradeable SIGNAL only when the model is this confident.
+CONFIDENCE_SIGNAL_THRESHOLD = 0.80
+# ...and the signal is only marked VALIDATED when this horizon has a real,
+# above-coin-flip track record - so an overconfident-but-wrong model can't
+# masquerade as a sweet spot.
+_VALIDATED_MIN_N = 20
+_VALIDATED_MIN_ACCURACY = 0.55
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS price_calls (
@@ -71,16 +83,17 @@ CREATE TABLE IF NOT EXISTS price_calls (
     correct INTEGER,
     miss_pct REAL,
     settled_at TEXT,
-    -- 1 = call could not be settled honestly (came due while the process
-    -- was down, so the only available price is from far after the 5-minute
-    -- mark). Voided calls are excluded from stats and the results strip -
-    -- scoring a "5-minute" call against a price from hours later would
-    -- contaminate the exact track record this table exists to keep honest.
-    voided INTEGER NOT NULL DEFAULT 0
+    voided INTEGER NOT NULL DEFAULT 0,
+    -- Which horizon this call belongs to (5m / 15m), tracked and scored
+    -- independently. Added after the first single-horizon deploy - existing
+    -- rows are backfilled to the original 5m horizon (see the migration).
+    horizon_seconds INTEGER NOT NULL DEFAULT 300,
+    horizon_label TEXT NOT NULL DEFAULT '5m'
 );
-
-CREATE INDEX IF NOT EXISTS idx_price_calls_symbol_id ON price_calls (symbol, id);
 """
+# The index is created AFTER the column migration in __init__, not here: on
+# a legacy db it references horizon_label before the ALTER has added it.
+_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_price_calls_symbol_horizon ON price_calls (symbol, horizon_label, id)"
 
 
 # Default path for the dashboard-owned analytics database - inside the
@@ -111,6 +124,14 @@ class PriceCallBook:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(price_calls)").fetchall()}
             if "voided" not in columns:
                 conn.execute("ALTER TABLE price_calls ADD COLUMN voided INTEGER NOT NULL DEFAULT 0")
+            # Multi-horizon columns added after the single-horizon deploy;
+            # existing rows were all 5m calls, so the defaults backfill them
+            # correctly (same idempotent PRAGMA + ALTER pattern as above).
+            if "horizon_seconds" not in columns:
+                conn.execute("ALTER TABLE price_calls ADD COLUMN horizon_seconds INTEGER NOT NULL DEFAULT 300")
+            if "horizon_label" not in columns:
+                conn.execute("ALTER TABLE price_calls ADD COLUMN horizon_label TEXT NOT NULL DEFAULT '5m'")
+            conn.execute(_INDEX_SQL)  # after the ALTERs, so the column exists
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -135,32 +156,33 @@ class PriceCallBook:
         hit_rate_at_call: Optional[float],
         projected_price: float,
         expected_move_pct: float,
+        horizon_seconds: int = 300,
+        horizon_label: str = "5m",
         made_at: Optional[str] = None,
         due_at: Optional[str] = None,
     ) -> int:
         made = made_at or self._now_iso()
-        due = due_at or (
-            datetime.fromisoformat(made) + timedelta(seconds=CALL_HORIZON_SECONDS)
-        ).isoformat()
+        due = due_at or (datetime.fromisoformat(made) + timedelta(seconds=horizon_seconds)).isoformat()
         with closing(self._connect()) as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO price_calls
                     (symbol, made_at, due_at, price_at_call, direction, probability,
-                     hit_rate_at_call, projected_price, expected_move_pct)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds, horizon_label)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (symbol, made, due, price_at_call, direction, probability,
-                 hit_rate_at_call, projected_price, expected_move_pct),
+                 hit_rate_at_call, projected_price, expected_move_pct, horizon_seconds, horizon_label),
             )
             conn.commit()
             return int(cursor.lastrowid)
 
-    def open_call(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def open_call(self, symbol: str, horizon_label: str = "5m") -> Optional[Dict[str, Any]]:
         with closing(self._connect()) as conn:
             row = conn.execute(
-                "SELECT * FROM price_calls WHERE symbol = ? AND settled_at IS NULL ORDER BY id DESC LIMIT 1",
-                (symbol,),
+                "SELECT * FROM price_calls WHERE symbol = ? AND horizon_label = ? AND settled_at IS NULL "
+                "ORDER BY id DESC LIMIT 1",
+                (symbol, horizon_label),
             ).fetchone()
         return dict(row) if row is not None else None
 
@@ -202,26 +224,26 @@ class PriceCallBook:
             )
             conn.commit()
 
-    def recent_settled(self, symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
+    def recent_settled(self, symbol: str, horizon_label: str = "5m", limit: int = 20) -> List[Dict[str, Any]]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT * FROM price_calls WHERE symbol = ? AND settled_at IS NOT NULL AND voided = 0 "
-                "ORDER BY id DESC LIMIT ?",
-                (symbol, limit),
+                "SELECT * FROM price_calls WHERE symbol = ? AND horizon_label = ? "
+                "AND settled_at IS NOT NULL AND voided = 0 ORDER BY id DESC LIMIT ?",
+                (symbol, horizon_label, limit),
             ).fetchall()
         records = [dict(row) for row in rows]
         records.reverse()
         return records
 
-    def stats(self, symbol: str, window: int = _STATS_WINDOW) -> Dict[str, Any]:
+    def stats(self, symbol: str, horizon_label: str = "5m", window: int = _STATS_WINDOW) -> Dict[str, Any]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """
                 SELECT correct, miss_pct FROM price_calls
-                WHERE symbol = ? AND settled_at IS NOT NULL AND voided = 0
+                WHERE symbol = ? AND horizon_label = ? AND settled_at IS NOT NULL AND voided = 0
                 ORDER BY id DESC LIMIT ?
                 """,
-                (symbol, window),
+                (symbol, horizon_label, window),
             ).fetchall()
         if not rows:
             return {"n": 0, "accuracy": None, "avg_miss_pct": None}
@@ -242,16 +264,44 @@ def _current_price(config: Config, symbol: str) -> float:
     return float(raw[-1]["close"])
 
 
-def _make_call(config: Config, book: PriceCallBook, symbol: str) -> int:
+def signal_for(open_call: Optional[Dict[str, Any]], stats: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A tradeable BUY/SELL signal, or None. Fires only when the model's
+    confidence clears CONFIDENCE_SIGNAL_THRESHOLD; it is marked VALIDATED
+    only when this horizon has a real, above-coin-flip track record, so an
+    overconfident-but-historically-wrong model can't pose as a sweet spot."""
+    if not open_call or open_call.get("probability") is None:
+        return None
+    conf = float(open_call["probability"])
+    if conf < CONFIDENCE_SIGNAL_THRESHOLD:
+        return None
+    n = stats.get("n") or 0
+    acc = stats.get("accuracy")
+    validated = n >= _VALIDATED_MIN_N and acc is not None and acc >= _VALIDATED_MIN_ACCURACY
+    if n < _VALIDATED_MIN_N:
+        note = f"unproven — only {n} settled call{'s' if n != 1 else ''} so far"
+    elif validated:
+        note = f"validated — {acc * 100:.0f}% correct over last {n}"
+    else:
+        note = f"caution — only {acc * 100:.0f}% correct over last {n} (near coin-flip)"
+    return {
+        "side": "BUY" if open_call["direction"] == "UP" else "SELL",
+        "confidence": conf,
+        "validated": validated,
+        "note": note,
+    }
+
+
+def _make_call(config: Config, book: PriceCallBook, symbol: str,
+               horizon_seconds: int, horizon_label: str, forecast_tf: str) -> int:
     from webapp.forecast import get_forecast
 
-    forecast = get_forecast(config, symbol, "5m")
+    forecast = get_forecast(config, symbol, forecast_tf)
     next_candle = forecast["horizons"][0]
 
-    raw = da.fetch_ohlcv(config, symbol, "5m", limit=_MOVE_WINDOW_BARS)
+    raw = da.fetch_ohlcv(config, symbol, forecast_tf, limit=_MOVE_WINDOW_BARS)
     closes = [b["close"] for b in raw[:-1]]  # closed candles only
     if len(closes) < 20:
-        raise ValueError(f"not enough 5m history for {symbol}")
+        raise ValueError(f"not enough {forecast_tf} history for {symbol}")
     moves = [abs(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
     expected_move_pct = statistics.median(moves)
 
@@ -268,19 +318,21 @@ def _make_call(config: Config, book: PriceCallBook, symbol: str) -> int:
         hit_rate_at_call=next_candle["hit_rate"],
         projected_price=projected,
         expected_move_pct=expected_move_pct,
+        horizon_seconds=horizon_seconds,
+        horizon_label=horizon_label,
     )
 
 
 def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optional[List[str]] = None) -> None:
-    """One pass of the call loop: settle everything due, then open a new
-    call for any symbol without one. Runs every ~60s from the dashboard's
-    background task, so settlement lands within a minute of due time
-    (settled_at records the actual moment) and a new call opens right
-    after the old one settles - one call per symbol per ~5 minutes.
+    """One pass of the call loop: settle everything due, then open a fresh
+    call for any (symbol, horizon) without one. Runs every ~60s from the
+    dashboard's background task, so settlement lands within a minute of due
+    time and a new call opens right after the old one settles - one call per
+    symbol per horizon (5m, 15m), each tracked and scored independently.
 
-    Calls are made only for the config seed symbols, not the full
-    discovery universe: each symbol costs a 5m model (trained/cached by
-    webapp.forecast) and the dashboard container has a hard memory cap.
+    Calls are made only for the config seed symbols, not the full discovery
+    universe: each costs a cached forecast model and the dashboard container
+    has a hard memory cap.
     """
     book = get_book(db_path)
     now = datetime.now(timezone.utc)
@@ -288,9 +340,9 @@ def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optio
         try:
             overdue = (now - datetime.fromisoformat(call["due_at"])).total_seconds()
             if overdue > SETTLE_GRACE_SECONDS:
-                # Came due while the process was down - the only price we
-                # have is from far past the 5-minute mark. Scoring it would
-                # contaminate the track record; void it instead.
+                # Came due while the process was down - the only price we have
+                # is from far past the settle mark; scoring it would
+                # contaminate the track record, so void it instead.
                 book.void(call["id"])
                 logger.info("voided price call %s (%.0fs overdue)", call["id"], overdue)
                 continue
@@ -299,8 +351,9 @@ def run_once(config: Config, db_path: str = DEFAULT_ANALYTICS_DB, symbols: Optio
             logger.exception("failed to settle price call %s", call["id"])
 
     for symbol in symbols or config.symbols:
-        try:
-            if book.open_call(symbol) is None:
-                _make_call(config, book, symbol)
-        except Exception:  # noqa: BLE001
-            logger.exception("failed to make price call for %s", symbol)
+        for horizon_seconds, label, forecast_tf in HORIZONS:
+            try:
+                if book.open_call(symbol, label) is None:
+                    _make_call(config, book, symbol, horizon_seconds, label, forecast_tf)
+            except Exception:  # noqa: BLE001
+                logger.exception("failed to make %s price call for %s", label, symbol)

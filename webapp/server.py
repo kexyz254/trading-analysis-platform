@@ -442,18 +442,26 @@ def pro_model_info(symbol: str):
 
 @app.get("/api/pro/price-calls/{symbol:path}")
 def pro_price_calls(symbol: str, limit: int = 20):
-    """The symbol's current open 5-minute price call, its recent settled
-    calls, and the running score - see webapp/price_call.py. Reads the
+    """Per-horizon (5m, 15m) price calls for the symbol: the current open
+    call, its recent settled results, the running score, and a BUY/SELL
+    signal when the model's confidence clears the threshold (marked
+    validated only when the horizon has a real track record). Reads the
     dashboard-owned analytics db, NOT trading_system.db."""
     try:
-        from webapp.price_call import get_book
+        from webapp.price_call import get_book, signal_for, HORIZONS
         book = get_book()
-        return {
-            "symbol": symbol,
-            "open_call": book.open_call(symbol),
-            "recent": book.recent_settled(symbol, limit=limit),
-            "stats": book.stats(symbol),
-        }
+        horizons = []
+        for _seconds, label, _tf in HORIZONS:
+            open_call = book.open_call(symbol, label)
+            stats = book.stats(symbol, label)
+            horizons.append({
+                "horizon": label,
+                "open_call": open_call,
+                "signal": signal_for(open_call, stats),
+                "stats": stats,
+                "recent": book.recent_settled(symbol, label, limit=limit),
+            })
+        return {"symbol": symbol, "horizons": horizons}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

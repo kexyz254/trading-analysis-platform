@@ -236,6 +236,18 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .call-dots { margin-top: 4px; letter-spacing: 2px; font-size: 0.8rem; }
 .call-dot.hit { color: var(--accent); }
 .call-dot.miss { color: var(--danger); opacity: 0.8; }
+.call-horizon { padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.call-horizon:last-child { border-bottom: none; }
+.call-hz-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 1px; opacity: 0.5; margin-bottom: 4px; }
+.call-sub.dim { opacity: 0.4; }
+.acc-edge { color: var(--accent); }
+.acc-poor { color: var(--danger); }
+.acc-flat { color: var(--warning); }
+.call-signal { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-weight: 800; font-size: 0.82rem; padding: 5px 8px; border-radius: 5px; margin-bottom: 6px; }
+.call-signal.buy { color: var(--accent); background: rgba(0,255,196,0.12); }
+.call-signal.sell { color: var(--danger); background: rgba(255,51,102,0.12); }
+.call-signal.validated { box-shadow: 0 0 0 1px currentColor inset; }
+.call-sig-note { font-size: 0.64rem; font-weight: normal; opacity: 0.75; }
 
 /* === CHART PATTERNS CARD === */
 .pattern-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
