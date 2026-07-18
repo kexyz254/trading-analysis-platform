@@ -255,6 +255,24 @@ class PriceCallBook:
         }
 
 
+def _aligned_due_iso(horizon_seconds: int, now: Optional[datetime] = None) -> str:
+    """The next WALL-CLOCK boundary for this horizon, so calls settle on the
+    clock the user reads: a 5m call lands on the next :00/:05/:10… and a 15m
+    call on the next :00/:15/:30/:45. Boundaries are computed from the epoch
+    (UTC) but land on the same minute marks in any whole-hour-offset zone
+    like East Africa Time (UTC+3), so the settle time matches the user's
+    local clock exactly. If the next boundary is too close to give a
+    meaningful window (< 15% of the horizon, min 60s), the one after is used
+    so a call made a few seconds before a mark isn't scored on ~nothing."""
+    now = now or datetime.now(timezone.utc)
+    epoch = now.timestamp()
+    boundary = (int(epoch // horizon_seconds) + 1) * horizon_seconds
+    min_lead = max(60.0, horizon_seconds * 0.15)
+    if boundary - epoch < min_lead:
+        boundary += horizon_seconds
+    return datetime.fromtimestamp(boundary, tz=timezone.utc).isoformat()
+
+
 def _current_price(config: Config, symbol: str) -> float:
     # The in-progress 1m candle's latest close is the freshest price the
     # existing cached REST path can give (the 5s cache TTL bounds staleness).
@@ -320,6 +338,9 @@ def _make_call(config: Config, book: PriceCallBook, symbol: str,
         expected_move_pct=expected_move_pct,
         horizon_seconds=horizon_seconds,
         horizon_label=horizon_label,
+        # Settle on the next wall-clock boundary (e.g. next :05 / :15), not
+        # "now + horizon", so the call matches the clock time the user sees.
+        due_at=_aligned_due_iso(horizon_seconds),
     )
 
 

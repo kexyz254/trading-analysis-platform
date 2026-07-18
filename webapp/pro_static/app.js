@@ -342,10 +342,12 @@ function renderHorizon(h) {
     if (call) {
         const up = call.direction === 'UP';
         _callDueAt[h.horizon] = Date.parse(call.due_at);
+        // Settle time in the viewer's own clock (East Africa Time etc.).
+        const settleClock = new Date(_callDueAt[h.horizon]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         html += `<div class="call-main ${up ? 'up' : 'down'}">
                 ${up ? '▲' : '▼'} ${call.direction} → $${formatPrice(call.projected_price)}
                 <span class="call-countdown" data-hz="${h.horizon}"></span></div>
-            <div class="call-sub">from $${formatPrice(call.price_at_call)} · confidence ${(call.probability * 100).toFixed(0)}% · typ. move ${(call.expected_move_pct * 100).toFixed(2)}%</div>`;
+            <div class="call-sub">settles at <strong>${settleClock}</strong> · from $${formatPrice(call.price_at_call)} · confidence ${(call.probability * 100).toFixed(0)}% · typ. move ${(call.expected_move_pct * 100).toFixed(2)}%</div>`;
         _callPriceLines[h.horizon] = candleSeries.createPriceLine({
             price: call.projected_price,
             color: up ? '#00FFC2' : '#FF3366',
