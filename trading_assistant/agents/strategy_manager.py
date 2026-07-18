@@ -60,6 +60,7 @@ from trading_assistant.strategies.implementations import (
     VWAPReversionStrategy,
 )
 from trading_assistant.strategies.ml_15m_candidate import backtest_ml_15m
+from trading_assistant.strategies.price_call_candidate import backtest_price_call
 # -- NEW research-layer imports --
 from trading_assistant.evaluation.recorder import CandidatePerformanceRecorder
 from trading_assistant.persistence.champion_registry import ChampionRegistry
@@ -81,8 +82,13 @@ def _default_ml_factory() -> Any:
 @dataclass
 class StrategyCandidate:
     name: str
-    kind: str  # "ml" | "rule" | "ml_15m"
+    kind: str  # "ml" | "rule" | "ml_15m" | "ml_price_call"
     factory: Callable[[], Any]
+    # Per-candidate parameters carried through to the dedicated backtester
+    # (e.g. the price-call horizon). Kept on the candidate rather than
+    # hardcoded in the backtester so two candidates can share one code path
+    # and differ only by data.
+    params: Dict[str, Any] = field(default_factory=dict)
 
 
 def default_candidates() -> List[StrategyCandidate]:
@@ -100,6 +106,14 @@ def default_candidates() -> List[StrategyCandidate]:
         StrategyCandidate("smart_money_concepts", "rule", SmartMoneyConceptsStrategy),
         StrategyCandidate("vwap_reversion", "rule", VWAPReversionStrategy),
         StrategyCandidate("ml_ensemble_15m", "ml_15m", lambda: None),   # factory not used; dedicated backtester
+        # Price-call candidates: one per real dashboard horizon. Both use the
+        # dedicated ml_price_call backtester on the SAME 15m bars; factory is
+        # unused. The only difference is how far ahead the label looks -
+        # horizon_bars=1 for the 5m call, horizon_bars=3 for the 15m call -
+        # exactly the look-ahead the next-3-candles dashboard already uses.
+        # Carried as params, never hardcoded in the backtester.
+        StrategyCandidate("price_call_5m", "ml_price_call", lambda: None, params={"horizon": "5m", "horizon_bars": 1}),
+        StrategyCandidate("price_call_15m", "ml_price_call", lambda: None, params={"horizon": "15m", "horizon_bars": 3}),
     ]
 
 
@@ -331,19 +345,39 @@ class StrategyManager:
                     float(test_slice["adx_strength"].mean()),
                 )
 
-                if candidate.kind == "ml":
-                    model = candidate.factory()
-                    model.train(train_slice[FEATURE_COLUMNS], train_slice["target"])
-                    metrics = self._backtest_ml(model, symbol, test_slice)
-                elif candidate.kind == "ml_15m":
-                    metrics = self._backtest_ml_15m_candidate(symbol, test_slice, candidate, timestamps=full_timestamp)
-                else:
-                    strategy = candidate.factory()
-                    metrics = self._backtest_rule(
-                        strategy, symbol, full_close, test_slice,
-                        full_open=full_open, full_high=full_high, full_low=full_low,
-                        full_volume=full_volume, full_timestamp=full_timestamp,
+                # One misbehaving candidate must never abort the whole
+                # tournament - that would freeze promotion for every other
+                # strategy. A raising fold degrades to empty metrics (a
+                # non-promotable, non-profitable fold) and is logged.
+                try:
+                    if candidate.kind == "ml":
+                        model = candidate.factory()
+                        model.train(train_slice[FEATURE_COLUMNS], train_slice["target"])
+                        metrics = self._backtest_ml(model, symbol, test_slice)
+                    elif candidate.kind == "ml_15m":
+                        metrics = self._backtest_ml_15m_candidate(symbol, test_slice, candidate, timestamps=full_timestamp)
+                    elif candidate.kind == "ml_price_call":
+                        metrics = self._backtest_price_call_candidate(symbol, test_slice, candidate, timestamps=full_timestamp)
+                    else:
+                        strategy = candidate.factory()
+                        metrics = self._backtest_rule(
+                            strategy, symbol, full_close, test_slice,
+                            full_open=full_open, full_high=full_high, full_low=full_low,
+                            full_volume=full_volume, full_timestamp=full_timestamp,
+                        )
+                except Exception:  # noqa: BLE001 - isolate a bad candidate/fold
+                    logger.exception(
+                        "candidate %s raised on fold %d for %s; recording empty metrics",
+                        candidate.name, fold_index, symbol,
                     )
+                    metrics = {
+                        "sharpe_ratio": 0.0,
+                        "max_drawdown_pct": 0.0,
+                        "win_rate": 0.0,
+                        "num_trades": 0,
+                        "total_return_pct": 0.0,
+                        "profit_factor": 0.0,
+                    }
 
                 report.folds.append(FoldRecord(fold_index=fold_index, regime=regime, metrics=metrics))
 
@@ -378,9 +412,10 @@ class StrategyManager:
                 model = candidate.factory()
                 model.train(featured[FEATURE_COLUMNS], featured["target"])
                 deployed[candidate.name] = model
-            elif candidate.kind == "ml_15m":
-                # 15m live instances are not deployed here; they are managed
-                # separately and not yet used for live trading.
+            elif candidate.kind in ("ml_15m", "ml_price_call"):
+                # 15m / price-call live instances are not deployed here; the
+                # price-call engine (webapp.price_call) loads the promoted
+                # champion itself. Not used for live 1h trading.
                 deployed[candidate.name] = None
             else:
                 deployed[candidate.name] = candidate.factory()
@@ -673,6 +708,58 @@ class StrategyManager:
         config.update(self.ml_15m_config)
 
         return backtest_ml_15m(
+            symbol=symbol,
+            feed=self.feed_15m,
+            train_start=train_start,
+            train_end=train_end,
+            test_start=test_start,
+            test_end=test_end,
+            config=config,
+        )
+
+    def _backtest_price_call_candidate(
+        self, symbol: str, test_slice: pd.DataFrame, candidate: StrategyCandidate,
+        timestamps: Optional[pd.Series] = None,
+    ) -> dict:
+        """Run a single walk-forward fold for a price_call candidate.
+
+        Identical windowing to the 15m candidate (30-day training window
+        ending at the test slice, evaluated on the 15m feed). The candidate's
+        horizon - carried on candidate.params, never hardcoded - is the only
+        thing that varies between price_call_5m and price_call_15m."""
+        if self.feed_15m is None:
+            return {
+                "sharpe_ratio": 0.0,
+                "max_drawdown_pct": 0.0,
+                "win_rate": 0.0,
+                "num_trades": 0,
+                "total_return_pct": 0.0,
+                "profit_factor": 0.0,
+            }
+        if timestamps is not None:
+            test_start = timestamps.iloc[int(test_slice.index[0])]
+            test_end = timestamps.iloc[int(test_slice.index[-1])]
+        else:
+            test_start = test_slice.index[0]
+            test_end = test_slice.index[-1]
+        test_start = pd.Timestamp(test_start)
+        test_end = pd.Timestamp(test_end)
+        train_start = test_start - pd.Timedelta(days=30)  # fixed 30-day training window
+        train_end = test_start
+
+        # Base config plus any operator overrides, then the candidate's own
+        # params (horizon_bars) win last so the two horizons stay distinct.
+        config: Dict[str, Any] = {
+            "min_confidence": 0.55,
+            "min_rr_ratio": 2.0,
+            "fee_rate": 0.0015,
+            "stop_loss_atr_mult": 2.0,
+            "take_profit_atr_mult": 3.0,
+        }
+        config.update(self.ml_15m_config)
+        config.update(candidate.params or {})
+
+        return backtest_price_call(
             symbol=symbol,
             feed=self.feed_15m,
             train_start=train_start,

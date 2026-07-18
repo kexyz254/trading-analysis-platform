@@ -249,9 +249,13 @@ def backtest_ml_15m(
     if feat_df.empty:
         return _empty_metrics()
 
-    # Create targets
+    # Create targets. make_binary_targets needs the ATR threshold, which lives
+    # on the engineered features (build_features_15m), not on the raw OHLCV the
+    # feed returns - so join atr_pct on before labelling.
+    bars_for_targets = bars.copy()
+    bars_for_targets["atr_pct"] = feat_df["atr_pct"]
     target_up, target_down = make_binary_targets(
-        bars, horizon_bars=config.get("horizon_bars", 4),
+        bars_for_targets, horizon_bars=config.get("horizon_bars", 4),
         atr_multiplier=config.get("atr_multiplier", 0.5)
     )
 
