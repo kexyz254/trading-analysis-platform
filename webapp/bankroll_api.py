@@ -1,4 +1,3 @@
-cat > webapp/bankroll_api.py << 'EOF'
 """Read-only API for the simulated price-call bankroll engine."""
 
 from fastapi import APIRouter, HTTPException
@@ -19,4 +18,3 @@ async def bankroll_stats():
         }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-EOF

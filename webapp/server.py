@@ -17,19 +17,21 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, Dict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.config import load_config
 from webapp import data_access as da
 from webapp.bankroll_api import router as bankroll_router
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-# -- NEW: Pro dashboard static directory --
+# -- Pro dashboard static directory --
 PRO_STATIC_DIR = Path(__file__).resolve().parent / "pro_static"
 
 _CACHE_BUSTED_ASSETS = ("style.css", "ws.js", "app.js", "chart.js")
@@ -105,7 +107,19 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Trading System Dashboard API", lifespan=_lifespan)
+
+# Apply CORS configurations to safely handle front-end client connections
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register the incoming bankroll sub-router channels cleanly
 app.include_router(bankroll_router)
+
 
 # ---------------------------------------------------------------------------
 # Existing endpoints (unchanged)
@@ -413,18 +427,25 @@ def pro_model_info(symbol: str):
 
 
 @app.get("/api/pro/price-calls/{symbol:path}")
-def pro_price_calls(symbol: str, limit: int = 20):
+async def pro_price_calls(symbol: str, limit: int = 20) -> Dict[str, Any]:
     """The symbol's current open 5-minute price call, its recent settled
     calls, and the running score - see webapp/price_call.py. Reads the
     dashboard-owned analytics db, NOT trading_system.db."""
     try:
         from webapp.price_call import get_book
         book = get_book()
+        sym = symbol.upper()
+
+        # Offload blocking SQLite disk I/O onto worker threads to keep event loop free
+        open_call = await asyncio.to_thread(book.open_call, sym)
+        recent = await asyncio.to_thread(book.recent_settled, sym, limit=limit)
+        stats = await asyncio.to_thread(book.stats, sym)
+
         return {
-            "symbol": symbol,
-            "open_call": book.open_call(symbol),
-            "recent": book.recent_settled(symbol, limit=limit),
-            "stats": book.stats(symbol),
+            "symbol": sym,
+            "open_call": open_call,
+            "recent": recent,
+            "stats": stats,
         }
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -447,7 +468,7 @@ def pro_patterns(symbol: str, timeframe: str = "1h"):
 
 
 @app.get("/api/pro/forecast/{symbol:path}")
-def pro_forecast(symbol: str, timeframe: str = "1h"):
+async def pro_forecast(symbol: str, timeframe: str = "1h") -> Dict[str, Any]:
     """Direction forecast for the next 1/2/3 closed candles of the given
     timeframe, each with its own out-of-sample hit rate - see
     webapp/forecast.py for what these numbers do and don't claim."""
@@ -455,7 +476,11 @@ def pro_forecast(symbol: str, timeframe: str = "1h"):
         raise HTTPException(status_code=400, detail=f"timeframe must be one of {da.TIMEFRAMES}")
     try:
         from webapp.forecast import get_forecast
-        return get_forecast(_config, symbol, timeframe)
+        sym = symbol.upper()
+        
+        # CRITICAL: Prevent Random Forest model fitting from freezing the core async stream
+        result = await asyncio.to_thread(get_forecast, _config, sym, timeframe)
+        return result
     except Exception as exc:  # noqa: BLE001 - surface as a clean API error, not a 500 stack trace
         raise HTTPException(status_code=502, detail=f"Could not build forecast: {exc}") from exc
 
@@ -479,7 +504,7 @@ def pro_decisions(symbol: str, limit: int = 200):
                     "action": d["action"],
                 }
                 for d in decisions
-            ],
+            ]
         }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))

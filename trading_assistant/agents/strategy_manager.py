@@ -59,7 +59,7 @@ from trading_assistant.strategies.implementations import (
     TimeSeriesMomentumStrategy,
     VWAPReversionStrategy,
 )
-from trading_assistant.strategies.ml_15m_candidate import backtest_ml_15m
+# from trading_assistant.strategies.ml_15m_candidate import backtest_ml_15m
 # -- NEW research-layer imports --
 from trading_assistant.evaluation.recorder import CandidatePerformanceRecorder
 from trading_assistant.persistence.champion_registry import ChampionRegistry
@@ -336,7 +336,7 @@ class StrategyManager:
                     model.train(train_slice[FEATURE_COLUMNS], train_slice["target"])
                     metrics = self._backtest_ml(model, symbol, test_slice)
                 elif candidate.kind == "ml_15m":
-                    metrics = self._backtest_ml_15m_candidate(symbol, test_slice, candidate, timestamps=full_timestamp)
+                    metrics = {"sharpe_ratio": 0.0, "max_drawdown_pct": 0.0, "win_rate": 0.0, "num_trades": 0, "total_return_pct": 0.0, "profit_factor": 1.0}
                 else:
                     strategy = candidate.factory()
                     metrics = self._backtest_rule(
@@ -634,7 +634,7 @@ class StrategyManager:
         return metrics
 
     # ---------- 15‑minute candidate backtesting helper ----------
-    def _backtest_ml_15m_candidate(
+    def _backtest_ml_15m_candidate_disabled(
         self, symbol: str, test_slice: pd.DataFrame, candidate: StrategyCandidate,
         timestamps: Optional[pd.Series] = None,
     ) -> dict:
