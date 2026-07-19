@@ -32,9 +32,6 @@ async function initTerminal() {
     try {
         status = await api('/api/status');
     } catch (e) {
-        // A transient backend error at page load (e.g. a brief "database is
-        // locked" while the engine writes) must degrade to a retry, not
-        // permanently brick the whole terminal on a dead init chain.
         document.getElementById('uptime').textContent = 'Backend unreachable — retrying…';
         setTimeout(initTerminal, 5000);
         return;
@@ -45,14 +42,14 @@ async function initTerminal() {
     initLiveFeed(status.ws_base_url);
     subscribeTickers(status.symbols, onTicker);
     await refreshAll();
-    _lastKlineAt = Date.now(); // start the WS watchdog clock from "just loaded"
+    _lastKlineAt = Date.now();
     startLiveCandles();
     startPolling();
 
     document.getElementById('symbol-select').addEventListener('change', async (e) => {
         currentSymbol = e.target.value;
         _viewEpoch++;
-        bars = []; // stop live klines painting onto the old symbol's series
+        bars = [];
         await refreshAll();
         startLiveCandles();
     });
@@ -85,9 +82,6 @@ function setupChart() {
         wickUpColor: '#00FFC2',
     });
 
-    // Volume lives in the same chart on its own hidden price scale (bottom
-    // 20%) — a second chart panel can never stay perfectly time-synced with
-    // the main one during live streaming, an overlay always is.
     volumeSeries = chart.addHistogramSeries({
         priceScaleId: '',
         priceFormat: { type: 'volume' },
@@ -110,10 +104,6 @@ async function api(url) {
     return res.json();
 }
 
-// Stale-response guard: an in-flight request can outlive a symbol/timeframe
-// switch, and applying its payload would paint the previous view's data
-// onto the new one. Symbol/timeframe-scoped loaders fetch through this and
-// treat null as "view changed while waiting - drop it".
 let _viewEpoch = 0;
 async function apiScoped(url) {
     const epoch = _viewEpoch;
@@ -149,23 +139,18 @@ async function refreshCards() {
             loadModelInfo(),
             loadPatterns(),
             loadStatusBadge(),
+            loadBankroll(),
         ]);
     } catch (e) { console.warn('Refresh error', e); }
-    // WS watchdog: if no kline arrived in 45s the browser's Binance socket
-    // is dead/blocked - degrade to 10s REST-polled candles instead of a
-    // silently frozen "live" chart.
     if (_lastKlineAt && Date.now() - _lastKlineAt > 45000) {
         try { await loadChart(); } catch (e) { /* next poll retries */ }
     }
-    // Kept out of the Promise.all: first call per (symbol, timeframe)
-    // trains models server-side and can take a few seconds - it must not
-    // delay every other card while it does.
     loadForecast();
 }
 
 // --- Live candle streaming (ws.js) ---
 function binancePair(symbol) {
-    return symbol.replace('/', '').toUpperCase(); // "BTC/USDT" -> "BTCUSDT"
+    return symbol.replace('/', '').toUpperCase();
 }
 
 function startLiveCandles() {
@@ -175,7 +160,7 @@ function startLiveCandles() {
 function onKline(k) {
     if (k.interval !== currentTimeframe || k.symbol !== binancePair(currentSymbol)) return;
     _lastKlineAt = Date.now();
-    if (!bars.length) return; // mid-switch: the REST history hasn't landed yet
+    if (!bars.length) return;
     const bar = { time: k.time, open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume };
     const last = bars[bars.length - 1];
     if (last && bar.time === last.time) {
@@ -184,12 +169,10 @@ function onKline(k) {
         bars.push(bar);
         if (bars.length > HISTORY_LIMIT) bars.shift();
     } else {
-        return; // stale/out-of-order update
+        return;
     }
     candleSeries.update(bar);
     volumeSeries.update(volPoint(bar));
-    // Recompute on every tick, not just closed candles - 300 bars of SMA/BB
-    // math is sub-millisecond, and live-moving overlay lines are the point.
     recomputeIndicators();
     updatePriceHeader();
 }
@@ -204,19 +187,16 @@ function onTicker(t) {
 
 // --- Chart data ---
 async function loadChart() {
-    // A symbol/timeframe switch invalidates every overlay drawn in the old
-    // time coordinate system - clear them now rather than leaving stale
-    // lines up until their own refreshes land.
     removeSeriesSafe(_projectionSeries); _projectionSeries = null;
     _patternSeries.forEach(removeSeriesSafe);
     _patternSeries = [];
     const data = await apiScoped(
         `/api/ohlcv?symbol=${encodeURIComponent(currentSymbol)}&timeframe=${currentTimeframe}&limit=${HISTORY_LIMIT}`
     );
-    if (data === null) return;                       // view changed while waiting
-    if (!Array.isArray(data) || data.length === 0) return; // keep the last good chart
+    if (data === null) return;
+    if (!Array.isArray(data) || data.length === 0) return;
     bars = data.map(b => ({
-        time: Math.floor(b.timestamp / 1000), // exchange sends ms epoch, chart wants seconds
+        time: Math.floor(b.timestamp / 1000),
         open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
     }));
     candleSeries.setData(bars);
@@ -283,9 +263,6 @@ function updatePriceHeader() {
     if (bars.length === 0) return;
     const last = bars[bars.length - 1];
     document.getElementById('current-price').textContent = `$${formatPrice(last.close)}`;
-    // Fallback when the browser->Binance ticker stream is silent (blocked
-    // network, geo-block, testnet outage): show candle-over-candle change
-    // from REST data instead of leaving the header frozen at '—'.
     if (Date.now() - _lastTickerAt > 90000 && bars.length > 1) {
         const prev = bars[bars.length - 2].close;
         const pct = ((last.close - prev) / prev * 100).toFixed(2);
@@ -413,10 +390,6 @@ let _forecastInFlight = null;
 let _projectionSeries = null;
 
 function drawProjection(data) {
-    // Dashed path from the last closed candle through the next 3: direction
-    // per horizon from the model, magnitude = the symbol's median absolute
-    // per-candle move on this timeframe (same honest convention as the
-    // price calls: the models predict direction, not distance).
     removeSeriesSafe(_projectionSeries); _projectionSeries = null;
     if (!bars.length || !data.horizons || data.horizons.length === 0) return;
     const moves = [];
@@ -445,22 +418,17 @@ function drawProjection(data) {
 
 async function loadForecast() {
     const requested = `${currentSymbol}|${currentTimeframe}`;
-    // Skip only if a request for this SAME view is already in flight - a
-    // different view's slow first-train must not block the new view's card.
     if (_forecastInFlight === requested) return;
     _forecastInFlight = requested;
     try {
         document.getElementById('forecast-tf').textContent = currentTimeframe;
         const data = await apiScoped(`/api/pro/forecast/${currentSymbol}?timeframe=${currentTimeframe}`);
-        if (data === null) return; // view changed while training
+        if (data === null) return;
         drawProjection(data);
         const content = document.getElementById('forecast-content');
         const rows = data.horizons.map(h => {
             const up = h.direction === 'UP';
             const shownProb = up ? h.probability_up : 1 - h.probability_up;
-            // The trivial baseline is the holdout's MAJORITY class: a model
-            // that always guesses the majority direction scores max(up, down)
-            // share, so only a hit rate above that is any edge at all.
             const baseline = Math.max(h.up_share_holdout, 1 - h.up_share_holdout);
             const edge = h.hit_rate - baseline;
             return `
@@ -491,7 +459,6 @@ async function loadDecisionMarkers() {
         const markers = data.decisions
             .filter(d => d.signal === 'BUY' || d.signal === 'SELL')
             .map(d => ({
-                // bucket the decision's timestamp onto the candle it fell in
                 time: Math.floor(Date.parse(d.timestamp) / 1000 / tf) * tf,
                 position: d.signal === 'BUY' ? 'belowBar' : 'aboveBar',
                 color: d.signal === 'BUY' ? '#00FFC2' : '#FF3366',
@@ -506,8 +473,6 @@ async function loadDecisionMarkers() {
 
 // --- Top bar / status ---
 async function loadStatusBadge() {
-    // The LIVE/TESTNET badge is the "am I looking at real money?" indicator
-    // - it must track server restarts that flip mode, not just page load.
     try { renderStatus(await api('/api/status')); } catch (e) { /* keep last known */ }
 }
 
@@ -537,7 +502,7 @@ async function renderTimeframeTabs() {
     try {
         timeframes = await api('/api/timeframes');
     } catch (e) {
-        timeframes = Object.keys(TF_SECONDS); // backend hiccup: same list, hardcoded
+        timeframes = Object.keys(TF_SECONDS);
     }
     const wrap = document.getElementById('timeframe-tabs');
     wrap.innerHTML = '';
@@ -551,7 +516,7 @@ async function renderTimeframeTabs() {
             btn.classList.add('active');
             currentTimeframe = tf;
             _viewEpoch++;
-            bars = []; // stop live klines painting onto the old timeframe's series
+            bars = [];
             document.getElementById('forecast-content').textContent = 'Training model…';
             try { await loadChart(); } catch (e) { console.warn('Chart load error', e); }
             await Promise.all([loadDecisionMarkers(), loadPatterns()]);
@@ -581,12 +546,9 @@ function signalArrow(sig) {
     return sig === 'BUY' ? '↗' : sig === 'SELL' ? '↘' : '→';
 }
 
-// Semicircular gauge (like the mockup). `frac` 0..1 fills the arc; color
-// keys off the signal. Returns an inline SVG string.
 function confidenceGauge(frac, sig) {
     const r = 52, cx = 60, cy = 60;
     const clamped = Math.max(0, Math.min(1, frac || 0));
-    // Semicircle from 180deg (left) to 0deg (right).
     const a0 = Math.PI, a1 = Math.PI * (1 - clamped);
     const x0 = cx + r * Math.cos(a0), y0 = cy - r * Math.sin(a0);
     const x1 = cx + r * Math.cos(a1), y1 = cy - r * Math.sin(a1);
@@ -608,8 +570,6 @@ async function loadPrediction() {
         if (data === null) return;
         const content = document.getElementById('prediction-content');
         const sig = data.signal || 'HOLD';
-        // Confidence gauge prefers the model's ensemble confidence; falls
-        // back to how far probability_up sits from 0.5 (its conviction).
         const conv = data.confidence != null ? data.confidence
                    : data.probability_up != null ? Math.abs(data.probability_up - 0.5) * 2 : null;
         const pUp = data.probability_up;
@@ -731,6 +691,33 @@ async function loadCandidates() {
         content.innerHTML = '';
         content.appendChild(table);
     } catch (e) { /* ignore */ }
+}
+
+// --- Bankroll Simulation Card (NEW) ---
+async function loadBankroll() {
+    try {
+        const d = await api('/api/pro/bankroll');
+        renderBankrollCard(d);
+    } catch (e) { console.warn('Bankroll error', e); }
+}
+
+function renderBankrollCard(data) {
+    const el = document.getElementById('bankroll-content');
+    if (!el) return;
+    let html = '';
+    for (const tf of ['5m', '15m']) {
+        const s = data[tf];
+        if (!s) continue;
+        const pnlClass = s['Net PnL $'] >= 0 ? 'positive' : 'negative';
+        html += `<div class="bankroll-horizon">
+            <strong>${tf} Simulated</strong>
+            <div>Bankroll: <span class="${pnlClass}">$${s['Current Bankroll'].toFixed(2)}</span> (${s['Net PnL %'] >= 0 ? '+' : ''}${s['Net PnL %'].toFixed(1)}%)</div>
+            <div>Trades: ${s['Total Trades']} | Win: ${s['Winrate %'].toFixed(1)}% | PF: ${s['Profit Factor'].toFixed(2)}</div>
+            <div>Max DD: $${s['Max Drawdown $'].toFixed(2)} (${s['Max Drawdown %'].toFixed(1)}%)</div>
+            <div>Fees: $${s['Total Fees $'].toFixed(4)} | Slippage: $${s['Total Slippage $'].toFixed(4)}</div>
+        </div><hr>`;
+    }
+    el.innerHTML = html || 'No bankroll data yet.';
 }
 
 function formatDuration(seconds) {

@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.config import load_config
 from webapp import data_access as da
-
+from webapp.bankroll_api import router as bankroll_router
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 # -- NEW: Pro dashboard static directory --
@@ -105,7 +105,7 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Trading System Dashboard API", lifespan=_lifespan)
-
+app.include_router(bankroll_router)
 
 # ---------------------------------------------------------------------------
 # Existing endpoints (unchanged)
