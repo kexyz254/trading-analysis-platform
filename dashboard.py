@@ -14,8 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-import time
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -31,6 +31,7 @@ from run_system import build_exchange
 TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
 
 NAIROBI_TZ = ZoneInfo("Africa/Nairobi")
+ANALYTICS_DB_PATH = "dashboard_data/analytics.db"
 
 
 def _to_nairobi(value):
@@ -44,8 +45,6 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default="trading_system.db")
     parser.add_argument("--config", default=None)
-    # Streamlit passes its own args through; ignore anything unrecognized
-    # rather than erroring out on `streamlit run`'s own flags.
     args, _ = parser.parse_known_args()
     return args
 
@@ -137,7 +136,8 @@ def _load_data(db_path: str) -> dict:
 
 
 def _read_events(db_path: str, table: str, limit: int = 100) -> list[dict]:
-    conn = sqlite3.connect(db_path)
+    # Hardened connection parameter to mitigate write lock contention
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
@@ -164,7 +164,223 @@ def _tournament_events(db_path: str, limit: int = 100) -> list[dict]:
     return events
 
 
+# ========================================================
+# HIGH FIDELITY CALL COMPONENT HANDLERS & TRACKERS
+# ========================================================
+
+def _fetch_live_call_data(db_path: str, horizon: str) -> dict | None:
+    """Safely extracts live/latest price call state and metrics history from the analytics DB."""
+    if not Path(db_path).exists():
+        return None
+    try:
+        conn = sqlite3.connect(db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        
+        latest_row = conn.execute(
+            "SELECT * FROM price_calls WHERE horizon_label = ? ORDER BY id DESC LIMIT 1",
+            (horizon,)
+        ).fetchone()
+        
+        if not latest_row:
+            conn.close()
+            return None
+        call_info = dict(latest_row)
+
+        history_rows = conn.execute(
+            "SELECT correct FROM price_calls WHERE horizon_label = ? AND settled_at IS NOT NULL AND voided = 0 ORDER BY id DESC LIMIT 50",
+            (horizon,)
+        ).fetchall()
+        
+        # Dynamic calculation block for the 'avg miss' metric to avoid hardcoding artifacts
+        avg_miss_val = "N/A"
+        try:
+            miss_query = conn.execute(
+                """SELECT AVG(ABS(price_at_call - target_price) / price_at_call) * 100 
+                   FROM price_calls WHERE horizon_label = ? AND settled_at IS NOT NULL AND correct = 0""",
+                (horizon,)
+            ).fetchone()
+            if miss_query and miss_query[0] is not None:
+                avg_miss_val = f"{miss_query[0]:.2f}%"
+        except sqlite3.OperationalError:
+            pass  # Fallback to N/A gracefully if custom analytical tables lack metric columns
+            
+        conn.close()
+
+        history_list = [r[0] for r in history_rows][::-1]
+        total_history = len(history_list)
+        correct_count = sum(1 for x in history_list if x == 1)
+        winrate = round((correct_count / total_history * 100), 1) if total_history > 0 else 0.0
+
+        prob_pct = int((call_info.get("probability") or 0.5) * 100) if (call_info.get("probability") or 0) <= 1.0 else int(call_info.get("probability") or 50)
+        price_at_call = call_info.get("price_at_call") or 0.0
+        target_price = call_info.get("target_price") or (price_at_call * 1.0002 if call_info.get("direction") == "UP" else price_at_call * 0.9998)
+
+        return {
+            "symbol": call_info.get("symbol", "BTC/USDT"),
+            "horizon_label": horizon,
+            "direction": call_info.get("direction", "UP"),
+            "price_at_call": price_at_call,
+            "target_price": target_price,
+            "confidence": prob_pct,
+            "settle_time_str": call_info.get("settled_at") or "Pending",
+            "history": history_list,
+            "winrate_pct": winrate,
+            "total_count": total_history,
+            "avg_miss": avg_miss_val
+        }
+    except Exception as e:
+        st.sidebar.warning(f"Live Call Fetch Warning ({horizon}): Check database columns. Details: {e}")
+        return None
+
+
+def _render_high_fidelity_call_card(data: dict) -> str:
+    """Renders the exact high-fidelity dark terminal block layout from the original configuration."""
+    direction = data["direction"]
+    direction_arrow = "▲ UP" if direction == "UP" else "▼ DOWN"
+    direction_color = "#00e676" if direction == "UP" else "#ff1744"
+    arrow_indicator = "above ↑" if direction == "UP" else "below ↓"
+    
+    history_signals = "".join([
+        f"<span style='color: #00e676; margin-right: 5px; font-weight: bold;'>✓</span>" if x == 1 
+        else f"<span style='color: #ff1744; margin-right: 5px; font-weight: bold;'>✗</span>" 
+        for x in data["history"]
+    ])
+    if not history_signals:
+        history_signals = "<span style='color: #8a9ba8; font-style: italic;'>No historical samples logged</span>"
+
+    if data["horizon_label"] == "15m":
+        heuristic_badge = """
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+            <span style="color: #8a9ba8; font-size: 11px; font-weight: bold; letter-spacing: 1.5px; margin-right: 8px;">15M CALL</span>
+            <span style="background: rgba(255,184,0,0.1); color: #ffb800; border: 1px solid rgba(255,184,0,0.3); padding: 1px 5px; font-size: 10px; font-weight: bold; border-radius: 3px; letter-spacing: 0.5px;">HEURISTIC</span>
+        </div>
+        """
+    else:
+        heuristic_badge = """
+        <div style="display: flex; align-items: center; margin-bottom: 10px;">
+            <span style="color: #8a9ba8; font-size: 11px; font-weight: bold; letter-spacing: 1.5px;">5-MIN PRICE CALL</span>
+        </div>
+        """
+
+    return f"""
+    <div style="background: #111625; padding: 18px; border-radius: 6px; border: 1px solid #1c2333; font-family: monospace; margin-bottom: 15px;">
+        {heuristic_badge}
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="color: {direction_color}; font-weight: bold; font-size: 18px; letter-spacing: 0.5px;">
+                {direction_arrow} &nbsp;→&nbsp; ${data['target_price']:,.2f}
+            </span>
+            <span style="color: #8a9ba8; font-size: 13px;">settles in active window</span>
+        </div>
+        <div style="color: #e1e8ed; font-size: 13px; margin-bottom: 4px;">
+            Price to beat <span style="font-weight: bold; color: #ffffff;">${data['price_at_call']:,.2f}</span> &nbsp;
+            <span style="color: #8a9ba8; font-size: 12px;">final must be {arrow_indicator}</span>
+        </div>
+        <div style="color: #8a9ba8; font-size: 12px; margin-bottom: 14px;">
+            settles at {data['settle_time_str']} · target ${data['target_price']:,.2f} · confidence {data['confidence']}%
+        </div>
+        <div style="color: #e1e8ed; font-size: 13px; margin-bottom: 6px;">
+            Last {data['total_count']}: <span style="color: #00e676; font-weight: bold;">{data['winrate_pct']}% correct</span> · avg miss {data['avg_miss']}
+        </div>
+        <div style="font-size: 16px; line-height: 1.2; letter-spacing: 1px; word-wrap: break-word;">
+            {history_signals}
+        </div>
+    </div>
+    """
+
+
+def _fetch_bankroll_stats(db_path: str, horizon: str) -> dict:
+    """Safely fetches simulated bankroll metrics directly from the analytics DB with exposed schema warnings."""
+    fallback = {
+        "Current Bankroll": 50.00, "Net PnL %": 0.0, "Total Trades": 0, "Winrate %": 0.0,
+        "Profit Factor": 0.00, "Max Drawdown $": 0.00, "Max Drawdown %": 0.0,
+        "Total Fees $": 0.0000, "Total Slippage $": 0.0000
+    }
+    if not Path(db_path).exists():
+        return fallback
+    try:
+        conn = sqlite3.connect(db_path, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM bankroll_stats WHERE horizon_label = ? ORDER BY id DESC LIMIT 1", 
+            (horizon,)
+        ).fetchone()
+        conn.close()
+        if row:
+            d = dict(row)
+            return {
+                "Current Bankroll": d.get("current_bankroll", 50.00),
+                "Net PnL %": d.get("net_pnl_pct", 0.0),
+                "Total Trades": d.get("total_trades", 0),
+                "Winrate %": d.get("winrate_pct", 0.0),
+                "Profit Factor": d.get("profit_factor", 0.00),
+                "Max Drawdown $": d.get("max_drawdown_cash", 0.00),
+                "Max Drawdown %": d.get("max_drawdown_pct", 0.0),
+                "Total Fees $": d.get("total_fees", 0.0000),
+                "Total Slippage $": d.get("total_slippage", 0.0000)
+            }
+    except Exception as e:
+        st.sidebar.error(f"Bankroll Schema Alert ({horizon}): Metric structural load error. Details: {e}")
+    return fallback
+
+
 def _render_overview_tab(config, data, db_path: str) -> None:
+    # ----------------------------------------------------
+    # Restored Live Price Call Components
+    # ----------------------------------------------------
+    st.subheader("Live Price Signal Engine")
+    c1, c2 = st.columns(2)
+    
+    call_5m = _fetch_live_call_data(ANALYTICS_DB_PATH, "5m")
+    call_15m = _fetch_live_call_data(ANALYTICS_DB_PATH, "15m")
+    
+    with c1:
+        if call_5m:
+            st.markdown(_render_high_fidelity_call_card(call_5m), unsafe_allow_html=True)
+        else:
+            st.info("Waiting for first 5M programmatic prediction sync...")
+            
+    with c2:
+        if call_15m:
+            st.markdown(_render_high_fidelity_call_card(call_15m), unsafe_allow_html=True)
+        else:
+            st.info("Waiting for first 15M programmatic prediction sync...")
+
+    # ----------------------------------------------------
+    # Restored Simulated Bankroll Section
+    # ----------------------------------------------------
+    st.subheader("Simulated Bankroll Metrics")
+    b1, b2 = st.columns(2)
+    
+    stats_5m = _fetch_bankroll_stats(ANALYTICS_DB_PATH, "5m")
+    stats_15m = _fetch_bankroll_stats(ANALYTICS_DB_PATH, "15m")
+
+    with b1:
+        st.markdown(f"""
+        <div style="background: #111625; padding: 14px; border-radius: 6px; border: 1px solid #1c2333; font-family: monospace;">
+            <div style="color: #8a9ba8; font-weight: bold; font-size: 12px; margin-bottom: 4px;">5M SIMULATED</div>
+            <div style="font-size: 16px; color: #ffffff; font-weight: bold; margin-bottom: 4px;">Bankroll: ${stats_5m['Current Bankroll']:.2f} ({stats_5m['Net PnL %']:+.1f}%)</div>
+            <div style="font-size: 13px; color: #e1e8ed; margin-bottom: 2px;">Trades: {stats_5m['Total Trades']} | Win: {stats_5m['Winrate %']:.1f}% | PF: {stats_5m['Profit Factor']:.2f}</div>
+            <div style="font-size: 13px; color: #e1e8ed; margin-bottom: 2px;">Max DD: ${stats_5m['Max Drawdown $']:.2f} ({stats_5m['Max Drawdown %']:.1f}%)</div>
+            <div style="font-size: 12px; color: #8a9ba8;">Fees: ${stats_5m['Total Fees $']:.4f} | Slippage: ${stats_5m['Total Slippage $']:.4f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with b2:
+        st.markdown(f"""
+        <div style="background: #111625; padding: 14px; border-radius: 6px; border: 1px solid #1c2333; font-family: monospace;">
+            <div style="color: #8a9ba8; font-weight: bold; font-size: 12px; margin-bottom: 4px;">15M SIMULATED</div>
+            <div style="font-size: 16px; color: #ffffff; font-weight: bold; margin-bottom: 4px;">Bankroll: ${stats_15m['Current Bankroll']:.2f} ({stats_15m['Net PnL %']:+.1f}%)</div>
+            <div style="font-size: 13px; color: #e1e8ed; margin-bottom: 2px;">Trades: {stats_15m['Total Trades']} | Win: {stats_15m['Winrate %']:.1f}% | PF: {stats_15m['Profit Factor']:.2f}</div>
+            <div style="font-size: 13px; color: #e1e8ed; margin-bottom: 2px;">Max DD: ${stats_15m['Max Drawdown $']:.2f} ({stats_15m['Max Drawdown %']:.1f}%)</div>
+            <div style="font-size: 12px; color: #8a9ba8;">Fees: ${stats_15m['Total Fees $']:.4f} | Slippage: ${stats_15m['Total Slippage $']:.4f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.write("---")
+
+    # ----------------------------------------------------
+    # Core Analytical Features Continued
+    # ----------------------------------------------------
     st.subheader("Equity curve")
     equity = data["equity"]
     if not equity:
@@ -271,7 +487,7 @@ def _render_markets_tab(config, exchange) -> None:
 
     try:
         overview = _market_overview(exchange, config.symbol_discovery.quote_currency or "USDT")
-    except Exception as exc:  # noqa: BLE001 - a dashboard fetch failure must not crash the page
+    except Exception as exc:
         st.warning(f"Could not fetch live market overview: {exc}")
         return
 
@@ -308,26 +524,13 @@ def _render_markets_tab(config, exchange) -> None:
     )
 
 
-def _render_chart_tab(config, exchange) -> None:
-    try:
-        overview = _market_overview(exchange, config.symbol_discovery.quote_currency or "USDT")
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not fetch market list: {exc}")
-        overview = pd.DataFrame()
-
-    tracked = list(config.symbols)
-    all_symbols = list(overview["symbol"]) if not overview.empty else tracked
-    symbol_options = list(dict.fromkeys(tracked + all_symbols))
-
-    c1, c2, c3 = st.columns([2, 3, 1.3])
-    selected_symbol = c1.selectbox("Symbol", symbol_options)
-    default_tf_index = TIMEFRAMES.index(config.timeframe) if config.timeframe in TIMEFRAMES else TIMEFRAMES.index("1h")
-    selected_timeframe = c2.radio("Timeframe", TIMEFRAMES, index=default_tf_index, horizontal=True)
-    live = c3.checkbox("🔴 Live", value=False, help="Auto-refresh this chart every few seconds with real exchange data.")
-
+# Modern isolated rerun engine fragment to protect core layout execution paths
+@st.fragment(run_every="5s")
+def _render_live_chart_fragment(exchange, selected_symbol, selected_timeframe, tracked):
+    """Encapsulated rendering fragment executing live ticker streams in isolation."""
     try:
         ohlcv = _fetch_ohlcv(exchange, selected_symbol, selected_timeframe, limit=300)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         st.warning(f"Could not fetch OHLCV for {selected_symbol} @ {selected_timeframe}: {exc}")
         return
 
@@ -344,16 +547,53 @@ def _render_chart_tab(config, exchange) -> None:
     m2.metric(f"Change ({len(ohlcv)} bars)", f"{change_over_window:+.2f}%")
     m3.metric("24h high", f"{ohlcv['high'].max():,.4f}")
     m4.metric("24h low", f"{ohlcv['low'].min():,.4f}")
+    
     if selected_symbol in tracked:
-        st.caption(f"{selected_symbol} is in the system's actively traded/learned universe.")
+        st.caption(f"{selected_symbol} is in the system's actively traded universe.")
     else:
-        st.caption(f"{selected_symbol} is shown for monitoring only — not currently traded by the system.")
+        st.caption(f"{selected_symbol} is shown for monitoring only — not actively traded.")
+        
+    last_candle_time = ohlcv.index[-1].strftime("%H:%M:%S")
+    st.caption(f"Fragment Engine Active: Auto-refreshing independently. Last close sync: {last_candle_time} EAT.")
+
+
+def _render_chart_tab(config, exchange) -> None:
+    try:
+        overview = _market_overview(exchange, config.symbol_discovery.quote_currency or "USDT")
+    except Exception as exc:
+        st.warning(f"Could not fetch market list: {exc}")
+        overview = pd.DataFrame()
+
+    tracked = list(config.symbols)
+    all_symbols = list(overview["symbol"]) if not overview.empty else tracked
+    symbol_options = list(dict.fromkeys(tracked + all_symbols))
+
+    c1, c2, c3 = st.columns([2, 3, 1.3])
+    selected_symbol = c1.selectbox("Symbol", symbol_options)
+    default_tf_index = TIMEFRAMES.index(config.timeframe) if config.timeframe in TIMEFRAMES else TIMEFRAMES.index("1h")
+    selected_timeframe = c2.radio("Timeframe", TIMEFRAMES, index=default_tf_index, horizontal=True)
+    live = c3.checkbox("🔴 Live Auto-Refresh", value=False, help="Runs this chart inside an isolated micro-engine.")
 
     if live:
-        last_candle_time = ohlcv.index[-1].strftime("%H:%M:%S")
-        st.caption(f"Live mode: refreshing every 5s from the exchange. Last candle close: {last_candle_time} EAT.")
-        time.sleep(5)
-        st.rerun()
+        _render_live_chart_fragment(exchange, selected_symbol, selected_timeframe, tracked)
+    else:
+        # Standard structural fallback rendering path for fixed inspections
+        try:
+            ohlcv = _fetch_ohlcv(exchange, selected_symbol, selected_timeframe, limit=300)
+            if ohlcv.empty:
+                st.info("No candle data available.")
+                return
+            st.plotly_chart(_candlestick_chart(ohlcv, selected_symbol, selected_timeframe), use_container_width=True)
+            
+            latest_close = ohlcv["close"].iloc[-1]
+            change_over_window = (latest_close - ohlcv["close"].iloc[0]) / ohlcv["close"].iloc[0] * 100.0
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Last", f"{latest_close:,.4f}")
+            m2.metric(f"Change ({len(ohlcv)} bars)", f"{change_over_window:+.2f}%")
+            m3.metric("24h high", f"{ohlcv['high'].max():,.4f}")
+            m4.metric("24h low", f"{ohlcv['low'].min():,.4f}")
+        except Exception as exc:
+            st.warning(f"Could not load historical path frame: {exc}")
 
 
 def main() -> None:
@@ -377,7 +617,7 @@ def main() -> None:
 
     try:
         exchange = _get_exchange(config.mode)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         exchange = None
         st.error(f"Could not connect to the exchange: {exc}")
 
