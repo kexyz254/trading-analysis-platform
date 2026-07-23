@@ -39,3 +39,33 @@ oom-*
 
 findings/
 out/
+
+# Local Python environments
+.venv/
+.venv-*/
+venv/
+
+# Runtime and temporary state
+.runtime/
+runtime_logs/
+*.py[cod]
+
+# Local integration and backup artifacts
+_umil_integration_stage/
+ats-backups/
+ATS-before-v*/
+
+# Local databases and generated state
+trading_system.db*
+analytics.db*
+*.sqlite
+*.sqlite3
+*.bak
+bankroll_trades_*.csv
+
+# Local patches and release archives
+before-*.diff
+
+# Secrets
+.env.*
+!.env.example

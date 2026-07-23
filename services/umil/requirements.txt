@@ -1,0 +1,4 @@
+# UMIL is deployed in a separate environment even when these versions match ATS.
+fastapi==0.115.0
+uvicorn==0.30.6
+websockets>=12.0,<16.0

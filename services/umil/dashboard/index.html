@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>UMIL Market Intelligence</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">ATS RESEARCH INFRASTRUCTURE</span><h1>Universe Market Intelligence</h1></div>
+    <div id="health" class="status warming">CONNECTING</div>
+  </header>
+  <main>
+    <section class="metrics" id="breadth">
+      <article><span>Market posture</span><strong id="posture">—</strong></article>
+      <article><span>Advancers</span><strong id="advancers">—</strong></article>
+      <article><span>Decliners</span><strong id="decliners">—</strong></article>
+      <article><span>Coverage</span><strong id="coverage">—</strong></article>
+    </section>
+    <section class="panel">
+      <div class="toolbar">
+        <div><span class="eyebrow">POINT-IN-TIME · READ ONLY</span><h2>All markets</h2></div>
+        <input id="search" type="search" placeholder="Search BTCUSDT…" autocomplete="off">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Instrument</th><th>Price</th><th>24h</th><th>Volume</th><th>Tier</th><th>Intelligence</th><th>DNA</th></tr></thead>
+          <tbody id="markets"><tr><td colspan="7">Loading public market data…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="toolbar"><div><span class="eyebrow">CROSS-MARKET DETECTION</span><h2>Anomalies</h2></div></div>
+      <div id="anomalies" class="anomaly-grid"><p>No intelligence snapshots yet.</p></div>
+    </section>
+  </main>
+  <footer>UMIL has no trading, execution, risk, or model-training authority.</footer>
+  <script src="/dashboard/app.js" defer></script>
+</body>
+</html>

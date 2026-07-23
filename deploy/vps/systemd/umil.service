@@ -1,0 +1,26 @@
+[Unit]
+Description=ATS Universe Market Intelligence Layer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atsapp
+Group=atsapp
+WorkingDirectory=/opt/trading-analysis-platform
+EnvironmentFile=/etc/ats/umil.env
+ExecStart=/opt/trading-analysis-platform/.venv-umil/bin/python -m uvicorn services.umil.app.main:app --host 127.0.0.1 --port 8100 --workers 1 --log-level info
+Restart=always
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/umil /var/log/ats-umil
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

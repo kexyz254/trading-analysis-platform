@@ -21,6 +21,8 @@ let _subscribedStreams = new Set();
 let _tickerHandler = null;
 let _klineHandler = null;
 let _currentKlineStream = null;
+let _aggTradeHandler = null;
+let _currentAggTradeStream = null;
 
 function _binanceSymbol(symbol) {
   return symbol.replace("/", "").toLowerCase(); // "BTC/USDT" -> "btcusdt"
@@ -55,7 +57,14 @@ function _handleMessage(event) {
   }
   if (data.result !== undefined || data.id !== undefined) return; // SUBSCRIBE/UNSUBSCRIBE ack, not market data
 
-  if (data.e === "24hrTicker" && _tickerHandler) {
+  if (data.e === "aggTrade" && _aggTradeHandler) {
+    _aggTradeHandler({
+      symbol: data.s,
+      price: data.p,
+      eventMs: data.E,
+      tradeMs: data.T,
+    });
+  } else if (data.e === "24hrTicker" && _tickerHandler) {
     _tickerHandler({
       symbol: data.s, // e.g. "BTCUSDT" (no slash - caller must match against its own symbol formatting)
       last: parseFloat(data.c),
@@ -121,6 +130,18 @@ function setKlineSubscription(symbol, timeframe, handler) {
   if (_currentKlineStream !== newStream) {
     _subscribe([newStream]);
     _currentKlineStream = newStream;
+  }
+}
+
+function setAggTradeSubscription(symbol, handler) {
+  _aggTradeHandler = handler;
+  const nextStream = `${_binanceSymbol(symbol)}@aggTrade`;
+  if (_currentAggTradeStream && _currentAggTradeStream !== nextStream) {
+    _unsubscribe([_currentAggTradeStream]);
+  }
+  if (_currentAggTradeStream !== nextStream) {
+    _subscribe([nextStream]);
+    _currentAggTradeStream = nextStream;
   }
 }
 

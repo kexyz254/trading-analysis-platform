@@ -15,11 +15,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional, Any, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,7 @@ from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.config import load_config
 from webapp import data_access as da
 from webapp.bankroll_api import router as bankroll_router
+from webapp.umil_gateway import router as umil_gateway_router
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -69,25 +71,27 @@ _db_path = _args.db
 logger = logging.getLogger(__name__)
 
 
-async def _price_call_loop() -> None:
-    """Background loop for the self-scoring 5-minute price calls (see
-    webapp/price_call.py). Runs in this dashboard process so the track
-    record accumulates 24/7 whether or not anyone is watching; each pass
-    is run in a worker thread because it does blocking exchange I/O and
-    (at most every 30 min per symbol) model training.
+def _research_service_error(operation: str, exc: Exception) -> HTTPException:
+    """Keep internal paths and database diagnostics out of API responses."""
+    logger.error(
+        "Confidential research operation failed: %s",
+        operation,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return HTTPException(
+        status_code=503,
+        detail="Confidential research service is temporarily unavailable.",
+    )
 
-    CRITICAL: this writes to the dashboard-owned analytics database ONLY
-    (price_call.DEFAULT_ANALYTICS_DB), never to trading_system.db - the
-    dashboard must stay strictly read-only on the shared trading journal.
-    See price_call.py's storage note for the production corruption this
-    rule exists to prevent."""
+
+async def _price_call_loop() -> None:
+    """Run the Binance boundary-aligned paper-call stream continuously.
+
+    This writes only to the dashboard-owned analytics database. Public
+    mainnet market data is real; execution and bankrolls remain simulated.
+    """
     from webapp import price_call
-    while True:
-        try:
-            await asyncio.to_thread(price_call.run_once, _config)
-        except Exception:  # noqa: BLE001 - the loop must survive any single pass failing
-            logger.exception("price call loop pass failed")
-        await asyncio.sleep(60)
+    await price_call.run_binance_stream(_config)
 
 
 @asynccontextmanager
@@ -97,6 +101,10 @@ async def _lifespan(app: FastAPI):
     # create_task(...) can be garbage-collected mid-flight and the loop
     # silently stops - no exception, no log. Cancelled (and awaited) on
     # shutdown so SIGTERM doesn't kill a pass mid-write to analytics.db.
+    # Complete the additive schema migration before accepting API traffic, so
+    # the first bankroll request cannot race the background stream startup.
+    from webapp.price_call import RealTimePriceCallEngine
+    await asyncio.to_thread(RealTimePriceCallEngine)
     task = asyncio.create_task(_price_call_loop())
     try:
         yield
@@ -108,17 +116,49 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="Trading System Dashboard API", lifespan=_lifespan)
 
-# Apply CORS configurations to safely handle front-end client connections
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# The dashboard is same-origin by default. Cross-origin access must be opted in
+# with an explicit comma-separated allowlist; wildcard credentialed CORS would
+# expose proprietary research APIs to any website opened in an operator's
+# browser.
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ATS_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if _allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET"],
+        allow_headers=["Accept", "Content-Type"],
+    )
+
+
+@app.middleware("http")
+async def protect_research_responses(request: Request, call_next):
+    """Prevent browser/proxy retention and passive embedding of research UI."""
+    response = await call_next(request)
+    if request.url.path == "/pro" or request.url.path.startswith(("/pro/", "/api/pro/")):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "connect-src 'self' ws: wss:; object-src 'none'; "
+            "base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+        )
+    return response
 
 # Register the incoming bankroll sub-router channels cleanly
 app.include_router(bankroll_router)
+app.include_router(umil_gateway_router)
 
 
 # ---------------------------------------------------------------------------
@@ -134,12 +174,9 @@ def status():
         "timeframe": _config.timeframe,
         "tournament_enabled": _config.tournament.enabled,
         "tournament_drive_live_trading": _config.tournament.drive_live_trading,
-        # Real Binance public WebSocket endpoint the BROWSER connects to
-        # directly for live ticker/kline updates - testnet vs mainnet must
-        # match config.mode exactly, same as every other exchange touchpoint.
-        "ws_base_url": (
-            "wss://stream.binance.com:9443/ws" if _config.is_live else "wss://stream.testnet.binance.vision/ws"
-        ),
+        # Market evidence always uses Binance Spot mainnet public data. This
+        # does not alter paper/live order execution settings.
+        "ws_base_url": "wss://stream.binance.com:9443/ws",
     }
 
 
@@ -182,16 +219,16 @@ def tournament_events(limit: int = 200):
 def markets(quote: str = "USDT"):
     try:
         return da.market_overview(_config, quote_currency=quote)
-    except Exception as exc:  # noqa: BLE001 - surface as a clean API error, not a 500 stack trace
-        raise HTTPException(status_code=502, detail=f"Could not fetch market overview: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _research_service_error("market overview", exc) from exc
 
 
 @app.get("/api/wallet-balance")
 def wallet_balance(quote: str = "USDT"):
     try:
         return da.real_wallet_balance(_config, quote_currency=quote)
-    except Exception as exc:  # noqa: BLE001 - surface as a clean API error, not a 500 stack trace
-        raise HTTPException(status_code=502, detail=f"Could not fetch real wallet balance: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _research_service_error("wallet balance", exc) from exc
 
 
 @app.get("/api/ohlcv")
@@ -201,7 +238,7 @@ def ohlcv(symbol: str, timeframe: str = "1h", limit: int = 300):
     try:
         return da.fetch_ohlcv(_config, symbol, timeframe, limit=limit)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Could not fetch OHLCV for {symbol}: {exc}") from exc
+        raise _research_service_error("exchange OHLCV", exc) from exc
 
 
 @app.get("/api/timeframes")
@@ -293,7 +330,7 @@ def pro_ohlcv(symbol: str, timeframe: str = "1h", limit: int = 200):
         bars = journal.get_ohlcv_history(symbol, timeframe, limit)
         return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise _research_service_error("journal OHLCV report", exc) from exc
 
 
 @app.get("/api/pro/prediction/{symbol:path}")
@@ -316,22 +353,30 @@ def pro_prediction(symbol: str):
             "timestamp": d["timestamp"],
         }
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise _research_service_error("prediction report", exc) from exc
 
 
 @app.get("/api/pro/features/{symbol:path}")
 def pro_features(symbol: str):
-    """Latest SHAP feature importance for the champion model."""
+    """Latest SHAP feature importance for the legacy champion model only."""
     try:
         from trading_assistant.persistence.journal import Journal
         journal = Journal(_db_path, initialize=False)
         importance = journal.latest_feature_importance(symbol)
         if not importance:
-            return {"features": []}
+            return {
+                "source": "LEGACY_CHAMPION_SHAP",
+                "features": [],
+                "tournament_ml_included": False,
+            }
         sorted_features = sorted(importance["importance"].items(), key=lambda x: abs(x[1]), reverse=True)[:10]
-        return {"features": [{"name": k, "importance": v} for k, v in sorted_features]}
+        return {
+            "source": "LEGACY_CHAMPION_SHAP",
+            "features": [{"name": k, "importance": v} for k, v in sorted_features],
+            "tournament_ml_included": False,
+        }
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise _research_service_error("feature report", exc) from exc
 
 
 @app.get("/api/pro/trades/{symbol:path}")
@@ -343,7 +388,7 @@ def pro_trades(symbol: str, limit: int = 50):
         trades = journal.recent_trades(symbol=symbol, limit=limit)
         return {"symbol": symbol, "trades": trades}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise _research_service_error("trade report", exc) from exc
 
 
 @app.get("/api/pro/candidates/{symbol:path}")
@@ -364,7 +409,7 @@ def pro_candidates(symbol: str):
             })
         return {"symbol": symbol, "candidates": candidates}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise _research_service_error("legacy candidate report", exc) from exc
 
 
 @app.get("/api/pro/model-info/{symbol:path}")
@@ -382,6 +427,7 @@ def pro_model_info(symbol: str):
         decisions = list(journal.recent_decisions(symbol=symbol, limit=1, exclude_paper=True))
         decision = decisions[0] if decisions else None
         details = (decision or {}).get("details", {}) or {}
+        warnings = []
 
         # Most recent retrain attempt for this symbol, and the most recent
         # one that actually promoted - "last retrain" vs "last promotion"
@@ -390,20 +436,32 @@ def pro_model_info(symbol: str):
         # _read_events), so iterate as returned and take the first match.
         last_retrain = None
         last_promotion = None
-        for ev in da.retrain_events(_db_path, limit=500):
-            if ev.get("symbol") not in (symbol, None):
-                continue
-            if last_retrain is None:
-                last_retrain = ev
-            if ev.get("promoted") and last_promotion is None:
-                last_promotion = ev
-            if last_retrain is not None and last_promotion is not None:
-                break
+        try:
+            for ev in da.retrain_events(_db_path, limit=500):
+                if ev.get("symbol") not in (symbol, None):
+                    continue
+                if last_retrain is None:
+                    last_retrain = ev
+                if ev.get("promoted") and last_promotion is None:
+                    last_promotion = ev
+                if last_retrain is not None and last_promotion is not None:
+                    break
+        except Exception:  # optional history must not hide current model state
+            warnings.append("retrain history unavailable")
 
-        importance = journal.latest_feature_importance(symbol)
-        feature_count = len(importance["importance"]) if importance else 0
+        feature_count = None
+        try:
+            importance = journal.latest_feature_importance(symbol)
+            feature_count = len(importance["importance"]) if importance else 0
+        except Exception:  # optional explanation data may predate its schema
+            warnings.append("feature importance unavailable")
 
         prob_up = details.get("probability_up")
+        try:
+            prob_up = float(prob_up) if prob_up is not None else None
+        except (TypeError, ValueError):
+            warnings.append("stored probability is invalid")
+            prob_up = None
         signal = decision["signal"] if decision else "HOLD"
         return {
             "symbol": symbol,
@@ -421,18 +479,17 @@ def pro_model_info(symbol: str):
             "last_retrain_at": last_retrain["timestamp"] if last_retrain else None,
             "last_promotion_at": last_promotion["timestamp"] if last_promotion else None,
             "retrain_interval_hours": _config.learning.retrain_interval_hours,
+            "warnings": warnings,
         }
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _research_service_error("professional model", exc) from exc
 
 
 @app.get("/api/pro/price-calls/{symbol:path}")
 async def pro_price_calls(symbol: str, limit: int = 20) -> Dict[str, Any]:
-    """The symbol's current open 5-minute price call, its recent settled
-    calls, and the running score - see webapp/price_call.py. Reads the
-    dashboard-owned analytics db, NOT trading_system.db."""
+    """Validated calls, live Binance evidence, and performance metrics."""
     try:
-        from webapp.price_call import get_book
+        from webapp.price_call import get_book, state_registry
         book = get_book()
         sym = symbol.upper()
 
@@ -440,15 +497,151 @@ async def pro_price_calls(symbol: str, limit: int = 20) -> Dict[str, Any]:
         open_call = await asyncio.to_thread(book.open_call, sym)
         recent = await asyncio.to_thread(book.recent_settled, sym, limit=limit)
         stats = await asyncio.to_thread(book.stats, sym)
+        economic_evidence = await asyncio.to_thread(book.economic_evidence, sym)
 
         return {
             "symbol": sym,
             "open_call": open_call,
             "recent": recent,
             "stats": stats,
+            "economic_evidence": economic_evidence,
+            "market": state_registry.snapshot(sym),
+            "evidence_label": (
+                "REAL BINANCE MARKET DATA · SIMULATED EXECUTION · "
+                "NOT LIVE CAPITAL"
+            ),
         }
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise _research_service_error("price-call report", exc) from exc
+
+
+@app.get("/api/pro/quant-tournament/{symbol:path}")
+async def pro_quant_tournament(symbol: str) -> Dict[str, Any]:
+    """Cost-aware shadow tournament on the verified Binance cycle feed.
+
+    This endpoint is read-only.  Promotion history and candidate metrics are
+    derived from the tournament's additive analytics tables; they never alter
+    the existing price-call track record or the strategy execution account.
+    """
+    try:
+        from webapp.price_call import DEFAULT_ANALYTICS_DB
+        from webapp.quant_tournament import get_quant_book
+
+        return await asyncio.to_thread(
+            get_quant_book(DEFAULT_ANALYTICS_DB).report,
+            symbol.upper(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _research_service_error("quant tournament report", exc) from exc
+
+
+@app.get("/api/pro/learning-health/{symbol:path}")
+async def pro_learning_health(
+    symbol: str,
+    timeframe: str = "15m",
+) -> Dict[str, Any]:
+    """Independent evidence of training, inference, features, and feedback.
+
+    This read-only endpoint never triggers training and grants no execution or
+    promotion authority to dashboard analytics or a future interpreter.
+    """
+    if timeframe not in da.TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"timeframe must be one of {da.TIMEFRAMES}",
+        )
+    try:
+        from webapp.learning_observability import build_learning_health
+        from webapp.price_call import DEFAULT_ANALYTICS_DB
+
+        return await asyncio.to_thread(
+            build_learning_health,
+            _db_path,
+            symbol.upper(),
+            tournament_db_path=DEFAULT_ANALYTICS_DB,
+            forecast_timeframe=timeframe,
+            legacy_timeframe=_config.timeframe,
+            retrain_interval_hours=_config.learning.retrain_interval_hours,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _research_service_error("learning health report", exc) from exc
+
+
+@app.get("/api/pro/market-interpreter/{symbol:path}")
+async def pro_market_interpreter(
+    symbol: str,
+    timeframe: str = "15m",
+) -> Dict[str, Any]:
+    """Explain independent market evidence without creating authority.
+
+    Every source is read independently and fails closed.  A missing optional
+    path degrades the interpretation instead of taking down the dashboard or
+    being silently replaced with fabricated evidence.  The forecast cache is
+    read only: this endpoint never trains a model.
+    """
+    if timeframe not in da.TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"timeframe must be one of {da.TIMEFRAMES}",
+        )
+    sym = symbol.upper()
+
+    from trading_assistant.persistence.journal import Journal
+    from webapp.forecast import get_latest_forecast_snapshot
+    from webapp.market_interpreter import build_market_interpretation
+    from webapp.price_call import DEFAULT_ANALYTICS_DB, PriceCallBook
+    from webapp.quant_tournament import get_quant_book
+
+    def _legacy_prediction() -> Dict[str, Any]:
+        journal = Journal(_db_path, initialize=False)
+        decisions = list(
+            journal.recent_decisions(
+                symbol=sym,
+                limit=1,
+                exclude_paper=True,
+            )
+        )
+        if not decisions:
+            return {}
+        decision = decisions[0]
+        return {
+            "signal": decision.get("signal"),
+            "confidence": decision.get("confidence"),
+            "timestamp": decision.get("timestamp"),
+        }
+
+    async def _source(label: str, function, *args):
+        try:
+            return await asyncio.to_thread(function, *args), None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Market interpreter source unavailable: %s",
+                label,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            return None, f"{label}_UNAVAILABLE"
+
+    price_book = PriceCallBook(DEFAULT_ANALYTICS_DB)
+    source_results = await asyncio.gather(
+        _source("LEGACY_STRATEGY", _legacy_prediction),
+        _source("FORECAST_ML", get_latest_forecast_snapshot, sym, timeframe),
+        _source("CHART_GEOMETRY", da.detected_patterns, _config, sym, timeframe),
+        _source("TOURNAMENT", get_quant_book(DEFAULT_ANALYTICS_DB).report, sym),
+        _source("ECONOMIC_GATE", price_book.open_call, sym),
+    )
+    values = [item[0] for item in source_results]
+    errors = [item[1] for item in source_results if item[1]]
+    return build_market_interpretation(
+        symbol=sym,
+        timeframe=timeframe,
+        engine_timeframe=_config.timeframe,
+        legacy_prediction=values[0] or {},
+        forecast=values[1] or {},
+        patterns=values[2] or [],
+        tournament=values[3] or {},
+        open_calls=values[4] or [],
+        source_errors=errors,
+    )
 
 
 @app.get("/api/pro/patterns/{symbol:path}")
@@ -464,7 +657,7 @@ def pro_patterns(symbol: str, timeframe: str = "1h"):
     try:
         return {"symbol": symbol, "timeframe": timeframe, "patterns": da.detected_patterns(_config, symbol, timeframe)}
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Could not detect patterns: {exc}") from exc
+        raise _research_service_error("pattern report", exc) from exc
 
 
 @app.get("/api/pro/forecast/{symbol:path}")
@@ -481,8 +674,8 @@ async def pro_forecast(symbol: str, timeframe: str = "1h") -> Dict[str, Any]:
         # CRITICAL: Prevent Random Forest model fitting from freezing the core async stream
         result = await asyncio.to_thread(get_forecast, _config, sym, timeframe)
         return result
-    except Exception as exc:  # noqa: BLE001 - surface as a clean API error, not a 500 stack trace
-        raise HTTPException(status_code=502, detail=f"Could not build forecast: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise _research_service_error("forecast report", exc) from exc
 
 
 @app.get("/api/pro/decisions/{symbol:path}")
@@ -507,7 +700,7 @@ def pro_decisions(symbol: str, limit: int = 200):
             ]
         }
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise _research_service_error("decision report", exc) from exc
 
 
 @app.get("/api/pro/position/{symbol:path}")
@@ -531,7 +724,7 @@ def pro_position(symbol: str):
             "as_of": snapshot["timestamp"],
         }
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise _research_service_error("position report", exc) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -561,7 +754,10 @@ app.mount("/pro/static", StaticFiles(directory=str(PRO_STATIC_DIR)), name="pro_s
 # Same mtime-derived cache busting as the main dashboard (_static_asset_version
 # above documents the real mobile incident that motivated it). ws.js lives in
 # STATIC_DIR but is loaded by the pro page too, so it's versioned here as well.
-_PRO_CACHE_BUSTED_ASSETS = ("style.css", "app.js")
+_PRO_CACHE_BUSTED_ASSETS = (
+    "style.css", "app.js", "price_call.css", "price_call.js", "umil.css", "umil.js",
+    "vendor/lightweight-charts-4.2.0.min.js",
+)
 
 
 def _pro_asset_version() -> str:

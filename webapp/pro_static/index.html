@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>ATS Pro Terminal</title>
     <link rel="stylesheet" href="/pro/static/style.css">
+    <link rel="stylesheet" href="/pro/static/price_call.css">
+    <link rel="stylesheet" href="/pro/static/umil.css">
     <!-- Lightweight Charts (TradingView open-source library). Pinned to
          v4.2.0: app.js uses the v4 API (addCandlestickSeries, setMarkers)
          which v5 removed in favor of addSeries()/createSeriesMarkers. -->
-    <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="/pro/static/vendor/lightweight-charts-4.2.0.min.js"></script>
 </head>
 <body>
     <div id="app">
@@ -26,8 +28,8 @@
             <div class="tb-center">
                 <span id="current-price" class="price-big">—</span>
                 <span id="price-change" class="change">—</span>
-                <span id="live-dot" class="dot" title="Live">●</span>
-                <span id="mode-badge" class="badge">TESTNET</span>
+                <span id="live-dot" class="dot" title="Verifying Binance market-data freshness">●</span>
+                <span id="mode-badge" class="badge">VERIFYING MARKET</span>
             </div>
             <div class="tb-right">
                 <div class="champion-info" id="champion-info">—</div>
@@ -39,10 +41,12 @@
         <div id="main-container">
             <!-- Left Sidebar (collapsible) -->
             <nav id="sidebar">
-                <a href="#" class="nav-item active" data-panel="chart">📈 Chart</a>
-                <a href="#" class="nav-item" data-panel="research">🧪 Research</a>
-                <a href="#" class="nav-item" data-panel="tournament">🏆 Tournament</a>
-                <a href="#" class="nav-item" data-panel="logs">📝 Logs</a>
+                <a href="#overview" class="nav-item active" data-workspace-target="overview">📊 Overview</a>
+                <a href="#price-calls" class="nav-item" data-workspace-target="price-calls">📈 Price Calls</a>
+                <a href="#tournament" class="nav-item" data-workspace-target="tournament">🏆 Tournament</a>
+                <a href="#intelligence" class="nav-item" data-workspace-target="intelligence">◈ Intelligence</a>
+                <a href="#research" class="nav-item" data-workspace-target="research">🧪 Research</a>
+                <a href="#execution" class="nav-item" data-workspace-target="execution">⚙ Execution</a>
             </nav>
 
             <!-- Chart Panel (volume renders inside the main chart on its
@@ -55,49 +59,229 @@
 
             <!-- Right Panel -->
             <aside id="right-panel">
+                <div class="analysis-tabs" role="tablist" aria-label="ATS research workspaces">
+                    <button type="button" class="analysis-tab active" role="tab" aria-selected="true" data-workspace-target="overview">Overview</button>
+                    <button type="button" class="analysis-tab" role="tab" aria-selected="false" data-workspace-target="price-calls">Price Calls</button>
+                    <button type="button" class="analysis-tab" role="tab" aria-selected="false" data-workspace-target="tournament">Tournament</button>
+                    <button type="button" class="analysis-tab" role="tab" aria-selected="false" data-workspace-target="intelligence">Intelligence</button>
+                    <button type="button" class="analysis-tab" role="tab" aria-selected="false" data-workspace-target="research">Research</button>
+                    <button type="button" class="analysis-tab" role="tab" aria-selected="false" data-workspace-target="execution">Execution</button>
+                </div>
+                <div class="research-classification">
+                    <span>CONFIDENTIAL RESEARCH</span>
+                    <small>aggregated metrics · no raw strategy internals · no browser caching</small>
+                </div>
+
                 <!-- The system's REAL model (promoted champion / PredictionAgent) -->
-                <div class="card system-model" id="prediction-card">
-                    <h3>AI Prediction <span class="src-badge live">live model</span></h3>
+                <div class="card system-model workspace-card" data-workspace="overview" id="prediction-card">
+                    <h3>Strategy Model Signal <span class="src-badge live">separate from Binance price calls</span></h3>
                     <div class="card-content" id="prediction-content">Loading…</div>
                 </div>
-                <div class="card system-model" id="model-info-card">
-                    <h3>Model Info</h3>
+                <div class="card system-model workspace-card" data-workspace="overview" id="model-info-card">
+                    <h3>Strategy Model Info <span class="src-badge strategy-badge">journal-backed</span></h3>
                     <div class="card-content" id="model-info-content">Loading…</div>
                 </div>
-                <div class="card" id="position-card">
-                    <h3>Current Position</h3>
+                <div class="card workspace-card" data-workspace="overview" id="position-card">
+                    <h3>Strategy Account Position <span class="src-badge strategy-badge">separate execution account</span></h3>
                     <div class="card-content" id="position-content">No open position</div>
                 </div>
 
                 <!-- Dashboard-side analytics: NOT the live trading model -->
-                <div class="card analytics" id="call-card">
-                    <h3>5-Min Price Call <span class="src-badge analytics-badge">dashboard analytics</span></h3>
+                <div class="card analytics workspace-card" data-workspace="research" id="market-interpreter-card">
+                    <h3>Overall Market Interpreter <span id="interpreter-tf" class="tf-label"></span> <span class="src-badge analytics-badge">read-only synthesis</span></h3>
+                    <div class="card-content" id="market-interpreter-content">Waiting for source-labeled evidence…</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="price-calls" id="call-card">
+                    <h3>Binance Price Calls <span class="src-badge analytics-badge">$1 fixed stake · one per cycle</span></h3>
                     <div class="card-content" id="call-content">Waiting for first call…</div>
                 </div>
-                <div class="card analytics" id="forecast-card">
+                <div class="card analytics workspace-card" data-workspace="price-calls" id="economic-evidence-card">
+                    <h3>Economic Evidence Eligibility <span class="src-badge analytics-badge">point-in-time · aggregate only</span></h3>
+                    <div class="card-content" id="economic-evidence-content">Classifying prospective evidence…</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="tournament" id="tournament-health-card">
+                    <h3>Tournament Health <span class="src-badge analytics-badge">decision integrity</span></h3>
+                    <div class="card-content" id="tournament-health-content">Verifying candidate coverage…</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="tournament" id="tournament-standings-card">
+                    <h3>Tournament Standings <span class="src-badge analytics-badge">prospective evidence only</span></h3>
+                    <div class="card-content" id="tournament-standings-content">Waiting for candidate decisions…</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="tournament" id="quant-tournament-card">
+                    <h3>Quant Strategy Tournament <span class="src-badge analytics-badge">cost-aware shadow competition</span></h3>
+                    <div class="card-content" id="quant-tournament-content">Waiting for tournament evidence…</div>
+                </div>
+                <div class="card analytics workspace-card umil-card" data-workspace="intelligence" id="umil-card">
+                    <div class="umil-heading">
+                        <div>
+                            <span class="umil-eyebrow">UNIVERSE MARKET INTELLIGENCE</span>
+                            <h3>Institutional Intelligence Surface <span class="src-badge analytics-badge">complete sanctioned API · read only</span></h3>
+                        </div>
+                        <span id="umil-state" class="umil-state unavailable" aria-live="polite">OFFLINE</span>
+                    </div>
+                    <div class="umil-subtabs" role="tablist" aria-label="Universe intelligence views">
+                        <button type="button" class="umil-subtab active" role="tab" aria-selected="true" data-umil-view="command">Command</button>
+                        <button type="button" class="umil-subtab" role="tab" aria-selected="false" data-umil-view="universe">Universe</button>
+                        <button type="button" class="umil-subtab" role="tab" aria-selected="false" data-umil-view="anomalies">Anomalies</button>
+                        <button type="button" class="umil-subtab" role="tab" aria-selected="false" data-umil-view="instrument">Instrument</button>
+                        <button type="button" class="umil-subtab" role="tab" aria-selected="false" data-umil-view="scale">Scale</button>
+                        <button type="button" class="umil-subtab" role="tab" aria-selected="false" data-umil-view="evidence">Evidence</button>
+                        <button type="button" class="umil-subtab" role="tab" aria-selected="false" data-umil-view="raw">Raw</button>
+                    </div>
+                    <div id="umil-content" class="card-content umil-content">
+                        <section class="umil-view active" data-umil-panel="command">
+                            <div class="umil-section-title"><strong>Service command center</strong><span id="umil-command-asof">—</span></div>
+                            <div class="umil-metrics umil-metrics-wide" aria-label="UMIL health">
+                                <article><small>Version</small><strong id="umil-version">—</strong></article>
+                                <article><small>Provider</small><strong id="umil-provider">—</strong></article>
+                                <article><small>Coverage</small><strong id="umil-observed">—</strong></article>
+                                <article><small>Batch age</small><strong id="umil-batch-age">—</strong></article>
+                                <article><small>Evidence chain</small><strong id="umil-evidence-chain">—</strong></article>
+                                <article><small>Scale</small><strong id="umil-scale-state">—</strong></article>
+                                <article><small>Recoveries</small><strong id="umil-recoveries">—</strong></article>
+                                <article><small>Failures</small><strong id="umil-failures">—</strong></article>
+                            </div>
+                            <div class="umil-section-title"><strong>Market breadth</strong><span id="umil-breadth-asof">—</span></div>
+                            <div class="umil-metrics" aria-label="Market breadth">
+                                <article><small>Posture</small><strong id="umil-posture">—</strong></article>
+                                <article><small>Advancers</small><strong id="umil-advancers">—</strong></article>
+                                <article><small>Decliners</small><strong id="umil-decliners">—</strong></article>
+                                <article><small>Unchanged</small><strong id="umil-unchanged">—</strong></article>
+                            </div>
+                            <div class="umil-breadth" aria-label="Advancers versus decliners"><div id="umil-advance-bar" class="umil-advance-bar"></div></div>
+                            <div class="umil-quality-grid">
+                                <span>Completeness <b id="umil-coverage">—</b></span>
+                                <span>Freshness <b id="umil-freshness">—</b></span>
+                                <span>Median 24h <b id="umil-median">—</b></span>
+                                <span>Dispersion <b id="umil-dispersion">—</b></span>
+                                <span>Volume concentration <b id="umil-concentration">—</b></span>
+                                <span>Volume-weighted advance <b id="umil-volume-advance">—</b></span>
+                                <span>Synchronization <b id="umil-sync">—</b></span>
+                                <span>Quality <b id="umil-quality-state">—</b></span>
+                            </div>
+                            <div class="umil-leaders"><small>Pressure &amp; trend leaders</small><div id="umil-leader-list" class="umil-chip-row">Warming…</div></div>
+                            <div class="umil-split-grid">
+                                <div><div class="umil-section-title"><strong>Quality and latency</strong></div><div id="umil-quality-detail" class="umil-kv-list">—</div></div>
+                                <div><div class="umil-section-title"><strong>Authority and versions</strong></div><div id="umil-authority" class="umil-kv-list">—</div></div>
+                            </div>
+                        </section>
+
+                        <section class="umil-view" data-umil-panel="universe" hidden>
+                            <div class="umil-toolbar">
+                                <label class="umil-search-label" for="umil-search">Search all instruments</label>
+                                <input id="umil-search" class="umil-search" type="search" placeholder="BTCUSDT, base, quote or venue" autocomplete="off">
+                                <span id="umil-universe-count" class="umil-toolbar-status">—</span>
+                            </div>
+                            <div class="umil-table-wrap umil-table-tall">
+                                <table class="umil-table umil-table-dense">
+                                    <thead><tr><th>Market</th><th>Price</th><th>24h</th><th>Volume</th><th>Tier</th><th>State</th><th>Trend</th><th>Anomaly</th></tr></thead>
+                                    <tbody id="umil-markets"><tr><td colspan="8">UMIL is not connected.</td></tr></tbody>
+                                </table>
+                            </div>
+                        </section>
+
+                        <section class="umil-view" data-umil-panel="anomalies" hidden>
+                            <div class="umil-section-title"><strong>Point-in-time anomaly scanner</strong><span id="umil-anomaly-count">—</span></div>
+                            <div id="umil-anomalies" class="umil-anomaly-list">Waiting for point-in-time evidence…</div>
+                        </section>
+
+                        <section class="umil-view" data-umil-panel="instrument" hidden>
+                            <div class="umil-toolbar umil-instrument-toolbar">
+                                <label class="umil-search-label" for="umil-symbol-input">Selected instrument</label>
+                                <input id="umil-symbol-input" class="umil-search" type="search" value="BTCUSDT" placeholder="BTCUSDT" autocomplete="off">
+                                <button id="umil-load-symbol" type="button" class="umil-action">Load intelligence</button>
+                                <span id="umil-selected-status" class="umil-toolbar-status">—</span>
+                            </div>
+                            <div id="umil-instrument-summary" class="umil-detail">Select an instrument from the universe.</div>
+                            <div class="umil-split-grid">
+                                <div><div class="umil-section-title"><strong>DNA dimensions</strong></div><div id="umil-dimensions" class="umil-stack">—</div></div>
+                                <div><div class="umil-section-title"><strong>Commentary claims</strong></div><div id="umil-commentary" class="umil-stack">—</div></div>
+                            </div>
+                            <div class="umil-section-title"><strong>Closed-candle timeframes</strong></div>
+                            <div id="umil-timeframes" class="umil-table-wrap">—</div>
+                            <div class="umil-split-grid">
+                                <div><div class="umil-section-title"><strong>Microstructure</strong></div><div id="umil-microstructure" class="umil-kv-list">—</div></div>
+                                <div><div class="umil-section-title"><strong>Derivatives</strong></div><div id="umil-derivatives" class="umil-kv-list">—</div></div>
+                            </div>
+                            <div class="umil-section-title"><strong>Watch conditions</strong></div>
+                            <div id="umil-watch" class="umil-stack">—</div>
+                            <div class="umil-history-controls">
+                                <label for="umil-history-asof">Historical knowledge cutoff</label>
+                                <input id="umil-history-asof" type="datetime-local" step="1">
+                                <button id="umil-load-history" type="button" class="umil-action">Load as-of record</button>
+                            </div>
+                            <div id="umil-history" class="umil-detail" hidden></div>
+                            <details class="umil-payload"><summary>Full validated instrument payload</summary><pre id="umil-instrument-payload">—</pre></details>
+                        </section>
+
+                        <section class="umil-view" data-umil-panel="scale" hidden>
+                            <div class="umil-toolbar">
+                                <label class="umil-search-label" for="umil-scale-search">Search market scale</label>
+                                <input id="umil-scale-search" class="umil-search" type="search" placeholder="BTC, bitcoin or rank" autocomplete="off">
+                                <span id="umil-scale-count" class="umil-toolbar-status">Load on demand</span>
+                            </div>
+                            <div class="umil-table-wrap umil-table-tall">
+                                <table class="umil-table umil-table-dense">
+                                    <thead><tr><th>Rank</th><th>Asset</th><th>Market cap</th><th>FDV</th><th>Supply</th><th>Identity</th><th>As of</th></tr></thead>
+                                    <tbody id="umil-scale"><tr><td colspan="7">Open this view to load market scale.</td></tr></tbody>
+                                </table>
+                            </div>
+                        </section>
+
+                        <section class="umil-view" data-umil-panel="evidence" hidden>
+                            <div class="umil-toolbar">
+                                <label class="umil-search-label" for="umil-evidence-input">Evidence identity</label>
+                                <input id="umil-evidence-input" class="umil-search" type="search" placeholder="UUID" autocomplete="off">
+                                <button id="umil-load-evidence" type="button" class="umil-action">Trace evidence</button>
+                            </div>
+                            <div id="umil-evidence" class="umil-detail">Choose an evidence ID from an anomaly, insight, or selected instrument.</div>
+                        </section>
+
+                        <section class="umil-view" data-umil-panel="raw" hidden>
+                            <div class="umil-toolbar">
+                                <label class="umil-search-label" for="umil-raw-select">Validated payload</label>
+                                <select id="umil-raw-select" class="umil-search"><option value="">No payload captured</option></select>
+                            </div>
+                            <pre id="umil-raw" class="umil-raw">Open the Intelligence workspace to capture UMIL payloads.</pre>
+                        </section>
+                    </div>
+                    <div id="umil-note" class="umil-note">UMIL is an isolated read-only intelligence service. It cannot trade, access credentials, train models, alter ATS decisions, modify risk, or change tournament state.</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="research" id="forecast-card">
                     <h3>Next 3 Candles <span id="forecast-tf" class="tf-label"></span> <span class="src-badge analytics-badge">dashboard analytics</span></h3>
                     <div class="card-content" id="forecast-content">Training model…</div>
                 </div>
-                <div class="card analytics" id="patterns-card">
+                <div class="card analytics workspace-card" data-workspace="research" id="learning-health-card">
+                    <h3>Learning Verification <span class="src-badge analytics-badge">three independent paths</span></h3>
+                    <div class="card-content" id="learning-health-content">Verifying training and inference evidence…</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="research" id="market-state-card">
+                    <h3>Market State Intelligence <span class="src-badge analytics-badge">closed-candle · point-in-time</span></h3>
+                    <div class="card-content" id="market-state-content">Verifying market history…</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="research" id="candidate-readiness-card">
+                    <h3>Candidate Readiness <span class="src-badge analytics-badge">aggregated categories only</span></h3>
+                    <div class="card-content" id="candidate-readiness-content">Waiting for market-state decisions…</div>
+                </div>
+                <div class="card analytics workspace-card" data-workspace="research" id="patterns-card">
                     <h3>Chart Patterns <span class="src-badge analytics-badge">geometry</span></h3>
                     <div class="card-content" id="patterns-content">Scanning…</div>
                 </div>
 
-                <div class="card" id="features-card">
-                    <h3>Top Features <span class="tf-label">live model</span></h3>
+                <div class="card workspace-card" data-workspace="research" id="features-card">
+                    <h3>Legacy Strategy Features <span class="tf-label">champion SHAP only</span></h3>
                     <div class="card-content" id="features-content">No model promoted yet</div>
                 </div>
-                <div class="card" id="trades-card">
-                    <h3>Recent Trades</h3>
+                <div class="card workspace-card" data-workspace="execution" id="trades-card">
+                    <h3>Strategy Execution Trades <span class="src-badge strategy-badge">not price-call settlements</span></h3>
                     <div class="card-content" id="trades-content">No trades yet</div>
                 </div>
-                <div class="card" id="candidates-card">
-                    <h3>Paper Candidates</h3>
+                <div class="card workspace-card" data-workspace="execution" id="candidates-card">
+                    <h3>Legacy Strategy Accounts <span class="src-badge strategy-badge">not tournament competitors</span></h3>
                     <div class="card-content" id="candidates-content">Loading…</div>
                 </div>
-                <!-- NEW: Simulated Bankroll Card -->
-                <div class="card" id="bankroll-card">
-                    <h3>Simulated Bankroll</h3>
+                <div class="card analytics workspace-card" data-workspace="price-calls" id="bankroll-card">
+                    <h3>Paper Performance <span class="src-badge analytics-badge">not live capital</span></h3>
                     <div class="card-content" id="bankroll-content">Loading…</div>
                 </div>
             </aside>
@@ -106,10 +290,13 @@
         <!-- Bottom Status Bar -->
         <footer id="bottombar">
             <span id="engine-status">Engine: ●</span>
-            <span id="learning-status">Learning: ●</span>
+            <span id="legacy-learning-status">Legacy ML: ● VERIFYING</span>
+            <span id="forecast-learning-status">Forecast ML: ● VERIFYING</span>
+            <span id="tournament-learning-status">Tournament ML: ● VERIFYING</span>
             <span id="risk-status">Risk: ●</span>
-            <span id="exchange-status">Exchange: ●</span>
-            <span id="uptime">Uptime: —</span>
+            <span id="exchange-status">Binance data: ● VERIFYING</span>
+            <span id="umil-footer-status">UMIL: ● VERIFYING</span>
+            <span id="uptime">Engine uptime: —</span>
         </footer>
     </div>
 
@@ -117,5 +304,8 @@
          same one the main dashboard uses. Must load before app.js. -->
     <script src="/static/ws.js"></script>
     <script src="/pro/static/app.js"></script>
+    <script src="/pro/static/price_call.js"></script>
+    <script src="/pro/static/umil.js?v=1.6.1-performance1"></script>
+    <script src="/pro/static/umil_bootstrap.js?v=1.6.1-performance1"></script>
 </body>
 </html>

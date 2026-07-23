@@ -1,0 +1,10 @@
+[Unit]
+Description=Create a consistent UMIL evidence database backup
+After=umil.service
+
+[Service]
+Type=oneshot
+User=atsapp
+Group=atsapp
+EnvironmentFile=/etc/ats/umil.env
+ExecStart=/usr/local/sbin/umil-backup

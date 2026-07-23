@@ -1,251 +1,79 @@
-# Trading Analysis Platform
-
-A Python-based algorithmic trading research framework for testing technical indicators, portfolio simulations, risk metrics, and reproducible backtesting workflows.
-
-## Overview
-
-This project provides a modular research environment for exploring systematic trading strategies. It focuses on deterministic calculations, clean data validation, testable components, and reusable analytics for historical market data.
-
-The project is intended for research and education only. It is not connected to any live broker and does not execute real trades.
-
-## Core Areas
-
-### Market Data
-
-Utilities for validating OHLCV-style market data, preparing time series inputs, and supporting deterministic test fixtures.
-
-### Technical Indicators
-
-Indicator implementations used by research strategies, including moving averages, RSI, MACD, Bollinger Bands, ATR, stochastic oscillators, momentum indicators, and volatility bands.
-
-### Strategy Research
-
-Reusable strategy components for generating signals from indicator outputs and evaluating systematic trading ideas.
-
-### Backtesting
-
-A simplified backtesting layer for simulating strategy behavior over historical data, tracking positions, cash, fills, and portfolio value.
-
-### Risk and Performance
-
-Risk and analytics utilities for drawdown, returns, volatility, exposure, Sharpe-style calculations, and portfolio-level summaries.
-
-## Design Goals
-
-- Deterministic test results
-- Modular Python package structure
-- Clear separation between indicators, strategy logic, simulation, and risk analytics
-- Reproducible local development
-- No broker dependencies
-- No live-trading functionality
-
-## Running Locally
-
-Install dependencies:
-
-    pip install -r requirements.txt
-
-Run the test suite:
-
-    pytest tests
-
-Run coverage:
-
-    pytest --cov=trading_assistant --cov-report=term-missing
-
-## Current Quality Baseline
-
-- 187 pytest tests passing
-- Coverage configured for active package modules
-- Current coverage target: 80%+
-- No external broker or live trading dependency
-
-## Project Status
-
-This is an active personal research project. The current focus is improving data validation, simulation correctness, risk analytics, and portfolio-level behavior.
-
-## CSV Market Data Loading
-
-The data layer includes a CSV loader for OHLCV research datasets. It reads a local CSV file, forwards optional `pandas.read_csv` settings, and validates the loaded data with the market-data validator.
-
-Example usage:
-
-    from trading_assistant.data import load_ohlcv_csv
-
-    prices = load_ohlcv_csv("data/prices.csv")
-
-The loader raises `FileNotFoundError` for missing files and `MarketDataValidationError` when the CSV contents violate the expected OHLCV schema.
-
-## Timestamp Parsing Options
-
-Market data validation supports explicit timestamp parsing formats. By default, ISO-style timestamps are parsed with a deterministic `ISO8601` format to avoid pandas inference warnings. Custom date formats can be supplied when validating DataFrames or loading CSV files.
-
-Example usage:
-
-    from trading_assistant.data import load_ohlcv_csv
-
-    prices = load_ohlcv_csv("data/prices.csv", timestamp_format="%d/%m/%Y")
-
-This is useful for regional datasets that use day-first dates or other non-ISO timestamp layouts.
-
-## Market Data Quality Reports
-
-The data package can also generate a compact quality report from validated OHLCV data. The report includes row count, start and end timestamps, low/high bounds, average close, and total volume.
-
-Example usage:
-
-    from trading_assistant.data import analyze_ohlcv_quality
-
-    report = analyze_ohlcv_quality(prices)
-    payload = report.to_dict()
-
-This is useful when checking whether a research dataset has the expected coverage before running indicators, backtests, or portfolio analytics.
-
-## Market Data Gap Detection
-
-The data package can detect missing timestamps inside validated OHLCV time series. This helps identify incomplete research datasets before running indicators, simulations, or portfolio analysis.
-
-Example usage:
-
-    from trading_assistant.data import find_ohlcv_time_gaps
-
-    gaps = find_ohlcv_time_gaps(prices, expected_frequency="D")
-
-Each detected gap includes the expected timestamp plus the nearest previous and next observed timestamps. The gap detector reuses the OHLCV validator, so malformed prices, duplicate timestamps, and invalid rows are rejected before interval checks run.
-
-## Market Data Gap Summaries
-
-Gap detection also supports compact summaries for reporting workflows. A summary includes the number of missing timestamps, the first missing timestamp, the last missing timestamp, and the complete list of missing timestamps.
-
-Example usage:
-
-    from trading_assistant.data import summarize_ohlcv_time_gaps
-
-    summary = summarize_ohlcv_time_gaps(prices, expected_frequency="D")
-    payload = summary.to_dict()
-
-This is useful for quickly deciding whether a dataset is complete enough for indicator research or backtesting.
-
-## Portfolio Exposure Reporting
-
-The portfolio package can summarize position exposure from quantity and mark price data. Positive quantities are treated as long positions, negative quantities are treated as short positions, and the summary reports long, short, gross, and net exposure.
-
-Example usage:
-
-    import pandas as pd
-    from trading_assistant.portfolio import summarize_portfolio_exposure
-
-    positions = pd.DataFrame(
-        {
-            "symbol": ["AAPL", "MSFT", "TSLA"],
-            "quantity": [10, 5, -3],
-            "price": [200.0, 100.0, 250.0],
-        }
-    )
-
-    exposure = summarize_portfolio_exposure(positions)
-    payload = exposure.to_dict()
-
-This is useful for checking portfolio concentration, long/short balance, and gross exposure before running risk analytics.
-
-## Portfolio Concentration Reporting
-
-The portfolio package can also summarize concentration risk by absolute position value. This helps identify whether one symbol dominates the portfolio before running risk analytics or strategy evaluation.
-
-Example usage:
-
-    from trading_assistant.portfolio import summarize_position_concentration
-
-    concentration = summarize_position_concentration(
-        positions,
-        max_weight=0.25,
-    )
-
-    payload = concentration.to_dict()
-
-The report includes total market value, each symbol's portfolio weight, the largest position, and any symbols above the configured concentration limit.
-
-## Portfolio Rebalance Planning
-
-The portfolio package can generate long-only rebalance recommendations from current positions and target weights. The planner calculates current weights, target values, trade values, trade quantities, trade direction, and total portfolio turnover.
-
-Example usage:
-
-    import pandas as pd
-    from trading_assistant.portfolio import plan_portfolio_rebalance
-
-    positions = pd.DataFrame(
-        {
-            "symbol": ["AAPL", "MSFT", "TSLA"],
-            "quantity": [10, 5, 2],
-            "price": [200.0, 100.0, 250.0],
-        }
-    )
-
-    plan = plan_portfolio_rebalance(
-        positions,
-        {"AAPL": 0.40, "MSFT": 0.40, "TSLA": 0.20},
-    )
-
-    payload = plan.to_dict()
-
-This is useful for comparing current portfolio weights against research targets before running exposure, concentration, or risk checks.
-
-## Portfolio Analytics Roadmap
-
-The portfolio layer is designed to support exposure reporting, concentration checks, rebalance planning, and risk-control workflows. The goal is to help researchers inspect whether a portfolio is balanced, over-concentrated, or drifting away from target allocations before running backtests or risk analytics.
-
-## Portfolio Risk Controls
-
-The portfolio package includes risk-control helpers for checking position concentration, gross exposure, net exposure, short exposure, and allocation drift. These reports are designed to run before backtests or risk analytics so a researcher can catch portfolio construction problems early.
-
-Example usage:
-
-    from trading_assistant.portfolio import (
-        analyze_allocation_drift,
-        check_portfolio_limits,
-    )
-
-    limit_report = check_portfolio_limits(
-        positions,
-        max_position_weight=0.25,
-        max_gross_exposure=500000,
-    )
-
-    drift_report = analyze_allocation_drift(
-        positions,
-        {"AAPL": 0.40, "MSFT": 0.40, "TSLA": 0.20},
-    )
-
-Both reports provide `to_dict()` methods for JSON-style reporting workflows.
-
-## Native Fuzzing Surface
-
-The repository includes a dependency-free C++ market-data parsing layer under `native/marketdata/` and ClusterFuzzLite-compatible fuzz targets under `fuzz/`.
-
-The fuzzing surface covers:
-
-- OHLCV CSV market-data parsing
-- pipe-delimited order message parsing
-- order stream validation
-- symbol validation
-- price and volume validation
-- sequence-order validation
-
-Fuzz targets:
-
-- `ohlcv_csv_fuzzer`
-- `order_message_fuzzer`
-
-Seed corpora are stored under `fuzz/corpus/`.
-
-ClusterFuzzLite entry point:
-
-`.clusterfuzzlite/build.sh`
-
-Local smoke test:
-
-`./tools/check_fuzz_build.sh`
-
-Note: on Windows Git Bash, Clang may require a full Visual Studio C++ environment to locate standard C++ headers. The repository also includes a Linux GitHub Actions fuzz-build smoke test under `.github/workflows/fuzz-build.yml`.
-
+# ATS Overall Market Interpreter v1.4.0
+
+This additive overlay includes the corrected v1.3.1-r2 learning-observability
+release and adds a deterministic Overall Market Interpreter to the Research
+workspace.  It changes no strategy threshold, tournament gate, bankroll rule,
+execution permission, historical evidence row, or policy identity.
+
+## What the panel means
+
+The interpreter synthesizes separately labeled evidence from:
+
+- point-in-time market regime for the selected 5m/15m horizon;
+- validated Next 3 Candles forecast directions;
+- right-edge chart-pattern geometry;
+- the legacy strategy signal only when its engine timeframe matches;
+- Tournament ML readiness without exposing private direction or weights; and
+- the current price-call economic gate for matching 5m/15m cycles.
+
+`alignment_score` measures agreement among usable sources.  It is explicitly
+not a probability of a correct call, profit, or trade success.  Forecast
+horizons that fail to beat their recent directional baseline cannot drive the
+outlook.  Chart-pattern confidence remains geometry quality, not predictive
+probability.
+
+## Authority boundary
+
+The interpreter is read-only.  It cannot train a model, create a strategy or
+price-call decision, open exposure, alter risk, modify the bankroll, settle a
+cycle, or promote a tournament candidate.  A source failure becomes a named
+warning and never fabricates replacement evidence.
+
+## Verification
+
+```bash
+python -m py_compile \
+  webapp/economic_evidence.py webapp/forecast.py \
+  webapp/learning_observability.py webapp/market_interpreter.py \
+  webapp/market_state.py webapp/price_call.py \
+  webapp/quant_tournament.py webapp/server.py
+
+node --check webapp/pro_static/app.js
+node --check webapp/pro_static/price_call.js
+
+python -m pytest -q \
+  tests/test_economic_evidence.py tests/test_market_state.py \
+  tests/test_price_call.py tests/test_quant_tournament.py \
+  tests/test_forecast_learning.py tests/test_learning_observability.py \
+  tests/test_market_interpreter.py
+```
+
+Expected focused result: `55 passed`.
+
+## Deployment
+
+1. Stop the single ATS process and back up both the execution journal and
+   `dashboard_data/analytics.db`.
+2. Overlay this ZIP at the repository root.
+3. Run the verification commands above.
+4. Restart exactly one ATS process; do not reset any ledger.
+5. Hard-refresh `/pro`, open Research, and select 5m then 15m.
+
+## Live acceptance checks
+
+- `/api/pro/market-interpreter/BTC/USDT?timeframe=15m` returns HTTP 200.
+- `authority` is entirely fail-closed and `read_only` is true.
+- `alignment_score_is_probability` is false.
+- `economics.separate_from_directional_outlook` is true.
+- A `NO_TRADE` economic action remains `ABSTAIN` even when sources align.
+- Forecast ML with no holdout edge reports `READY_LOW_EDGE` and cannot drive
+  the outlook.
+- Legacy signals from another timeframe report `CONTEXT_ONLY`.
+- Tournament ML direction remains `NOT_EXPOSED`.
+- Missing/stale sources appear under Evidence gaps; they never disappear.
+- All missing, duplicate, broken-link, and pending-recovery integrity metrics
+  remain zero, with exactly 13 tournament decisions per cycle.
+- Existing price-call, bankroll, tournament, and evidence counts do not reset.
+
+The tournament policy remains `quant-tournament-v1.3.0`; v1.4.0 is a research
+interpretation and observability release, not a strategy-policy change.
