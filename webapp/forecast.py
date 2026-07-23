@@ -16,6 +16,9 @@ the only path to real orders.
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import pickle
 import threading
 import time
 from typing import Any, Dict, List, Tuple
@@ -139,7 +142,20 @@ def _fit_horizon(featured: pd.DataFrame, horizon: int) -> Dict[str, Any]:
         "holdout_bars": int(holdout),
         "up_share_holdout": up_share,
         "trained_rows": int(len(labeled) - holdout),
+        "total_labeled_rows": int(len(labeled)),
+        "label_up_rate": float(y.mean()),
+        "training_window_start": labeled.iloc[0]["timestamp"].isoformat(),
+        "training_window_end": featured.iloc[-1]["timestamp"].isoformat(),
     }
+
+
+def _model_fingerprint(horizons: Dict[int, Dict[str, Any]]) -> str:
+    """Return an opaque identity for the exact fitted model instances."""
+    payload = [
+        (horizon, horizons[horizon]["model"])
+        for horizon in sorted(horizons)
+    ]
+    return hashlib.sha256(pickle.dumps(payload, protocol=5)).hexdigest()
 
 
 def _get_or_train(featured: pd.DataFrame, symbol: str, timeframe: str) -> Dict[str, Any]:
@@ -150,9 +166,15 @@ def _get_or_train(featured: pd.DataFrame, symbol: str, timeframe: str) -> Dict[s
         if entry is not None and now - entry["trained_at"] < _MODEL_TTL_SECONDS:
             return entry
 
+    horizons = {h: _fit_horizon(featured, h) for h in HORIZONS}
     entry = {
         "trained_at": now,
-        "horizons": {h: _fit_horizon(featured, h) for h in HORIZONS},
+        "trained_at_ms": int(now * 1000),
+        "model_fingerprint": _model_fingerprint(horizons),
+        "horizons": horizons,
+        "last_inference_at_ms": None,
+        "last_as_of": None,
+        "inference_count": 0,
     }
     with _cache_lock:
         _cache[key] = entry
@@ -186,14 +208,84 @@ def get_forecast(config: Config, symbol: str, timeframe: str) -> Dict[str, Any]:
                 "holdout_bars": fitted["holdout_bars"],
                 "up_share_holdout": fitted["up_share_holdout"],
                 "trained_rows": fitted["trained_rows"],
+                "total_labeled_rows": fitted["total_labeled_rows"],
+                "label_up_rate": fitted["label_up_rate"],
+                "training_window_start": fitted["training_window_start"],
+                "training_window_end": fitted["training_window_end"],
             }
         )
 
-    return {
+    inference_at_ms = int(time.time() * 1000)
+    result = {
         "symbol": symbol,
         "timeframe": timeframe,
         "as_of": last_bar["timestamp"].isoformat(),
         "last_close": float(last_bar["close"]),
         "model_trained_at": entry["trained_at"],
+        "model_fingerprint": entry["model_fingerprint"],
+        "last_inference_at_ms": inference_at_ms,
+        "evidence_scope": "DASHBOARD_ANALYTICS_ONLY",
+        "closed_candles_only": True,
+        "execution_authority": False,
+        "promotion_authority": False,
         "horizons": horizons,
     }
+    with _cache_lock:
+        entry["last_inference_at_ms"] = inference_at_ms
+        entry["last_as_of"] = last_bar["timestamp"].isoformat()
+        entry["inference_count"] = int(entry.get("inference_count", 0)) + 1
+        # The interpreter reads only this completed, immutable-style snapshot.
+        # It never triggers model fitting or reaches into estimator objects.
+        entry["latest_forecast"] = copy.deepcopy(result)
+
+    return result
+
+
+def get_latest_forecast_snapshot(symbol: str, timeframe: str) -> Dict[str, Any] | None:
+    """Return the last completed dashboard forecast without training.
+
+    A missing cache entry is honest ``None`` evidence.  The Overall Market
+    Interpreter must remain downstream of Forecast ML and may never make a
+    read request mutate model state.
+    """
+    key = (str(symbol).upper(), str(timeframe))
+    with _cache_lock:
+        entry = _cache.get(key)
+        snapshot = entry.get("latest_forecast") if entry else None
+        return copy.deepcopy(snapshot) if snapshot is not None else None
+
+
+def get_forecast_health(symbol: str, timeframe: str) -> Dict[str, Any]:
+    """Read cached training/inference telemetry without triggering a model fit."""
+    key = (str(symbol).upper(), str(timeframe))
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return {
+                "state": "NO_EVIDENCE",
+                "model_fingerprint": None,
+                "trained_at_ms": None,
+                "last_inference_at_ms": None,
+                "last_processed_candle": None,
+                "inference_count": 0,
+                "horizons": [],
+            }
+        return {
+            "state": "READY",
+            "model_fingerprint": entry["model_fingerprint"],
+            "trained_at_ms": entry["trained_at_ms"],
+            "last_inference_at_ms": entry["last_inference_at_ms"],
+            "last_processed_candle": entry["last_as_of"],
+            "inference_count": int(entry["inference_count"]),
+            "horizons": [
+                {
+                    "step": horizon,
+                    "trained_rows": entry["horizons"][horizon]["trained_rows"],
+                    "holdout_bars": entry["horizons"][horizon]["holdout_bars"],
+                    "label_up_rate": entry["horizons"][horizon]["label_up_rate"],
+                    "training_window_start": entry["horizons"][horizon]["training_window_start"],
+                    "training_window_end": entry["horizons"][horizon]["training_window_end"],
+                }
+                for horizon in sorted(entry["horizons"])
+            ],
+        }

@@ -27,6 +27,7 @@ const TF_SECONDS = {
 document.addEventListener('DOMContentLoaded', initTerminal);
 
 async function initTerminal() {
+    initWorkspaceTabs();
     if (!chart) setupChart();
     let status;
     try {
@@ -53,6 +54,40 @@ async function initTerminal() {
         await refreshAll();
         startLiveCandles();
     });
+}
+
+// --- Research workspace navigation ---
+let _workspaceTabsInitialized = false;
+
+function setWorkspace(name, updateHash = true) {
+    const allowed = new Set(['overview', 'price-calls', 'tournament', 'intelligence', 'research', 'execution']);
+    const selected = allowed.has(name) ? name : 'overview';
+    document.querySelectorAll('[data-workspace-target]').forEach(control => {
+        const active = control.dataset.workspaceTarget === selected;
+        control.classList.toggle('active', active);
+        if (control.getAttribute('role') === 'tab') {
+            control.setAttribute('aria-selected', active ? 'true' : 'false');
+        }
+    });
+    document.querySelectorAll('.workspace-card').forEach(card => {
+        card.hidden = card.dataset.workspace !== selected;
+    });
+    if (updateHash && window.history?.replaceState) {
+        window.history.replaceState(null, '', `#${selected}`);
+    }
+    window.dispatchEvent(new CustomEvent('ats:workspace', { detail: { name: selected } }));
+}
+
+function initWorkspaceTabs() {
+    if (_workspaceTabsInitialized) return;
+    _workspaceTabsInitialized = true;
+    document.querySelectorAll('[data-workspace-target]').forEach(control => {
+        control.addEventListener('click', event => {
+            event.preventDefault();
+            setWorkspace(control.dataset.workspaceTarget);
+        });
+    });
+    setWorkspace(window.location.hash.slice(1), false);
 }
 
 // --- Chart Setup ---
@@ -113,6 +148,8 @@ async function apiScoped(url) {
 
 let _lastKlineAt = 0;
 let _lastTickerAt = 0;
+let _strategyMode = 'unknown';
+let _backendMarketStream = null;
 
 function removeSeriesSafe(series) {
     if (series) { try { chart.removeSeries(series); } catch (e) { /* already removed */ } }
@@ -136,6 +173,7 @@ async function refreshCards() {
             loadHealth(),
             loadDecisionMarkers(),
             loadPriceCall(),
+            loadQuantTournament(),
             loadModelInfo(),
             loadPatterns(),
             loadStatusBadge(),
@@ -145,7 +183,9 @@ async function refreshCards() {
     if (_lastKlineAt && Date.now() - _lastKlineAt > 45000) {
         try { await loadChart(); } catch (e) { /* next poll retries */ }
     }
-    loadForecast();
+    await loadForecast();
+    await loadLearningHealth();
+    await loadMarketInterpreter();
 }
 
 // --- Live candle streaming (ws.js) ---
@@ -155,6 +195,7 @@ function binancePair(symbol) {
 
 function startLiveCandles() {
     setKlineSubscription(currentSymbol, currentTimeframe, onKline);
+    setAggTradeSubscription(currentSymbol, onCallTrade);
 }
 
 function onKline(k) {
@@ -183,6 +224,7 @@ function onTicker(t) {
     const el = document.getElementById('price-change');
     el.textContent = `${t.changePct >= 0 ? '+' : ''}${t.changePct.toFixed(2)}% (24h)`;
     el.style.color = t.changePct >= 0 ? '#00FFC2' : '#FF3366';
+    renderMarketEvidence();
 }
 
 // --- Chart data ---
@@ -272,66 +314,147 @@ function updatePriceHeader() {
     }
 }
 
-// --- 5-minute self-scoring price call card ---
+// --- Paper-only heuristic price-call run ledger ---
 let _callPriceLine = null;
-let _callDueAt = null;
+
+function callTimestamp(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return new Date(numeric < 1e12 ? numeric * 1000 : numeric);
+}
+
+function callTime(value) {
+    const date = callTimestamp(value);
+    if (!date || Number.isNaN(date.getTime())) return '?';
+    return date.toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+    });
+}
+
+function callRunMarkup(call, running) {
+    const up = call.direction === 'UP';
+    const status = running ? 'RUNNING' : (call.correct ? 'HIT' : 'MISS');
+    const endLabel = running ? 'Due' : 'Settled';
+    const endValue = running ? call.due_at : call.settled_at;
+    const actual = call.actual_price == null
+        ? '?'
+        : `$${formatPrice(Number(call.actual_price))}`;
+
+    return `
+        <div class="call-run ${running ? 'running' : (call.correct ? 'hit' : 'miss')}">
+            <div class="call-run-top">
+                <span class="call-horizon">${call.horizon_label}</span>
+                <span class="call-direction ${up ? 'up' : 'down'}">
+                    ${up ? '?' : '?'} ${call.direction}
+                </span>
+                <span class="call-status">${status}</span>
+                ${running
+                    ? `<span class="call-countdown" data-due="${Number(call.due_at)}"></span>`
+                    : ''}
+            </div>
+            <div class="call-run-details">
+                <span><small>Started</small>${callTime(call.created_at)}</span>
+                <span><small>Entry</small>$${formatPrice(Number(call.price_to_beat))}</span>
+                <span><small>${endLabel}</small>${callTime(endValue)}</span>
+                <span><small>Actual</small>${actual}</span>
+            </div>
+        </div>`;
+}
 
 async function loadPriceCall() {
     try {
-        const data = await apiScoped(`/api/pro/price-calls/${currentSymbol}`);
+        const data = await apiScoped(
+            `/api/pro/price-calls/${currentSymbol}?limit=20`
+        );
         if (data === null) return;
+
         const content = document.getElementById('call-content');
+        const openCalls = Array.isArray(data.open_call)
+            ? data.open_call
+            : (data.open_call ? [data.open_call] : []);
+        const recent = Array.isArray(data.recent) ? data.recent : [];
 
-        if (_callPriceLine) { candleSeries.removePriceLine(_callPriceLine); _callPriceLine = null; }
-        _callDueAt = null;
+        if (_callPriceLine) {
+            candleSeries.removePriceLine(_callPriceLine);
+            _callPriceLine = null;
+        }
 
-        const parts = [];
-        const call = data.open_call;
-        if (call) {
-            const up = call.direction === 'UP';
-            _callDueAt = Date.parse(call.due_at);
-            parts.push(`
-                <div class="call-main ${up ? 'up' : 'down'}">
-                    ${up ? '▲' : '▼'} ${call.direction} to $${formatPrice(call.projected_price)}
-                    <span class="call-countdown" id="call-countdown"></span>
-                </div>
-                <div class="call-sub">from $${formatPrice(call.price_at_call)} · model ${(call.probability * 100).toFixed(0)}% · typical 5m move ${(call.expected_move_pct * 100).toFixed(2)}%</div>`);
+        if (openCalls.length > 0) {
+            const active = openCalls[0];
             _callPriceLine = candleSeries.createPriceLine({
-                price: call.projected_price,
-                color: up ? '#00FFC2' : '#FF3366',
+                price: Number(active.price_to_beat),
+                color: active.direction === 'UP' ? '#00FFC2' : '#FF3366',
                 lineWidth: 1,
                 lineStyle: LightweightCharts.LineStyle.Dashed,
                 axisLabelVisible: true,
-                title: `5m ${call.direction}`,
+                title: `${active.horizon_label} heuristic entry`,
             });
-        } else {
-            parts.push('<div class="call-sub">No open call (calls run for configured symbols only)</div>');
         }
 
-        if (data.stats && data.stats.n > 0) {
-            const acc = (data.stats.accuracy * 100).toFixed(0);
-            const miss = (data.stats.avg_miss_pct * 100).toFixed(2);
-            const dots = data.recent.map(r =>
-                `<span class="call-dot ${r.correct ? 'hit' : 'miss'}" title="${r.direction} ${r.correct ? 'correct' : 'wrong'}">${r.correct ? '✓' : '✗'}</span>`
-            ).join('');
-            parts.push(`<div class="call-score">Last ${data.stats.n}: <strong>${acc}%</strong> correct · avg miss ${miss}%</div>`);
-            parts.push(`<div class="call-dots">${dots}</div>`);
+        const parts = [
+            '<div class="call-model-note">HEURISTIC V1 ? PAPER ONLY ? REAL MARKET PRICES</div>'
+        ];
+
+        if (openCalls.length === 0 && recent.length === 0) {
+            parts.push(
+                '<div class="call-sub">Waiting for the first OHLCV-backed run?</div>'
+            );
         } else {
-            parts.push('<div class="call-sub">No settled calls yet — score appears after the first few settle.</div>');
+            openCalls
+                .sort((a, b) => Number(a.due_at) - Number(b.due_at))
+                .forEach(call => parts.push(callRunMarkup(call, true)));
+
+            recent.forEach(call => parts.push(callRunMarkup(call, false)));
         }
+
+        const resolved = Number(data.stats?.total_resolved || 0);
+        if (resolved > 0) {
+            const winRate = Number(data.stats.win_rate || 0) * 100;
+            const avgMiss = Number(data.stats.avg_miss_pct || 0);
+            parts.push(`
+                <div class="call-score">
+                    Resolved ${resolved} ?
+                    <strong>${winRate.toFixed(1)}% hit rate</strong> ?
+                    ${avgMiss.toFixed(3)}% average miss
+                </div>`);
+        } else {
+            parts.push(
+                '<div class="call-sub">Track record begins after the first run settles.</div>'
+            );
+        }
+
         content.innerHTML = parts.join('');
         updateCallCountdown();
-    } catch (e) { /* ignore */ }
+    } catch (error) {
+        console.warn('Price-call refresh failed', error);
+    }
 }
 
 function updateCallCountdown() {
-    const el = document.getElementById('call-countdown');
-    if (!el || !_callDueAt) return;
-    const remaining = Math.max(0, Math.floor((_callDueAt - Date.now()) / 1000));
-    const m = Math.floor(remaining / 60), s = remaining % 60;
-    el.textContent = remaining > 0 ? `settles in ${m}:${String(s).padStart(2, '0')}` : 'settling…';
+    document.querySelectorAll('.call-countdown[data-due]').forEach(el => {
+        const due = callTimestamp(el.dataset.due);
+        if (!due) return;
+
+        const remaining = Math.max(
+            0,
+            Math.floor((due.getTime() - Date.now()) / 1000)
+        );
+
+        if (remaining === 0) {
+            el.textContent = 'settling?';
+            return;
+        }
+
+        const minutes = Math.floor(remaining / 60);
+        const seconds = remaining % 60;
+        el.textContent = `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+    });
 }
-setInterval(updateCallCountdown, 1000);
+
+setInterval(() => updateCallCountdown(), 50);
+setInterval(() => renderMarketEvidence(), 1000);
 
 // --- Chart patterns: trendlines on the chart + card list ---
 let _patternSeries = [];
@@ -477,8 +600,46 @@ async function loadStatusBadge() {
 }
 
 function renderStatus(status) {
-    document.getElementById('mode-badge').textContent = status.mode.toUpperCase();
-    document.getElementById('live-dot').style.color = status.is_live ? '#FF3366' : '#00FFC2';
+    _strategyMode = String(status.mode || 'unknown').toUpperCase();
+    renderMarketEvidence();
+}
+
+function updateExchangeEvidence(market) {
+    _backendMarketStream = market?.stream || null;
+    renderMarketEvidence();
+}
+
+function renderMarketEvidence() {
+    const stream = _backendMarketStream;
+    const lastMessage = Number(stream?.last_message_at_ms);
+    const backendAge = Number.isFinite(lastMessage) ? Math.max(0, Date.now() - lastMessage) : null;
+    const browserAge = _lastTickerAt ? Math.max(0, Date.now() - _lastTickerAt) : null;
+    const freshLimit = Number(stream?.freshness_limit_ms || 15000);
+    const backendFresh = Boolean(stream?.connected) && backendAge !== null && backendAge <= freshLimit;
+    const browserFresh = browserAge !== null && browserAge <= 15000;
+    const live = backendFresh && browserFresh;
+    const verifying = stream === null;
+    const offline = stream && !stream.connected;
+    const state = live ? 'LIVE' : verifying ? 'VERIFYING' : offline ? 'OFFLINE' : 'STALE';
+    const color = live ? '#00FFC2' : offline ? '#FF3366' : '#FFB800';
+    const statusClass = live ? 'status-green' : offline ? 'status-red' : 'status-yellow';
+    const age = backendAge === null ? 'no message' : `${Math.round(backendAge / 1000)}s old`;
+
+    const badge = document.getElementById('mode-badge');
+    badge.textContent = `MARKET ${state}`;
+    badge.title = `Binance public market data; strategy mode: ${_strategyMode}`;
+    badge.dataset.state = state.toLowerCase();
+
+    const dot = document.getElementById('live-dot');
+    dot.style.color = color;
+    dot.title = `Backend Binance stream: ${state} (${age}); strategy mode: ${_strategyMode}`;
+
+    const exchange = document.getElementById('exchange-status');
+    exchange.className = statusClass;
+    exchange.textContent = `Binance data: ● ${state}${backendAge === null ? '' : ` (${age})`}`;
+    exchange.title = stream?.last_error
+        ? `Last backend stream error: ${stream.last_error}`
+        : 'Verified using backend aggregate-trade stream freshness and the browser ticker stream.';
 }
 
 function renderSymbolList(symbols) {
@@ -521,7 +682,9 @@ async function renderTimeframeTabs() {
             try { await loadChart(); } catch (e) { console.warn('Chart load error', e); }
             await Promise.all([loadDecisionMarkers(), loadPatterns()]);
             startLiveCandles();
-            loadForecast();
+            await loadForecast();
+            await loadLearningHealth();
+            await loadMarketInterpreter();
         });
         wrap.appendChild(btn);
     });
@@ -530,11 +693,161 @@ async function renderTimeframeTabs() {
 async function loadHealth() {
     const health = await api('/api/health');
     document.getElementById('health-ring').style.color = health.score >= 90 ? '#00FFC2' : '#FFB800';
-    document.getElementById('uptime').textContent = `Uptime: ${formatDuration(health.uptime_seconds)}`;
-    document.getElementById('engine-status').className = health.score >= 80 ? 'status-green' : 'status-red';
-    document.getElementById('learning-status').className = health.recent_error_rate === 0 ? 'status-green' : 'status-red';
+    document.getElementById('uptime').textContent = `Engine uptime: ${formatDuration(health.uptime_seconds)}`;
+    document.getElementById('engine-status').className = health.score == null
+        ? 'status-yellow' : health.score >= 80 ? 'status-green' : 'status-red';
     document.getElementById('risk-status').className = health.circuit_breaker_tripped ? 'status-red' : 'status-green';
-    document.getElementById('exchange-status').className = 'status-green';
+    renderMarketEvidence();
+}
+
+function learningStatusClass(state) {
+    if (state === 'ACTIVE' || state === 'READY') return 'status-green';
+    if (state === 'DEGRADED') return 'status-red';
+    return 'status-yellow';
+}
+
+function fmtEpochMs(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return '—';
+    return fmtAge(new Date(number).toISOString());
+}
+
+async function loadLearningHealth() {
+    const data = await apiScoped(`/api/pro/learning-health/${currentSymbol}?timeframe=${currentTimeframe}`);
+    if (data === null) return;
+    const paths = data.paths || {};
+    const legacy = paths.legacy_learning || {};
+    const forecast = paths.forecast_ml || {};
+    const tournament = paths.tournament_ml || {};
+    const tournamentHorizons = tournament.horizons || {};
+    const tournamentStates = Object.values(tournamentHorizons).map(item => item.state);
+    const tournamentState = tournamentStates.includes('DEGRADED')
+        ? 'DEGRADED'
+        : tournamentStates.includes('READY') ? 'READY'
+        : tournamentStates.length ? 'WARMING' : 'NO_EVIDENCE';
+
+    const footer = [
+        ['legacy-learning-status', 'Legacy ML', legacy.state],
+        ['forecast-learning-status', 'Forecast ML', forecast.state],
+        ['tournament-learning-status', 'Tournament ML', tournamentState],
+    ];
+    footer.forEach(([id, label, state]) => {
+        const el = document.getElementById(id);
+        el.className = learningStatusClass(state);
+        el.textContent = `${label}: ● ${state || 'NO_EVIDENCE'}`;
+    });
+
+    const tournamentRows = Object.entries(tournamentHorizons).map(([horizon, item]) => {
+        const identity = item.model_fingerprint ? item.model_fingerprint.slice(0, 12) : '—';
+        const feedback = Number(item.settled_feedback_count || 0);
+        return `<div class="mi-row"><span>Tournament ML ${horizon}</span><span class="mi-val ${learningStatusClass(item.state)}">${item.state} · n=${item.training_samples || 0} · ${identity}</span></div>
+            <div class="metric-note">Inference ${fmtEpochMs(item.last_inference_at_ms)} · feedback ${feedback} settled · ${item.decision_state || '—'}</div>`;
+    }).join('');
+    const content = document.getElementById('learning-health-content');
+    content.innerHTML = `
+        <div class="mi-row"><span>Legacy LearningAgent</span><span class="mi-val ${learningStatusClass(legacy.state)}">${legacy.state}</span></div>
+        <div class="metric-note">Retrain ${fmtEpochMs(legacy.last_training_attempt_ms)} · inference ${fmtEpochMs(legacy.last_inference_ms)} · ${legacy.feature_count || 0} SHAP features</div>
+        <div class="mi-row"><span>Next 3 Candles ${forecast.timeframe || currentTimeframe}</span><span class="mi-val ${learningStatusClass(forecast.state)}">${forecast.state}</span></div>
+        <div class="metric-note">Train ${fmtEpochMs(forecast.trained_at_ms)} · inference ${fmtEpochMs(forecast.last_inference_at_ms)} · dashboard only</div>
+        ${tournamentRows || '<div class="mi-row"><span>Tournament ML</span><span class="mi-val status-yellow">NO EVIDENCE</span></div>'}
+        <div class="metric-note">Paths are isolated. Interpreter authority: none.</div>`;
+}
+
+function interpreterClass(value) {
+    const normalized = String(value || '').toUpperCase();
+    if (['BULLISH', 'READY', 'HIGH', 'TRADE_ELIGIBLE'].includes(normalized)) return 'positive';
+    if (['BEARISH', 'DEGRADED'].includes(normalized)) return 'negative';
+    return 'warn';
+}
+
+function interpreterLabel(value) {
+    return String(value || '—').replaceAll('_', ' ');
+}
+
+function escapeInterpreter(value) {
+    return String(value ?? '—')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+}
+
+let _interpreterInFlight = null;
+async function loadMarketInterpreter() {
+    const requested = `${currentSymbol}|${currentTimeframe}`;
+    if (_interpreterInFlight === requested) return;
+    _interpreterInFlight = requested;
+    try {
+        document.getElementById('interpreter-tf').textContent = currentTimeframe;
+        const data = await apiScoped(`/api/pro/market-interpreter/${currentSymbol}?timeframe=${currentTimeframe}`);
+        if (data === null) return;
+        const market = data.market_context || {};
+        const chart = data.chart_context || {};
+        const paths = data.ai_paths || {};
+        const legacy = paths.legacy_strategy || {};
+        const forecast = paths.forecast_ml || {};
+        const tournament = paths.tournament_ml || {};
+        const economics = data.economics || {};
+        const patterns = (chart.leading_patterns || []).map(item =>
+            `<span class="interpreter-chip ${interpreterClass(item.bias)}">${escapeInterpreter(interpreterLabel(item.name))} · ${escapeInterpreter(item.bias)}</span>`
+        ).join('');
+        const conflicts = (data.conflicts || []).map(item =>
+            `<span class="interpreter-chip negative">${escapeInterpreter(interpreterLabel(item))}</span>`
+        ).join('');
+        const warnings = (data.warnings || []).map(item =>
+            `<span class="interpreter-chip warn">${escapeInterpreter(interpreterLabel(item))}</span>`
+        ).join('');
+        const score = data.alignment_score == null ? '—' : `${Number(data.alignment_score).toFixed(1)}`;
+        const content = document.getElementById('market-interpreter-content');
+        content.innerHTML = `
+            <div class="interpreter-head">
+                <div>
+                    <span class="interpreter-outlook ${interpreterClass(data.outlook)}">${escapeInterpreter(interpreterLabel(data.outlook))}</span>
+                    <span class="interpreter-state">${escapeInterpreter(data.state)} · ${escapeInterpreter(data.conviction)} alignment</span>
+                </div>
+                <div class="interpreter-score"><strong>${score}</strong><small>alignment / 100<br>not probability</small></div>
+            </div>
+            <p class="interpreter-summary">${escapeInterpreter(data.summary)}</p>
+            <div class="interpreter-grid">
+                <section>
+                    <small>Market structure</small>
+                    <strong class="${interpreterClass(market.regime)}">${escapeInterpreter(interpreterLabel(market.regime))}</strong>
+                    <span>${market.regime_confidence == null ? 'No selected-timeframe state' : `${(Number(market.regime_confidence) * 100).toFixed(1)}% regime confidence`}</span>
+                    <span>Closed candle ${fmtEpochMs(market.latest_closed_candle_ms)}</span>
+                </section>
+                <section>
+                    <small>Chart geometry</small>
+                    <strong>${escapeInterpreter(interpreterLabel(chart.state))}</strong>
+                    <span>${Number(chart.bullish || 0)} bullish · ${Number(chart.bearish || 0)} bearish · geometry only</span>
+                </section>
+                <section>
+                    <small>AI paths</small>
+                    <strong>${escapeInterpreter(forecast.direction || 'NO EVIDENCE')}</strong>
+                    <span>Forecast ${escapeInterpreter(interpreterLabel(forecast.state))} · ${Number(forecast.validated_horizons || 0)}/${Number(forecast.total_horizons || 0)} validated</span>
+                    <span>Forecast as of ${fmtEpochMs(forecast.as_of_ms)}</span>
+                    <span>Legacy ${escapeInterpreter(legacy.direction)} (${escapeInterpreter(interpreterLabel(legacy.state))})</span>
+                    <span>Tournament ${escapeInterpreter(interpreterLabel(tournament.state))} · direction protected</span>
+                </section>
+                <section>
+                    <small>Economic gate</small>
+                    <strong class="${interpreterClass(economics.state)}">${escapeInterpreter(interpreterLabel(economics.state))}</strong>
+                    <span>${escapeInterpreter(economics.action || 'No matching cycle')} · ${escapeInterpreter(economics.direction || '—')}</span>
+                    <span>Simulated execution only</span>
+                </section>
+            </div>
+            ${patterns ? `<div class="interpreter-strip"><small>Right-edge symbols</small>${patterns}</div>` : ''}
+            ${conflicts ? `<div class="interpreter-strip"><small>Conflicts</small>${conflicts}</div>` : ''}
+            ${warnings ? `<div class="interpreter-strip"><small>Evidence gaps</small>${warnings}</div>` : ''}
+            <div class="metric-note">Read only · cannot train · cannot trade · cannot alter risk or promotion.</div>`;
+    } catch (error) {
+        if (requested === `${currentSymbol}|${currentTimeframe}`) {
+            document.getElementById('market-interpreter-content').textContent =
+                'Interpreter unavailable — source modules remain isolated and continue running.';
+        }
+    } finally {
+        if (_interpreterInFlight === requested) _interpreterInFlight = null;
+    }
 }
 
 // --- Cards ---
@@ -560,7 +873,7 @@ function confidenceGauge(frac, sig) {
         <path d="M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${xEnd} ${yEnd}" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="9" stroke-linecap="round"/>
         <path d="M ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)}" fill="none" stroke="${color}" stroke-width="9" stroke-linecap="round"/>
         <text x="${cx}" y="${cy - 12}" text-anchor="middle" class="gauge-val" fill="${color}">${(clamped * 100).toFixed(0)}%</text>
-        <text x="${cx}" y="${cy + 2}" text-anchor="middle" class="gauge-lbl">confidence</text>
+        <text x="${cx}" y="${cy + 2}" text-anchor="middle" class="gauge-lbl">signal score</text>
       </svg>`;
 }
 
@@ -579,18 +892,22 @@ async function loadPrediction() {
                 ${conv != null ? confidenceGauge(conv, sig) : '<div class="gauge-none">no live model<br>for this regime</div>'}
             </div>
             <div class="pred-rows">
-                <div class="pred-row"><span>Probability Up</span><span class="${pUp != null && pUp >= 0.5 ? 'pos' : 'neg'}">${pUp != null ? (pUp * 100).toFixed(1) + '%' : '—'}</span></div>
-                <div class="pred-row"><span>Probability Down</span><span>${pUp != null ? ((1 - pUp) * 100).toFixed(1) + '%' : '—'}</span></div>
+                <div class="pred-row"><span>Model probability Up</span><span class="${pUp != null && pUp >= 0.5 ? 'pos' : 'neg'}">${pUp != null ? (pUp * 100).toFixed(1) + '%' : '—'}</span></div>
+                <div class="pred-row"><span>Model probability Down</span><span>${pUp != null ? ((1 - pUp) * 100).toFixed(1) + '%' : '—'}</span></div>
                 <div class="pred-row"><span>Regime</span><span>${data.regime || '—'}</span></div>
-                <div class="pred-row"><span>Champion</span><span>${data.champion || 'none'}</span></div>
-            </div>`;
+                <div class="pred-row"><span>Champion</span><span>${data.champion || 'none promoted'}</span></div>
+            </div>
+            <div class="metric-note">Signal score and directional probability are separate model outputs.</div>`;
         document.getElementById('champion-info').textContent = data.champion ? `♛ ${data.champion}` : '—';
     } catch (e) { /* ignore */ }
 }
 
 function fmtAge(iso) {
     if (!iso) return '—';
-    const secs = (Date.now() - Date.parse(iso)) / 1000;
+    const parsed = Date.parse(iso);
+    if (!Number.isFinite(parsed)) return 'invalid timestamp';
+    const secs = Math.max(0, (Date.now() - parsed) / 1000);
+    if (secs < 60) return `${Math.floor(secs)}s ago`;
     if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
     if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
     return `${Math.floor(secs / 86400)}d ago`;
@@ -601,20 +918,27 @@ async function loadModelInfo() {
         const d = await apiScoped(`/api/pro/model-info/${currentSymbol}`);
         if (d === null) return;
         const content = document.getElementById('model-info-content');
+        content.classList.remove('warn');
         const rows = [
             ['Champion Model', d.champion || 'none promoted'],
             ['Engine Timeframe', d.timeframe],
             ['Current Regime', d.regime || '—'],
             ['Buy / Sell Threshold', `${d.buy_threshold} / ${d.sell_threshold}`],
             ['Features Used', d.feature_count || '—'],
+            ['Signal Generated', fmtAge(d.decision_at)],
             ['Last Retrain', `${fmtAge(d.last_retrain_at)}`],
             ['Last Promotion', d.last_promotion_at ? fmtAge(d.last_promotion_at) : 'never'],
             ['Retrain Every', `${d.retrain_interval_hours}h`],
         ];
         content.innerHTML = rows.map(([k, v]) =>
             `<div class="mi-row"><span>${k}</span><span class="mi-val">${v}</span></div>`
-        ).join('');
-    } catch (e) { /* ignore */ }
+        ).join('') + (d.warnings?.length
+            ? `<div class="metric-note warn">Partial data: ${d.warnings.join('; ')}</div>` : '');
+    } catch (e) {
+        const content = document.getElementById('model-info-content');
+        content.textContent = 'Model information unavailable — check the backend log.';
+        content.classList.add('warn');
+    }
 }
 
 async function loadPosition() {
@@ -624,12 +948,18 @@ async function loadPosition() {
         const content = document.getElementById('position-content');
         if (!data.open) { content.textContent = 'No open position'; return; }
         const side = data.quantity >= 0 ? 'LONG' : 'SHORT';
+        const asOfMs = Date.parse(data.as_of);
+        const ageMs = Number.isFinite(asOfMs) ? Math.max(0, Date.now() - asOfMs) : null;
+        const stale = ageMs === null || ageMs > 30 * 60 * 1000;
         content.innerHTML = `
             <div><strong class="${data.quantity >= 0 ? 'prediction-buy' : 'prediction-sell'}">${side}</strong> ${Math.abs(data.quantity)}</div>
             <div>Mark: $${formatPrice(data.price)}</div>
+            <div class="strategy-mark-time ${stale ? 'warn' : ''}">${stale ? 'STALE MARK · ' : 'As of '}${data.as_of ? fmtAge(data.as_of) : 'timestamp unavailable'}</div>
             ${data.unexplained_quantity ? `<div class="warn">Unexplained qty: ${data.unexplained_quantity}</div>` : ''}
         `;
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+        document.getElementById('position-content').textContent = 'Strategy position unavailable.';
+    }
 }
 
 async function loadFeatures() {
@@ -637,7 +967,10 @@ async function loadFeatures() {
         const data = await apiScoped(`/api/pro/features/${currentSymbol}`);
         if (data === null) return;
         const content = document.getElementById('features-content');
-        if (!data.features || data.features.length === 0) { content.textContent = 'No features yet'; return; }
+        if (!data.features || data.features.length === 0) {
+            content.textContent = 'No legacy champion SHAP features yet. Tournament ML telemetry is shown separately.';
+            return;
+        }
         const list = document.createElement('ul');
         list.className = 'feature-list';
         data.features.forEach(f => {
@@ -679,7 +1012,7 @@ async function loadCandidates() {
         const data = await apiScoped(`/api/pro/candidates/${currentSymbol}`);
         if (data === null) return;
         const content = document.getElementById('candidates-content');
-        if (!data.candidates || data.candidates.length === 0) { content.textContent = 'No paper candidates yet'; return; }
+        if (!data.candidates || data.candidates.length === 0) { content.textContent = 'No legacy strategy accounts recorded'; return; }
         const sorted = [...data.candidates].sort((a, b) => b.total_equity - a.total_equity);
         const table = document.createElement('table');
         table.className = 'trades-table';

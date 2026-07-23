@@ -1,0 +1,7 @@
+[Unit]
+Description=ATS and UMIL health supervision
+After=ats.service umil.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ats-umil-healthcheck

@@ -154,6 +154,52 @@ select { background: #1A2128; color: #EAEAEA; border: 1px solid #2A3A4A; border-
 .call-dot.hit { color: var(--accent); }
 .call-dot.miss { color: var(--danger); opacity: 0.8; }
 
+.call-model-note {
+    margin-bottom: 7px;
+    color: #f2c94c;
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+}
+.call-run {
+    margin: 6px 0;
+    padding: 7px;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 4px;
+    background: rgba(255,255,255,0.025);
+}
+.call-run.running { border-left: 2px solid #f2c94c; }
+.call-run.hit { border-left: 2px solid var(--accent); }
+.call-run.miss { border-left: 2px solid var(--danger); }
+.call-run-top {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 0.72rem;
+}
+.call-horizon { font-weight: 700; }
+.call-direction.up { color: var(--accent); }
+.call-direction.down { color: var(--danger); }
+.call-status {
+    margin-left: auto;
+    font-size: 0.62rem;
+    opacity: 0.75;
+}
+.call-run-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px 10px;
+    margin-top: 6px;
+    font-size: 0.70rem;
+}
+.call-run-details span { min-width: 0; }
+.call-run-details small {
+    display: block;
+    margin-bottom: 1px;
+    opacity: 0.45;
+    font-size: 0.58rem;
+    text-transform: uppercase;
+}
+
 /* === CHART PATTERNS CARD === */
 .pattern-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .pattern-name { font-weight: bold; flex: 1; }

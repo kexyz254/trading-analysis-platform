@@ -1,0 +1,27 @@
+[Unit]
+Description=ATS Trading Analysis Platform
+After=network-online.target umil.service
+Wants=network-online.target
+Requires=umil.service
+
+[Service]
+Type=simple
+User=atsapp
+Group=atsapp
+WorkingDirectory=/opt/trading-analysis-platform
+EnvironmentFile=/etc/ats/ats.env
+ExecStart=/opt/trading-analysis-platform/.venv-ats/bin/python -m uvicorn webapp.server:app --host 127.0.0.1 --port 8000 --workers 1 --log-level info
+Restart=always
+RestartSec=5
+TimeoutStartSec=180
+TimeoutStopSec=45
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/ats /var/log/ats-umil
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

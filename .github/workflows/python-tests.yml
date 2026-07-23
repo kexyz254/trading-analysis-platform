@@ -23,4 +23,4 @@ jobs:
           pip install -e .
 
       - name: Run test suite
-        run: pytest tests/ -q
+        run: python tests/ci_test_runner.py
