@@ -59,8 +59,13 @@ services:
     # two endpoints 502 (confirmed live: "mode: live requires
     # BINANCE_API_KEY/BINANCE_API_SECRET to be set... refusing to start").
     env_file: .env
+    environment:
+      ATS_UMIL_BASE_URL: http://umil:8100
     depends_on:
-      - engine
+      engine:
+        condition: service_started
+      umil:
+        condition: service_healthy
     ports:
       # SECURITY: the dashboard has zero authentication (by design). Two
       # bindings, both explicit host IPs - NEVER "0.0.0.0:8000:8000" or a
@@ -131,3 +136,38 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  umil:
+    build: .
+    command: uvicorn services.umil.app.main:app --host 0.0.0.0 --port 8100
+    restart: unless-stopped
+    init: true
+    environment:
+      UMIL_BIND_HOST: 0.0.0.0
+      UMIL_BIND_PORT: "8100"
+      UMIL_DATABASE_PATH: /app/services/umil/var/umil.db
+      UMIL_ENFORCE_SECRET_FREE_ENV: "true"
+      UMIL_AUTO_START: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./umil_data:/app/services/umil/var
+    expose:
+      - "8100"
+    stop_grace_period: 30s
+    mem_limit: 256m
+    cpus: 0.1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8100/health/ready', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
