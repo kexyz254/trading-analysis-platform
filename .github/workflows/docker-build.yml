@@ -35,4 +35,4 @@ jobs:
           "
 
       - name: Run the full test suite inside the built image
-        run: docker run --rm trading-platform:ci pytest tests -q
+        run: docker run --rm trading-platform:ci python tests/ci_test_runner.py
