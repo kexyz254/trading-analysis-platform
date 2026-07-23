@@ -571,8 +571,12 @@ class UniverseIntelligenceService:
         self.ledger.set_projection("scale:global", evidence.evidence_id)
         self._scale_by_asset = normalized
         self._ambiguous_scale_assets = ambiguous
-        self._scale_state = "DEGRADED" if ambiguous else "READY"
-        self._scale_reason = "AMBIGUOUS_PROVIDER_SYMBOLS" if ambiguous else None
+        self._scale_state = "READY"
+        self._scale_reason = (
+            "AMBIGUOUS_PROVIDER_SYMBOLS_QUARANTINED"
+            if ambiguous
+            else None
+        )
         self._last_scale_at = observed_at
         return len(normalized)
 
