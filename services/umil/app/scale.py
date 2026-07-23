@@ -26,6 +26,7 @@ def normalize_market_scale(
         )
         if len(ranked) > 1:
             ambiguous.add(symbol)
+            continue
         row = ranked[0]
         output[symbol] = AssetScaleObservation(
             asset_id=str(row["id"]), observed_at=observed_at,

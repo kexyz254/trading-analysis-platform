@@ -64,8 +64,9 @@ def _utc_now() -> datetime:
 def _base_url() -> str:
     candidate = os.getenv("ATS_UMIL_BASE_URL", "http://127.0.0.1:8100").rstrip("/")
     parsed = urllib.parse.urlparse(candidate)
-    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-        raise ValueError("UMIL gateway accepts loopback HTTP only")
+    approved_hosts = {"127.0.0.1", "localhost", "::1", "umil"}
+    if parsed.scheme != "http" or parsed.hostname not in approved_hosts:
+        raise ValueError("UMIL gateway accepts approved local HTTP endpoints only")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("invalid UMIL base URL")
     if parsed.port not in {8100, None}:

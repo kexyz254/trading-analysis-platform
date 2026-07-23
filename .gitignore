@@ -69,3 +69,5 @@ before-*.diff
 # Secrets
 .env.*
 !.env.example
+
+/umil_data/
