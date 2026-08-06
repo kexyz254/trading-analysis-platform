@@ -126,6 +126,9 @@ CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
     num_trades INTEGER NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_paper_equity_symbol_candidate_id
+ON paper_equity_snapshots (symbol, candidate, id DESC);
+
 CREATE TABLE IF NOT EXISTS feature_baselines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -298,7 +301,14 @@ class Journal:
             self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        if self._reader:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro",
+                uri=True,
+                timeout=5.0,
+            )
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         # WAL mode lets a reader and a writer touch the file concurrently
         # without the whole-file exclusive lock the default rollback-journal
@@ -314,6 +324,8 @@ class Journal:
             # not require setting the mode; it's a property of the file.
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+        if self._reader:
+            conn.execute("PRAGMA query_only=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
@@ -580,16 +592,31 @@ class Journal:
         return snapshots
 
     def latest_paper_equity_by_candidate(self, symbol: str) -> Dict[str, Dict[str, Any]]:
-        """Most recent snapshot per candidate for a symbol - the leaderboard view."""
+        """Return only the newest persisted row for each candidate.
+
+        The former implementation selected the complete lifetime history for
+        a symbol into Python and then discarded all but the last row. On a
+        long-running journal that made one dashboard request allocate a large
+        transient result set. Aggregation stays inside SQLite and returns at
+        most one row per candidate.
+        """
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                "SELECT * FROM paper_equity_snapshots WHERE symbol = ? ORDER BY id ASC", (symbol,)
+                """
+                SELECT p.*
+                FROM paper_equity_snapshots AS p
+                JOIN (
+                    SELECT candidate, MAX(id) AS latest_id
+                    FROM paper_equity_snapshots
+                    WHERE symbol = ?
+                    GROUP BY candidate
+                ) AS latest
+                  ON latest.latest_id = p.id
+                ORDER BY p.candidate ASC
+                """,
+                (symbol,),
             ).fetchall()
-        latest: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            record = dict(row)
-            latest[record["candidate"]] = record
-        return latest
+        return {row["candidate"]: dict(row) for row in rows}
 
     def record_equity_snapshot(
         self,

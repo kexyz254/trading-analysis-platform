@@ -41,3 +41,25 @@ htmlcov/
 native/
 fuzz/
 out/
+
+# Confidential production runtime state - never include in build context
+umil_data/
+dashboard_data/
+logs/
+runtime_logs/
+.runtime/
+archive/
+ats-backups/
+_umil_integration_stage/
+trading_assistant/models/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.bak
+*.joblib
+*.zip
+bankroll_trades_*.csv
+.env.*
+!.env.example

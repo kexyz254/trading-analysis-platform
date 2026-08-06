@@ -9,15 +9,18 @@ fabricates data.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from trading_assistant.config import Config, ReadinessConfig
 from trading_assistant.health import compute_health_score
 from trading_assistant.persistence.journal import Journal
-from trading_assistant.portfolio.manager import (
+from trading_assistant.performance_metrics import (
     max_drawdown_from_equity_curve,
     performance_summary_from_trade_pnls,
     sharpe_ratio_from_equity_curve,
@@ -29,7 +32,7 @@ from trading_assistant.validation.backtest_correlation import (
     build_records,
     build_survivorship_records,
 )
-from run_system import build_exchange
+from trading_assistant.exchange_factory import build_exchange
 
 # Real Binance kline intervals only - no invented granularities.
 TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"]
@@ -126,23 +129,61 @@ def _clean_trade_pnls(journal: Journal, is_live: bool, limit: int = 5000) -> Lis
 
 
 class TTLCache:
-    """Minimal in-memory TTL cache - avoids hammering the exchange on every
-    frontend poll without pulling in an extra dependency for something this small."""
+    """Thread-safe, bounded TTL/LRU cache for dashboard responses.
 
-    def __init__(self):
-        self._store: Dict[Any, tuple[float, Any]] = {}
+    Expired entries are removed on access and the least-recently-used entry
+    is evicted when the configured bound is reached. This prevents changing
+    symbol universes and request parameters from growing the web process
+    without limit during long-running operation.
+    """
+
+    def __init__(self, max_entries: int = 128):
+        if max_entries < 1:
+            raise ValueError("max_entries must be at least 1")
+        self.max_entries = max_entries
+        self._store: "OrderedDict[Any, tuple[float, Any]]" = OrderedDict()
+        self._lock = threading.RLock()
+
+    def _purge_expired(self, now: float) -> None:
+        expired = [
+            key for key, (expires_at, _value) in self._store.items()
+            if expires_at <= now
+        ]
+        for key in expired:
+            self._store.pop(key, None)
 
     def get_or_set(self, key: Any, ttl_seconds: float, factory: Callable[[], Any]) -> Any:
         now = time.monotonic()
-        cached = self._store.get(key)
-        if cached is not None and now - cached[0] < ttl_seconds:
-            return cached[1]
+        with self._lock:
+            self._purge_expired(now)
+            cached = self._store.get(key)
+            if cached is not None:
+                self._store.move_to_end(key)
+                return cached[1]
+
         value = factory()
-        self._store[key] = (now, value)
+        expires_at = time.monotonic() + max(0.0, ttl_seconds)
+
+        with self._lock:
+            self._purge_expired(time.monotonic())
+            self._store[key] = (expires_at, value)
+            self._store.move_to_end(key)
+            while len(self._store) > self.max_entries:
+                self._store.popitem(last=False)
         return value
 
+    def stats(self) -> Dict[str, int]:
+        with self._lock:
+            self._purge_expired(time.monotonic())
+            return {
+                "entries": len(self._store),
+                "max_entries": self.max_entries,
+            }
 
-_cache = TTLCache()
+
+_cache = TTLCache(
+    max_entries=int(os.getenv("ATS_DASHBOARD_CACHE_MAX_ENTRIES", "128"))
+)
 _exchange = None
 
 
@@ -533,6 +574,49 @@ def _parse_iso(timestamp: Optional[str]) -> Optional[datetime]:
     except ValueError:
         return None
 
+
+
+def database_readiness(db_path: str) -> Dict[str, Any]:
+    """Perform a cheap read-only readiness probe against the live journal.
+
+    This is intentionally not ``PRAGMA integrity_check``: the latter scans
+    the full production database and is unsuitable for a frequent health
+    check. The probe validates that SQLite can open the configured file,
+    read schema metadata, and traverse the newest paper-equity index page.
+    """
+    started = time.monotonic()
+    try:
+        connection = sqlite3.connect(
+            f"file:{db_path}?mode=ro",
+            uri=True,
+            timeout=5.0,
+        )
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
+            schema_row = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' ORDER BY name LIMIT 1"
+            ).fetchone()
+            latest_row = connection.execute(
+                "SELECT id FROM paper_equity_snapshots "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError) as exc:
+        return {
+            "ok": False,
+            "error": type(exc).__name__,
+            "latency_ms": round((time.monotonic() - started) * 1000.0, 2),
+        }
+
+    return {
+        "ok": True,
+        "schema_visible": schema_row is not None,
+        "latest_paper_equity_id": latest_row[0] if latest_row else None,
+        "latency_ms": round((time.monotonic() - started) * 1000.0, 2),
+    }
 
 def system_health(db_path: str, poll_interval_seconds: float) -> Dict[str, Any]:
     """The engine (run_system.py) and this dashboard are separate processes

@@ -17,8 +17,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-import ccxt
-
 from trading_assistant.agents.alerting import AlertManager
 from trading_assistant.agents.champion_challenger import ChampionChallengerAgent
 from trading_assistant.agents.execution import ExecutionAgent
@@ -32,6 +30,7 @@ from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.agents.symbol_discovery import SymbolDiscoveryAgent
 from trading_assistant.annualization import bars_per_year, periods_per_year_from_seconds
 from trading_assistant.config import Config, load_config
+from trading_assistant.exchange_factory import build_exchange
 from trading_assistant.logging_setup import configure_logging
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.portfolio.manager import PortfolioManager
@@ -43,34 +42,6 @@ _LOCK_PATH = Path(__file__).resolve().parent / "run_system.lock"
 from trading_assistant.risk.adaptive import DrawdownTier
 
 logger = logging.getLogger(__name__)
-
-
-def build_exchange(config: Config):
-    exchange_class = getattr(ccxt, config.exchange.name)
-    exchange = exchange_class({"enableRateLimit": True, "timeout": config.exchange.timeout_ms})
-
-    api_key, api_secret = config.get_api_credentials()
-    if config.is_live and not (api_key and api_secret):
-        # Refuse to start rather than silently run "live" 24/7 while every
-        # order fails forever with only a log line - previously there was
-        # no check here at all, so a missing/misconfigured .env on a fresh
-        # VPS deploy would look like a healthy running system that just
-        # never actually trades, with nothing loud enough to notice.
-        raise RuntimeError(
-            f"mode: live requires {config.exchange.api_key_env}/{config.exchange.api_secret_env} "
-            "to be set (real credentials, not testnet ones) - refusing to start."
-        )
-    if api_key and api_secret:
-        exchange.apiKey = api_key
-        exchange.secret = api_secret
-
-    if not config.is_live:
-        exchange.set_sandbox_mode(True)
-        logger.info("exchange configured in TESTNET/sandbox mode")
-    else:
-        logger.warning("exchange configured in LIVE mode - real funds are at risk")
-
-    return exchange
 
 
 def build_alert_manager(journal: Journal) -> AlertManager:

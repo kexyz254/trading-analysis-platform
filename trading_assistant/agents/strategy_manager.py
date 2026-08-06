@@ -48,6 +48,7 @@ from trading_assistant.market_data.feed_15m import FifteenMinuteFeed
 from trading_assistant.ml.predictor import EnsemblePredictor, RandomForestPredictor, XGBPredictor
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.risk.backtest_sizing import risk_based_quantity
+from trading_assistant.stability import compute_stability_score
 from trading_assistant.strategies.base import Signal
 from trading_assistant.strategies.implementations import (
     BollingerBandsStrategy,
@@ -267,10 +268,7 @@ class StrategyManager:
 
     @staticmethod
     def compute_stability_score(history: List[Optional[str]]) -> Optional[float]:
-        if len(history) < 2:
-            return None
-        matches = sum(1 for i in range(1, len(history)) if history[i] == history[i - 1])
-        return matches / (len(history) - 1)
+        return compute_stability_score(history)
 
     def winner_history_for(self, symbol: str, regime: str) -> List[Optional[str]]:
         return list(self.winner_history.get(symbol, {}).get(regime, []))

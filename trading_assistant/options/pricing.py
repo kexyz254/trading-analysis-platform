@@ -217,7 +217,7 @@ class MonteCarloOption:
         S_T = S * np.exp(np.cumsum((r - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * Z, axis=1))[:, -1]
         
         if option_type == 'call':
-        payoffs = np.maximum(S_T - K, 0)
+            payoffs = np.maximum(S_T - K, 0)
         else:
             payoffs = np.maximum(K - S_T, 0)
         

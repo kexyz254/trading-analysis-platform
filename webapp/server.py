@@ -25,8 +25,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.config import load_config
+from trading_assistant.stability import compute_stability_score
 from webapp import data_access as da
 from webapp.bankroll_api import router as bankroll_router
 from webapp.umil_gateway import router as umil_gateway_router
@@ -69,6 +69,7 @@ _config = load_config(_args.config)
 _db_path = _args.db
 
 logger = logging.getLogger(__name__)
+
 
 
 def _research_service_error(operation: str, exc: Exception) -> HTTPException:
@@ -205,6 +206,22 @@ def health():
     return da.system_health(_db_path, poll_interval_seconds=_config.poll_interval_seconds)
 
 
+@app.get("/api/ready")
+def ready():
+    """Dependency-aware dashboard readiness used by Docker and operators."""
+    database = da.database_readiness(_db_path)
+    if not database["ok"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Dashboard journal is temporarily unavailable.",
+        )
+    return {
+        "status": "ready",
+        "database": database,
+        "cache": da._cache.stats(),
+    }
+
+
 @app.get("/api/retrain-events")
 def retrain_events(limit: int = 100):
     return da.retrain_events(_db_path, limit=limit)
@@ -270,7 +287,7 @@ def stability():
                     "symbol": symbol,
                     "regime": regime,
                     "num_runs": len(history),
-                    "stability_score": StrategyManager.compute_stability_score(history),
+                    "stability_score": compute_stability_score(history),
                     "current_winner": history[-1] if history else None,
                 }
             )

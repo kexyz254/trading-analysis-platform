@@ -14,9 +14,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from trading_assistant.agents.strategy_manager import StrategyManager
 from trading_assistant.config import ReadinessConfig
-from trading_assistant.portfolio.manager import performance_summary_from_trade_pnls, sharpe_ratio_from_equity_curve
+from trading_assistant.stability import compute_stability_score
+from trading_assistant.performance_metrics import (
+    performance_summary_from_trade_pnls,
+    sharpe_ratio_from_equity_curve,
+)
 from trading_assistant.validation.backtest_correlation import (
     BacktestVsLiveRecord,
     SurvivorshipBiasRecord,
@@ -71,7 +74,7 @@ def assess_tournament_stability(
     for symbol, by_regime in winner_histories.items():
         for regime, history in by_regime.items():
             if len(history) >= config.min_tournament_runs:
-                score = StrategyManager.compute_stability_score(history)
+                score = compute_stability_score(history)
                 qualifying.append((symbol, regime, len(history), score))
 
     if not qualifying:

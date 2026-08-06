@@ -61,6 +61,9 @@ services:
     env_file: .env
     environment:
       ATS_UMIL_BASE_URL: http://umil:8100
+      # Bounded LRU/TTL cache. The previous cache had no entry limit and
+      # retained expired symbol/timeframe variants for the life of uvicorn.
+      ATS_DASHBOARD_CACHE_MAX_ENTRIES: "128"
     depends_on:
       engine:
         condition: service_started
@@ -131,7 +134,7 @@ services:
     # signal to page on. curl isn't installed on python:3.11-slim, so this
     # uses the stdlib instead of adding a package just for this.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=5).status == 200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/ready', timeout=5).status == 200 else 1)"]
       interval: 60s
       timeout: 10s
       retries: 3
