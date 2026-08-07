@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from trading_assistant.config import load_config
+from trading_assistant.persistence.paths import trading_db_path
 from trading_assistant.stability import compute_stability_score
 from webapp import data_access as da
 from webapp.bankroll_api import router as bankroll_router
@@ -58,7 +59,7 @@ _ASSET_VERSION = _static_asset_version()
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default="trading_system.db")
+    parser.add_argument("--db", default=trading_db_path())
     parser.add_argument("--config", default=None)
     args, _ = parser.parse_known_args()
     return args

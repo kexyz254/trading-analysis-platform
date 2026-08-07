@@ -37,6 +37,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from trading_assistant.persistence.paths import trading_db_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,7 +81,7 @@ def backup_database(db_path: str, backup_dir: str, keep: int) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Online backup of trading_system.db")
-    parser.add_argument("--db-path", default="trading_system.db")
+    parser.add_argument("--db-path", default=trading_db_path())
     parser.add_argument("--backup-dir", default="backups")
     parser.add_argument("--keep", type=int, default=14, help="How many recent backups to retain (0 = keep all)")
     args = parser.parse_args()

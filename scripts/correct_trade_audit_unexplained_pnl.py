@@ -37,6 +37,7 @@ import logging
 from trading_assistant.config import load_config
 from trading_assistant.logging_setup import configure_logging
 from trading_assistant.persistence.journal import Journal
+from trading_assistant.persistence.paths import trading_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def main() -> None:
 
     config = load_config(args.config)
     configure_logging(level=config.logging.level, log_file=config.logging.file)
-    journal = Journal(db_path="trading_system.db")
+    journal = Journal(db_path=trading_db_path())
 
     already_corrected = {
         row["corrects_id"] for row in journal.recent_trade_audit(limit=1000) if row["corrects_id"] is not None

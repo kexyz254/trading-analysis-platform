@@ -33,6 +33,7 @@ from trading_assistant.config import Config, load_config
 from trading_assistant.exchange_factory import build_exchange
 from trading_assistant.logging_setup import configure_logging
 from trading_assistant.persistence.journal import Journal
+from trading_assistant.persistence.paths import trading_db_path
 from trading_assistant.portfolio.manager import PortfolioManager
 from trading_assistant.process_lock import AlreadyRunningError, acquire_singleton_lock
 
@@ -78,7 +79,7 @@ def build_alert_manager(journal: Journal) -> AlertManager:
 
 def build_orchestrator(config: Config) -> Orchestrator:
     exchange = build_exchange(config)
-    journal = Journal(db_path="trading_system.db")
+    journal = Journal(db_path=trading_db_path())
     alert_manager = build_alert_manager(journal)
 
     # See trading_assistant.annualization: a Sharpe ratio's annualization

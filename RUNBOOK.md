@@ -149,3 +149,12 @@ without opening any new public surface, and is the recommended default.
    project, now proven under Docker specifically.
 8. Let it run 48-72 hours on testnet, watching the readiness scorecard
    accumulate genuine data, before considering `mode: live`.
+
+
+## Production SQLite storage invariant
+
+`trading_system.db` is deployed through the shared `trading_data/` directory,
+not a single-file bind mount. Both the main database and WAL sidecars must stay
+on the same host-backed filesystem. See `docs/sqlite_storage_v2.md`. The
+engine is the only writer; the dashboard mounts the directory read-only and
+opens SQLite with `mode=ro`/`query_only`.

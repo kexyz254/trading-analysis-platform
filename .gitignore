@@ -71,3 +71,6 @@ before-*.diff
 !.env.example
 
 /umil_data/
+
+# Production SQLite directory mount
+trading_data/

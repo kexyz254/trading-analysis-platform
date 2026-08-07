@@ -15,6 +15,7 @@ import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from trading_assistant.config import Config, ReadinessConfig
@@ -187,6 +188,16 @@ _cache = TTLCache(
 _exchange = None
 
 
+def _connect_readonly(db_path: str, *, timeout: float = 5.0) -> sqlite3.Connection:
+    """Open the engine journal as a true SQLite read-only connection."""
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=timeout)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA busy_timeout=5000")
+    return connection
+
+
 def get_exchange(config: Config):
     global _exchange
     if _exchange is None:
@@ -314,7 +325,7 @@ def active_symbols(db_path: str, config_symbols: List[str]) -> List[str]:
     runtime inside the live process and never persists anywhere else."""
 
     def _fetch():
-        conn = sqlite3.connect(db_path)
+        conn = _connect_readonly(db_path)
         try:
             rows = conn.execute("SELECT DISTINCT symbol FROM decisions").fetchall()
         except sqlite3.OperationalError:
@@ -479,8 +490,7 @@ def _read_events(db_path: str, table: str, limit: int = 100) -> List[Dict[str, A
     # turn this into SQL injection with no visible warning otherwise.
     if table not in _EVENT_TABLES:
         raise ValueError(f"table must be one of {sorted(_EVENT_TABLES)}, got {table!r}")
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = _connect_readonly(db_path)
     try:
         rows = conn.execute(f"SELECT * FROM {table} ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     except sqlite3.OperationalError:
@@ -519,8 +529,7 @@ def winner_histories(db_path: str) -> Dict[str, Dict[str, List[Optional[str]]]]:
     in this separate process without needing the live orchestrator."""
 
     def _fetch():
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
+        conn = _connect_readonly(db_path)
         try:
             rows = conn.execute("SELECT * FROM tournament_events ORDER BY id ASC").fetchall()
         except sqlite3.OperationalError:
@@ -586,14 +595,8 @@ def database_readiness(db_path: str) -> Dict[str, Any]:
     """
     started = time.monotonic()
     try:
-        connection = sqlite3.connect(
-            f"file:{db_path}?mode=ro",
-            uri=True,
-            timeout=5.0,
-        )
+        connection = _connect_readonly(db_path, timeout=5.0)
         try:
-            connection.execute("PRAGMA query_only=ON")
-            connection.execute("PRAGMA busy_timeout=5000")
             schema_row = connection.execute(
                 "SELECT name FROM sqlite_master "
                 "WHERE type = 'table' ORDER BY name LIMIT 1"

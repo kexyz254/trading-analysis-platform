@@ -283,15 +283,12 @@ class Journal:
     def __init__(self, db_path: str = "trading_system.db", initialize: bool = True):
         """initialize=False constructs a PURE READER: no schema DDL, no
         migrations, no directory creation - required for any process that
-        must never write this database. The dashboard opens the engine's
-        journal through a single-FILE docker bind mount, where SQLite's WAL
-        sidecars land in each container's own private overlay fs; a schema
-        write from the dashboard (e.g. CREATE TABLE for a table added in a
-        newer deploy) therefore commits through a private WAL that diverges
-        from the engine's and corrupts the shared main file ("database disk
-        image is malformed", production 2026-07-16). Readers querying a
-        table that doesn't exist yet get sqlite3.OperationalError - the
-        correct, honest failure for a schema-behind database."""
+        must never write this database. Production mounts the complete SQLite
+        directory into both processes so the main database and WAL sidecars
+        are shared; the dashboard receives that mount read-only and reader
+        connections additionally use SQLite mode=ro/query_only. Readers
+        querying a table that does not exist yet therefore fail loudly rather
+        than attempting a schema migration."""
         self.db_path = db_path
         self._reader = not initialize
         if initialize:
@@ -302,11 +299,13 @@ class Journal:
 
     def _connect(self) -> sqlite3.Connection:
         if self._reader:
-            conn = sqlite3.connect(
-                f"file:{self.db_path}?mode=ro",
-                uri=True,
-                timeout=5.0,
-            )
+            # Enforce read-only access at SQLite itself. This is stronger
+            # than relying on every dashboard call site to avoid writes, and
+            # it also makes a read-only directory bind mount an explicit
+            # deployment invariant rather than a convention.
+            db_uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(db_uri, uri=True, timeout=5.0)
+            conn.execute("PRAGMA query_only=ON")
         else:
             conn = sqlite3.connect(self.db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row

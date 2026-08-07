@@ -18,18 +18,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-RUN pip install -e .
+# Create the runtime UID before copying application source so ownership is
+# assigned while the layer is created.  Avoid `chown -R /app`: recursive
+# ownership changes duplicate the entire application tree into another image
+# layer and do nothing to change ownership of host bind mounts at runtime.
+RUN useradd --create-home --uid 1000 appuser
 
-# Real API keys live in this container's environment (via .env) - running
-# as root needlessly widens the blast radius if the process is ever
-# compromised (a malicious dependency, a deserialization bug in a loaded
-# model file, etc). Directories the containers actually need to write to
-# (logs/, trading_assistant/models/) are all bind-mounted from the host at
-# runtime per docker-compose.yml - chown them so the non-root user can
-# still write through the mount.
-RUN useradd --create-home --uid 1000 appuser \
-    && chown -R appuser:appuser /app
+COPY --chown=appuser:appuser . .
+RUN pip install --no-cache-dir -e .
+
+# Runtime-writable paths are bind-mounted and their HOST ownership is handled
+# by the deployment scripts.  The image itself therefore needs no recursive
+# ownership mutation.
 USER appuser
 
 CMD ["pytest", "tests"]

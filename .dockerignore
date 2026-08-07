@@ -25,6 +25,11 @@ venv/
 trading_system.db
 trading_system.db-shm
 trading_system.db-wal
+trading_data/
+# Runtime-owned SQLite/analytics directories must never be baked into images.
+# They can be multi-gigabyte and can contain production financial history.
+umil_data/
+dashboard_data/
 backups/
 archive/
 run_system.lock

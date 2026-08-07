@@ -1,5 +1,5 @@
-# VPS deployment: two services sharing one SQLite journal file, reusing the
-# existing Dockerfile unchanged (only `command:` differs per service). Both
+# VPS deployment: engine and dashboard share one SQLite journal DIRECTORY,
+# reusing the existing Dockerfile unchanged (only `command:` differs). Both
 # use `restart: unless-stopped` so a VPS reboot or a crashed process comes
 # back on its own, without anyone SSHing in to restart it by hand.
 services:
@@ -8,11 +8,15 @@ services:
     command: python run_system.py
     restart: unless-stopped
     env_file: .env
+    environment:
+      ATS_TRADING_DB_PATH: /app/trading_data/trading_system.db
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./logs:/app/logs
       - ./trading_assistant/models:/app/trading_assistant/models
-      - ./trading_system.db:/app/trading_system.db
+      # SQLite WAL requires the main db, -wal, and -shm to share the same
+      # persistent directory. Never replace this with a single-file bind.
+      - ./trading_data:/app/trading_data
     # Orchestrator.request_shutdown() (wired to SIGTERM in run_system.py)
     # checks a shutdown flag between symbols in the retrain/tournament
     # loops, not just at the top of the outer while-loop - bounds the
@@ -61,6 +65,7 @@ services:
     env_file: .env
     environment:
       ATS_UMIL_BASE_URL: http://umil:8100
+      ATS_TRADING_DB_PATH: /app/trading_data/trading_system.db
       # Bounded LRU/TTL cache. The previous cache had no entry limit and
       # retained expired symbol/timeframe variants for the life of uvicorn.
       ATS_DASHBOARD_CACHE_MAX_ENTRIES: "128"
@@ -88,23 +93,11 @@ services:
       - "100.93.64.23:8000:8000"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      # SINGLE-FILE mount + SQLite WAL hazard: WAL keeps its sidecar files
-      # (-wal/-shm) NEXT TO the database, which under a single-file mount
-      # means each container's own private overlay fs, not the shared host
-      # file. That is survivable for a reader, but a SECOND WRITER through
-      # a private WAL corrupts the main file ("database disk image is
-      # malformed" - happened in production 2026-07-16). The dashboard must
-      # therefore stay STRICTLY READ-ONLY on this database; anything the
-      # dashboard needs to persist goes in dashboard_data/ below. Enforced
-      # in code: every dashboard-side Journal is constructed with
-      # initialize=False (no schema DDL, no migrations - see Journal.__init__).
-      # TODO(deep fix): migrate trading_system.db into a shared DIRECTORY
-      # mount (e.g. ./data:/app/data for both services) so the WAL sidecars
-      # live on the host for both containers - that removes this whole class
-      # of hazard instead of guarding it. Requires moving the db file on the
-      # host plus updating both services' paths and the backup cron in one
-      # deliberate maintenance step.
-      - ./trading_system.db:/app/trading_system.db
+      # Read-only view of the SAME directory the engine writes. SQLite WAL
+      # sidecars are therefore visible to both processes, while the :ro bind
+      # and mode=ro/query_only connections enforce that the dashboard cannot
+      # mutate financial state or perform schema migrations.
+      - ./trading_data:/app/trading_data:ro
       # Dashboard-owned analytics (price calls etc.): a DIRECTORY mount, so
       # the analytics db's WAL sidecars live inside the shared directory and
       # there is exactly one writer (this container) - the supported setup.
