@@ -66,3 +66,12 @@ def test_compose_uses_shared_directory_for_engine_and_readonly_dashboard():
     expected = "/app/trading_data/trading_system.db"
     assert engine["environment"]["ATS_TRADING_DB_PATH"] == expected
     assert dashboard["environment"]["ATS_TRADING_DB_PATH"] == expected
+
+
+def test_engine_lock_path_follows_configured_database(monkeypatch, tmp_path):
+    from run_system import _engine_lock_path
+
+    database = tmp_path / "state" / "trading_system.db"
+    monkeypatch.setenv("ATS_TRADING_DB_PATH", str(database))
+
+    assert _engine_lock_path() == database.parent.resolve() / "run_system.lock"

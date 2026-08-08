@@ -36,11 +36,20 @@ from trading_assistant.persistence.journal import Journal
 from trading_assistant.persistence.paths import trading_db_path
 from trading_assistant.portfolio.manager import PortfolioManager
 from trading_assistant.process_lock import AlreadyRunningError, acquire_singleton_lock
-
-# Repo root, not CWD - this script is always at the repo root, so the lock
-# lives next to it regardless of where the process was launched from.
-_LOCK_PATH = Path(__file__).resolve().parent / "run_system.lock"
 from trading_assistant.risk.adaptive import DrawdownTier
+
+
+def _engine_lock_path() -> Path:
+    """Return the singleton lock beside the configured trading database.
+
+    Production runs as an unprivileged user and mounts ``trading_data``
+    read/write for the engine. Keeping the lock in that same shared directory
+    both preserves write permissions and guarantees that every engine using
+    the same journal contends on the same OS-level lock.
+    """
+
+    return Path(trading_db_path()).resolve().parent / "run_system.lock"
+
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +299,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        lock_file = acquire_singleton_lock(str(_LOCK_PATH))
+        lock_file = acquire_singleton_lock(str(_engine_lock_path()))
     except AlreadyRunningError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         sys.exit(1)
