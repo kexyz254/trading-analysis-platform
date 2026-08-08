@@ -24,6 +24,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # layer and do nothing to change ownership of host bind mounts at runtime.
 RUN useradd --create-home --uid 1000 appuser
 
+# Runtime cache is intentionally writable by the unprivileged ATS process.
+# The remainder of /app stays immutable/root-owned.
+RUN install -d -o appuser -g appuser -m 0750 /app/cache
+
 COPY --chown=appuser:appuser . .
 RUN pip install --no-cache-dir -e .
 
