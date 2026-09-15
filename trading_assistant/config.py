@@ -191,6 +191,8 @@ class ML15mConfig:
 @dataclass
 class Config:
     mode: str = "testnet"
+    execution_mode: str = "manual_assist"
+    manual_live_execution_enabled: bool = False
     exchange: ExchangeConfig = field(default_factory=ExchangeConfig)
     symbols: List[str] = field(default_factory=lambda: ["BTC/USDT"])
     timeframe: str = "1h"
@@ -239,9 +241,26 @@ def load_config(path: Optional[os.PathLike] = None, *, env_file: Optional[os.Pat
     if mode not in ("testnet", "live"):
         raise ValueError(f"config 'mode' must be 'testnet' or 'live', got {mode!r}")
 
+    execution_mode = data.get("execution_mode", "manual_assist")
+    if execution_mode not in ("manual_assist", "autonomous"):
+        raise ValueError(
+            "config 'execution_mode' must be 'manual_assist' or "
+            f"'autonomous', got {execution_mode!r}"
+        )
+    manual_live_execution_enabled = data.get(
+        "manual_live_execution_enabled", False
+    )
+    if not isinstance(manual_live_execution_enabled, bool):
+        raise ValueError(
+            "config 'manual_live_execution_enabled' must be boolean"
+        )
+
+
     defaults = Config()
     return Config(
         mode=mode,
+        execution_mode=execution_mode,
+        manual_live_execution_enabled=manual_live_execution_enabled,
         exchange=ExchangeConfig(**data.get("exchange", {})),
         symbols=data.get("symbols") or defaults.symbols,
         timeframe=data.get("timeframe", defaults.timeframe),

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import os
 import sqlite3
 import threading
 import uuid
@@ -119,6 +121,7 @@ class EvidenceLedger:
         instrument_id: str | None = None,
         supersedes_evidence_id: str | None = None,
         correction_reason: str | None = None,
+        externalize_payload: bool = False,
     ) -> EvidenceRecord:
         if not event_type or not event_type.replace("_", "").isalnum():
             raise ValueError("event_type must be a non-empty identifier")
@@ -133,6 +136,13 @@ class EvidenceLedger:
         payload_json = canonical_json(payload)
         payload_hash = sha256_hex(payload_json)
         evidence_id = str(uuid.uuid4())
+
+        stored_payload_json = payload_json
+        if externalize_payload:
+            stored_payload_json = self._externalize_payload(
+                payload_json=payload_json,
+                payload_hash=payload_hash,
+            )
 
         with self._write_lock, self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -173,7 +183,7 @@ class EvidenceLedger:
                     evidence_id, sequence, event_type, instrument_id,
                     observed_text, received_text, calculated_text,
                     VERSIONS.evidence_schema_version, VERSIONS.calculation_version,
-                    payload_json, payload_hash, previous_hash, chain_hash,
+                    stored_payload_json, payload_hash, previous_hash, chain_hash,
                     supersedes_evidence_id, correction_reason, created_text,
                 ),
             )
@@ -206,6 +216,101 @@ class EvidenceLedger:
             supersedes_evidence_id=supersedes_evidence_id,
             correction_reason=correction_reason,
         )
+
+    def _externalize_payload(
+        self,
+        *,
+        payload_json: str,
+        payload_hash: str,
+    ) -> str:
+        """Persist exact canonical payload in immutable gzip cold storage."""
+        relative = Path("objects") / payload_hash[:2] / f"{payload_hash}.json.gz"
+        destination = self.database_path.parent / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        if not destination.exists():
+            compressed = gzip.compress(
+                payload_json.encode("utf-8"),
+                compresslevel=6,
+                mtime=0,
+            )
+            temporary = destination.with_name(
+                destination.name + f".tmp-{uuid.uuid4().hex}"
+            )
+
+            try:
+                with temporary.open("xb") as handle:
+                    handle.write(compressed)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+
+                os.replace(temporary, destination)
+
+                directory_fd = os.open(destination.parent, os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+
+        return canonical_json({
+            "__umil_external_payload__": {
+                "codec": "gzip",
+                "relative_path": relative.as_posix(),
+                "sha256": payload_hash,
+            }
+        })
+
+    def _resolve_payload_json(self, stored_payload_json: str) -> str:
+        """Return original canonical JSON for inline or cold evidence."""
+        try:
+            candidate = json.loads(stored_payload_json)
+        except json.JSONDecodeError:
+            return stored_payload_json
+
+        if not isinstance(candidate, dict):
+            return stored_payload_json
+
+        descriptor = candidate.get("__umil_external_payload__")
+        if not isinstance(descriptor, dict):
+            return stored_payload_json
+
+        if descriptor.get("codec") != "gzip":
+            raise RuntimeError("unsupported external evidence payload codec")
+
+        relative_text = descriptor.get("relative_path")
+        expected_hash = descriptor.get("sha256")
+
+        if not isinstance(relative_text, str):
+            raise RuntimeError("invalid external evidence payload path")
+
+        if not isinstance(expected_hash, str):
+            raise RuntimeError("invalid external evidence payload hash")
+
+        relative = Path(relative_text)
+
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("unsafe external evidence payload path")
+
+        object_root = (self.database_path.parent / "objects").resolve()
+        path = (self.database_path.parent / relative).resolve()
+
+        try:
+            path.relative_to(object_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                "external evidence payload escaped object root"
+            ) from exc
+
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            payload_json = handle.read()
+
+        if sha256_hex(payload_json) != expected_hash:
+            raise RuntimeError("external evidence payload hash mismatch")
+
+        return payload_json
 
     def set_projection(self, projection_key: str, evidence_id: str) -> None:
         if not projection_key:
@@ -480,7 +585,10 @@ class EvidenceLedger:
                                 sequence=expected_sequence - 1, chain_hash=expected_previous,
                             )
                             return False, error
-                        if sha256_hex(row["payload_json"]) != row["payload_hash"]:
+                        resolved_payload_json = self._resolve_payload_json(
+                            row["payload_json"]
+                        )
+                        if sha256_hex(resolved_payload_json) != row["payload_hash"]:
                             error = f"payload hash mismatch at {expected_sequence}"
                             self._set_verification_result(
                                 state="INVALID", error=error,
@@ -540,13 +648,13 @@ class EvidenceLedger:
                     self._verification_checked_at = _timestamp(datetime.now(timezone.utc))
                 return False, error
 
-    @staticmethod
-    def _from_row(row: sqlite3.Row) -> EvidenceRecord:
+    def _from_row(self, row: sqlite3.Row) -> EvidenceRecord:
+        payload_json = self._resolve_payload_json(row["payload_json"])
         return EvidenceRecord(
             evidence_id=row["evidence_id"], sequence=int(row["sequence"]),
             event_type=row["event_type"], instrument_id=row["instrument_id"],
             observed_at=row["observed_at"], received_at=row["received_at"],
-            calculated_at=row["calculated_at"], payload=json.loads(row["payload_json"]),
+            calculated_at=row["calculated_at"], payload=json.loads(payload_json),
             payload_hash=row["payload_hash"], previous_chain_hash=row["previous_chain_hash"],
             chain_hash=row["chain_hash"], supersedes_evidence_id=row["supersedes_evidence_id"],
             correction_reason=row["correction_reason"],

@@ -586,10 +586,9 @@ class AlwaysFailingFeed:
         raise ConnectionError("simulated market data outage")
 
 
-def test_persistent_market_data_failure_trips_circuit_breaker(tmp_path):
-    """Regression test: MarketMonitorAgent.poll() failures previously never
-    reached the circuit breaker at all, unlike execution failures - a
-    persistent feed outage would loop forever with no escalation."""
+def test_persistent_market_data_failure_does_not_trip_execution_circuit_breaker(tmp_path):
+    """Market-data/network failures are availability incidents, not execution
+    failures. They must not consume the execution circuit-breaker budget."""
     portfolio_manager = PortfolioManager(initial_capital=10000.0)
     journal = Journal(db_path=str(tmp_path / "journal.db"))
     prediction_agent = PredictionAgent(model_dir=tmp_path, auto_load=False)
@@ -607,7 +606,7 @@ def test_persistent_market_data_failure_trips_circuit_breaker(tmp_path):
     for _ in range(3):
         orchestrator.run_cycle()
 
-    assert risk_agent.circuit_breaker.tripped is True
+    assert risk_agent.circuit_breaker.tripped is False
 
 
 class AlternatingClassifier:

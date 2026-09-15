@@ -351,6 +351,23 @@ class PortfolioAgent:
         if self._has_synced_before:
             trading_delta = self._net_trading_cash_flow - self._net_trading_cash_flow_at_last_sync
             classification = classify_balance_change(previous_capital, free_balance, trading_delta)
+            if self.journal is not None:
+                reason = (
+                    "external/manual balance movement not explained by ATS trading"
+                    if classification.is_external_flow
+                    else "balance movement explained by trading/noise threshold"
+                )
+                self.journal.record_capital_flow(
+                    is_live=self.is_live,
+                    quote_currency=quote_currency,
+                    previous_balance=previous_capital,
+                    current_balance=free_balance,
+                    raw_delta=classification.raw_delta,
+                    trading_delta=classification.trading_delta,
+                    unexplained_delta=classification.unexplained_delta,
+                    is_external_flow=classification.is_external_flow,
+                    reason=reason,
+                )
             if classification.is_external_flow:
                 logger.warning(
                     "detected a balance change not explained by this bot's own trading - "

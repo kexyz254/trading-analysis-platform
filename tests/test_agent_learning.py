@@ -637,7 +637,7 @@ def test_check_feature_drift_reports_none_severity_for_a_similar_live_window(tmp
     assert summary["overall_severity"] == "none"
 
 
-def test_check_feature_drift_raises_a_critical_alert_on_significant_drift(tmp_path):
+def test_check_feature_drift_raises_a_warning_alert_on_significant_drift(tmp_path):
     from trading_assistant.agents.alerting import AlertManager
     from trading_assistant.agents.features import build_features
     from trading_assistant.persistence.journal import Journal
@@ -657,7 +657,7 @@ def test_check_feature_drift_raises_a_critical_alert_on_significant_drift(tmp_pa
     alerts = journal.recent_alerts()
     assert len(alerts) == 1
     assert alerts[0]["category"] == "feature_drift"
-    assert alerts[0]["severity"] == "critical"
+    assert alerts[0]["severity"] == "warning"
     assert "BTC/USDT" in alerts[0]["message"]
 
 

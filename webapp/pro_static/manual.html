@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ATS — Manual Trading Workspace</title>
+  <link rel="stylesheet" href="/pro/static/style.css">
+  <link rel="stylesheet" href="/pro/static/manual.css">
+</head>
+<body>
+  <main class="manual-shell">
+    <header class="manual-header">
+      <div>
+        <div class="eyebrow">ATS PROFESSIONAL</div>
+        <h1>Manual Trading Workspace</h1>
+        <div class="subtle">
+          Binance Spot · Human decision support
+        </div>
+      </div>
+
+      <div id="authority-badge" class="authority-badge">
+        CHECKING AUTHORITY
+      </div>
+    </header>
+
+    <section class="safety-banner">
+      <strong>Phase 8A — Read Only</strong>
+      <span>
+        Analysis and order preparation are enabled.
+        Account mutations are disabled.
+      </span>
+    </section>
+
+    <section class="workspace-grid">
+
+      <div class="panel market-panel">
+        <div class="panel-title">Market</div>
+
+        <div class="search-row">
+          <input id="market-search"
+                 autocomplete="off"
+                 placeholder="Search Binance pair — BTC, ETH, SOL...">
+        </div>
+
+        <div id="market-results" class="market-results"></div>
+
+        <div class="selected-market">
+          <div>
+            <div class="label">Selected Pair</div>
+            <div id="selected-symbol" class="big-value">BTC/USDT</div>
+          </div>
+
+          <div>
+            <div class="label">Last</div>
+            <div id="last-price" class="big-value">—</div>
+          </div>
+
+          <div>
+            <div class="label">Bid / Ask</div>
+            <div id="bid-ask">—</div>
+          </div>
+
+          <div>
+            <div class="label">Spread</div>
+            <div id="spread">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel intelligence-panel">
+        <div class="panel-title">ATS Intelligence</div>
+
+        <div class="intelligence-grid">
+          <div>
+            <span>Prediction</span>
+            <strong id="prediction">Loading…</strong>
+          </div>
+
+          <div>
+            <span>Confidence</span>
+            <strong id="confidence">—</strong>
+          </div>
+
+          <div>
+            <span>Market Interpretation</span>
+            <strong id="interpretation">Loading…</strong>
+          </div>
+
+          <div>
+            <span>Position</span>
+            <strong id="position">—</strong>
+          </div>
+        </div>
+
+        <div class="evidence-note">
+          Intelligence is advisory only. It has no execution authority.
+        </div>
+      </div>
+
+      <div class="panel ticket-panel">
+        <div class="panel-title">Manual Order Preparation</div>
+
+        <div class="form-grid">
+          <label>
+            Side
+            <select id="side">
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
+            </select>
+          </label>
+
+          <label>
+            Order Type
+            <select id="order-type">
+              <option value="market">Market</option>
+              <option value="limit">Limit</option>
+            </select>
+          </label>
+
+          <label>
+            Quantity
+            <input id="quantity"
+                   type="number"
+                   min="0"
+                   step="any"
+                   placeholder="0.001">
+          </label>
+
+          <label id="limit-price-wrap" hidden>
+            Limit Price
+            <input id="limit-price"
+                   type="number"
+                   min="0"
+                   step="any">
+          </label>
+        </div>
+
+        <button id="preview-button" class="primary-button">
+          Prepare Order
+        </button>
+
+        <div class="execution-disabled">
+          LIVE SUBMISSION DISABLED
+        </div>
+      </div>
+
+      <div class="panel risk-panel">
+        <div class="panel-title">Pre-Trade Risk</div>
+
+        <div id="preview-empty" class="empty-state">
+          Prepare an order to calculate live Binance risk.
+        </div>
+
+        <div id="preview-data" hidden>
+          <div class="risk-grid">
+            <div><span>Normalized Qty</span><strong id="p-qty">—</strong></div>
+            <div><span>Price</span><strong id="p-price">—</strong></div>
+            <div><span>Notional</span><strong id="p-notional">—</strong></div>
+            <div><span>Available</span><strong id="p-balance">—</strong></div>
+            <div><span>Spread</span><strong id="p-spread">—</strong></div>
+            <div><span>Decision</span><strong id="p-decision">—</strong></div>
+          </div>
+
+          <div id="blockers" class="blocker-box"></div>
+          <div id="warnings" class="warning-box"></div>
+        </div>
+      </div>
+
+    </section>
+
+    <footer class="manual-footer">
+      <a href="/pro">← Return to Pro Dashboard</a>
+      <span>ATS Manual Workspace · Execution Authority: None</span>
+    </footer>
+  </main>
+
+  <script src="/pro/static/manual.js"></script>
+</body>
+</html>

@@ -573,7 +573,10 @@ class LearningAgent:
             if self.alert_manager is not None:
                 worst = summary["worst_features"][0] if summary["worst_features"] else None
                 worst_desc = f"{worst['feature']} (PSI={worst['psi']})" if worst else "unknown feature"
-                severity = "critical" if summary["overall_severity"] == "significant" else "warning"
+                # Drift is an early-warning diagnostic, not an execution
+                # emergency. The measured severity remains in `summary`, while
+                # operator notification urgency is WARNING.
+                severity = "warning"
                 self.alert_manager.raise_alert(
                     "feature_drift",
                     severity,

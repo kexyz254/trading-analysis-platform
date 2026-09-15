@@ -1,0 +1,26 @@
+.manual-shell{max-width:1500px;margin:auto;padding:24px}
+.manual-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+.manual-header h1{margin:4px 0}
+.eyebrow,.label,.subtle{opacity:.65;font-size:.78rem;text-transform:uppercase;letter-spacing:.08em}
+.authority-badge{padding:10px 14px;border:1px solid currentColor;border-radius:8px;font-weight:700}
+.safety-banner{display:flex;gap:16px;padding:14px 16px;border:1px solid rgba(255,255,255,.15);border-radius:10px;margin-bottom:18px}
+.workspace-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:16px}
+.panel{padding:18px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(255,255,255,.025)}
+.panel-title{font-size:.78rem;text-transform:uppercase;letter-spacing:.1em;opacity:.7;margin-bottom:16px}
+.search-row input,.form-grid input,.form-grid select{width:100%;padding:11px;border-radius:7px;border:1px solid rgba(255,255,255,.15);background:transparent;color:inherit}
+.market-results{max-height:180px;overflow:auto;margin-top:8px}
+.market-result{padding:8px 10px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.08)}
+.selected-market,.risk-grid,.intelligence-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:18px}
+.big-value{font-size:1.35rem;font-weight:700;margin-top:5px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.form-grid label{display:flex;flex-direction:column;gap:7px}
+.primary-button{margin-top:16px;width:100%;padding:12px;border:0;border-radius:8px;font-weight:700;cursor:pointer}
+.execution-disabled{margin-top:10px;text-align:center;font-size:.75rem;letter-spacing:.1em;opacity:.55}
+.risk-grid div,.intelligence-grid div{display:flex;flex-direction:column;gap:5px}
+.risk-grid span,.intelligence-grid span{font-size:.75rem;opacity:.6}
+.blocker-box,.warning-box{margin-top:14px;padding:10px;border-radius:7px;display:none}
+.blocker-box:not(:empty){display:block;border:1px solid #b94a48}
+.warning-box:not(:empty){display:block;border:1px solid #a67c00}
+.empty-state,.evidence-note{opacity:.6}
+.manual-footer{display:flex;justify-content:space-between;margin-top:18px;font-size:.8rem;opacity:.65}
+@media(max-width:850px){.workspace-grid{grid-template-columns:1fr}.manual-header{align-items:flex-start;gap:15px}.selected-market{grid-template-columns:1fr 1fr}}

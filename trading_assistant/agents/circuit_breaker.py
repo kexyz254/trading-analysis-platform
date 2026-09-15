@@ -83,17 +83,49 @@ class CircuitBreaker:
             )
 
     def reset(self, operator: Optional[str] = None) -> None:
-        """Manually clear a trip. Must be called deliberately - there is no
-        automatic reset, including across process restarts."""
+        """Deliberately clear an active trip and persist the recovery."""
+        if not self.tripped:
+            logger.info(
+                "circuit breaker reset requested while already clear",
+                extra={"context": {"operator": operator}},
+            )
+            return
+
+        previous_reason = self.trip_reason
+        previous_tripped_at = self.tripped_at
+
         logger.warning(
             "circuit breaker reset",
-            extra={"context": {"operator": operator, "previous_reason": self.trip_reason}},
+            extra={
+                "context": {
+                    "operator": operator,
+                    "previous_reason": previous_reason,
+                }
+            },
         )
+
         self.tripped = False
         self.trip_reason = None
         self.tripped_at = None
         self._consecutive_errors = {}
+
         if self.journal is not None:
             self.journal.record_circuit_breaker_event(
-                tripped=False, reason=f"reset by {operator}" if operator else "reset"
+                tripped=False,
+                reason=f"reset by {operator}" if operator else "reset",
+            )
+
+        if self.alert_manager is not None:
+            incident_key = previous_tripped_at or previous_reason or "unknown"
+            self.alert_manager.raise_alert(
+                "circuit_breaker_recovery",
+                "info",
+                "circuit breaker reset; trading safety hold has been cleared",
+                context={
+                    "operator": operator,
+                    "previous_reason": previous_reason,
+                    "previous_tripped_at": previous_tripped_at,
+                },
+                dedupe_key=f"circuit_breaker_recovery:{incident_key}",
+                force_email=True,
             )

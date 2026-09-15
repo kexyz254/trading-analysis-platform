@@ -229,6 +229,133 @@ BEGIN
     SELECT RAISE(ABORT, 'trade_audit is append-only: records are never deleted');
 END;
 
+CREATE TABLE IF NOT EXISTS capital_flow_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    is_live INTEGER NOT NULL,
+    quote_currency TEXT NOT NULL,
+    previous_balance REAL NOT NULL,
+    current_balance REAL NOT NULL,
+    raw_delta REAL NOT NULL,
+    trading_delta REAL NOT NULL,
+    unexplained_delta REAL NOT NULL,
+    is_external_flow INTEGER NOT NULL,
+    reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS execution_ownership (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    broker_order_id TEXT,
+    broker_client_order_id TEXT,
+    request_id TEXT,
+    side TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    provenance TEXT NOT NULL,
+    operator_id TEXT,
+    strategy_id TEXT,
+    status TEXT NOT NULL,
+    UNIQUE(account_id, broker_order_id),
+    UNIQUE(account_id, broker_client_order_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_ownership_symbol
+ON execution_ownership(account_id, symbol, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_execution_ownership_provenance
+ON execution_ownership(account_id, provenance, id DESC);
+
+CREATE TABLE IF NOT EXISTS position_ownership_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    price REAL,
+    realized_pnl REAL,
+    broker_order_id TEXT,
+    request_id TEXT,
+    details TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_ownership_symbol
+ON position_ownership_events(account_id, symbol, id DESC);
+
+CREATE TABLE IF NOT EXISTS manual_execution_commands (
+    request_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    order_type TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    limit_price REAL,
+    provenance TEXT NOT NULL,
+    confirmation_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    claimed_at TEXT,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_execution_commands_status
+ON manual_execution_commands(status, created_at);
+
+CREATE TABLE IF NOT EXISTS manual_execution_command_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    details TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_execution_command_events_request
+ON manual_execution_command_events(request_id, id);
+
+CREATE TABLE IF NOT EXISTS manual_order_intents (
+    request_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    operator_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    order_type TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    reference_price REAL,
+    limit_price REAL,
+    provenance TEXT NOT NULL,
+    broker_client_order_id TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS manual_order_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    broker_order_id TEXT,
+    details TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_manual_order_events_request
+ON manual_order_events (request_id, id DESC);
+
+CREATE TRIGGER IF NOT EXISTS manual_order_intents_no_update
+BEFORE UPDATE ON manual_order_intents
+BEGIN
+    SELECT RAISE(ABORT, 'manual_order_intents is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS manual_order_intents_no_delete
+BEFORE DELETE ON manual_order_intents
+BEGIN
+    SELECT RAISE(ABORT, 'manual_order_intents is append-only');
+END;
+
 CREATE TABLE IF NOT EXISTS alert_delivery (
     channel TEXT NOT NULL,
     dedupe_key TEXT NOT NULL,
@@ -639,6 +766,340 @@ class Journal:
             )
             conn.commit()
             return int(cursor.lastrowid)
+
+    def record_capital_flow(
+        self,
+        *,
+        is_live: bool,
+        quote_currency: str,
+        previous_balance: float,
+        current_balance: float,
+        raw_delta: float,
+        trading_delta: float,
+        unexplained_delta: float,
+        is_external_flow: bool,
+        reason: Optional[str] = None,
+        timestamp: Optional[str] = None,
+    ) -> int:
+        """Persist one exchange cash-balance classification.
+
+        This is attribution evidence, not trading PnL: manual trades,
+        deposits, withdrawals, transfers, and ATS trading must remain
+        distinguishable when drawdown risk is evaluated.
+        """
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO capital_flow_audit (
+                    timestamp,
+                    is_live,
+                    quote_currency,
+                    previous_balance,
+                    current_balance,
+                    raw_delta,
+                    trading_delta,
+                    unexplained_delta,
+                    is_external_flow,
+                    reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp or self._now(),
+                    1 if is_live else 0,
+                    quote_currency,
+                    previous_balance,
+                    current_balance,
+                    raw_delta,
+                    trading_delta,
+                    unexplained_delta,
+                    1 if is_external_flow else 0,
+                    reason,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def enqueue_manual_execution_command(
+        self, *, request_id: str, expires_at: str,
+        account_id: str, operator_id: str, symbol: str,
+        side: str, order_type: str, quantity: float,
+        limit_price: Optional[float], provenance: str,
+        confirmation_fingerprint: str,
+    ) -> bool:
+        with closing(self._connect()) as conn:
+            try:
+                now = self._now()
+                conn.execute(
+                    """INSERT INTO manual_execution_commands
+                    (request_id, created_at, expires_at, account_id,
+                     operator_id, symbol, side, order_type, quantity,
+                     limit_price, provenance, confirmation_fingerprint,
+                     status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')""",
+                    (
+                        request_id, now, expires_at, account_id,
+                        operator_id, symbol, side, order_type,
+                        quantity, limit_price, provenance,
+                        confirmation_fingerprint,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO manual_execution_command_events
+                    (timestamp, request_id, event_type, details)
+                    VALUES (?, ?, 'ENQUEUED', '{}')""",
+                    (now, request_id),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def manual_execution_command(
+        self, request_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """SELECT * FROM manual_execution_commands
+                WHERE request_id = ?""",
+                (request_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_next_manual_execution_command(
+        self, now: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        now = now or self._now()
+
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+
+            row = conn.execute(
+                """SELECT * FROM manual_execution_commands
+                WHERE status = 'PENDING'
+                  AND expires_at > ?
+                ORDER BY created_at ASC
+                LIMIT 1""",
+                (now,),
+            ).fetchone()
+
+            if row is None:
+                conn.commit()
+                return None
+
+            request_id = row["request_id"]
+
+            cursor = conn.execute(
+                """UPDATE manual_execution_commands
+                SET status = 'CLAIMED', claimed_at = ?
+                WHERE request_id = ? AND status = 'PENDING'""",
+                (now, request_id),
+            )
+
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return None
+
+            conn.execute(
+                """INSERT INTO manual_execution_command_events
+                (timestamp, request_id, event_type, details)
+                VALUES (?, ?, 'CLAIMED', '{}')""",
+                (now, request_id),
+            )
+
+            conn.commit()
+
+            claimed = dict(row)
+            claimed["status"] = "CLAIMED"
+            claimed["claimed_at"] = now
+            return claimed
+
+    def complete_manual_execution_command(
+        self, request_id: str, *, status: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        allowed = {"EXECUTED", "REJECTED", "UNCERTAIN"}
+        if status not in allowed:
+            raise ValueError(
+                f"invalid manual command terminal status: {status}"
+            )
+
+        with closing(self._connect()) as conn:
+            now = self._now()
+
+            cursor = conn.execute(
+                """UPDATE manual_execution_commands
+                SET status = ?, completed_at = ?
+                WHERE request_id = ? AND status = 'CLAIMED'""",
+                (status, now, request_id),
+            )
+
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return False
+
+            conn.execute(
+                """INSERT INTO manual_execution_command_events
+                (timestamp, request_id, event_type, details)
+                VALUES (?, ?, ?, ?)""",
+                (
+                    now,
+                    request_id,
+                    status,
+                    json.dumps(details or {}, sort_keys=True),
+                ),
+            )
+
+            conn.commit()
+            return True
+
+    def record_execution_ownership(
+        self, *, account_id: str, symbol: str, side: str,
+        quantity: float, provenance: str, status: str,
+        broker_order_id: Optional[str] = None,
+        broker_client_order_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        operator_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+    ) -> int:
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """INSERT INTO execution_ownership
+                (timestamp, account_id, symbol, broker_order_id,
+                 broker_client_order_id, request_id, side, quantity,
+                 provenance, operator_id, strategy_id, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self._now(), account_id, symbol, broker_order_id,
+                    broker_client_order_id, request_id, side,
+                    quantity, provenance, operator_id,
+                    strategy_id, status,
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def record_position_ownership_event(
+        self, *, account_id: str, symbol: str, provenance: str,
+        event_type: str, quantity: float,
+        price: Optional[float] = None,
+        realized_pnl: Optional[float] = None,
+        broker_order_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """INSERT INTO position_ownership_events
+                (timestamp, account_id, symbol, provenance,
+                 event_type, quantity, price, realized_pnl,
+                 broker_order_id, request_id, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self._now(), account_id, symbol, provenance,
+                    event_type, quantity, price, realized_pnl,
+                    broker_order_id, request_id,
+                    json.dumps(details or {}, sort_keys=True),
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def execution_ownership_for_order(
+        self, account_id: str, broker_order_id: str
+    ) -> Optional[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """SELECT * FROM execution_ownership
+                WHERE account_id = ? AND broker_order_id = ?
+                ORDER BY id DESC LIMIT 1""",
+                (account_id, broker_order_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def position_ownership_events(
+        self, account_id: str
+    ) -> List[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT *
+                FROM position_ownership_events
+                WHERE account_id = ?
+                ORDER BY id ASC""",
+                (account_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_position_ownership(
+        self, account_id: str, symbol: str
+    ) -> Optional[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """SELECT * FROM position_ownership_events
+                WHERE account_id = ? AND symbol = ?
+                ORDER BY id DESC LIMIT 1""",
+                (account_id, symbol),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_manual_order_intent(
+        self, *, request_id: str, account_id: str, operator_id: str,
+        symbol: str, side: str, order_type: str, quantity: float,
+        reference_price: Optional[float], limit_price: Optional[float],
+        provenance: str, broker_client_order_id: str,
+    ) -> bool:
+        """Atomically reserve a request id before any broker mutation."""
+        with closing(self._connect()) as conn:
+            try:
+                conn.execute(
+                    """INSERT INTO manual_order_intents
+                    (request_id, created_at, account_id, operator_id, symbol,
+                     side, order_type, quantity, reference_price, limit_price,
+                     provenance, broker_client_order_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        request_id, self._now(), account_id, operator_id,
+                        symbol, side, order_type, quantity,
+                        reference_price, limit_price, provenance,
+                        broker_client_order_id,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO manual_order_events
+                    (timestamp, request_id, event_type, details)
+                    VALUES (?, ?, 'INTENT_RECORDED', ?)""",
+                    (self._now(), request_id, "{}"),
+                )
+                conn.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def record_manual_order_event(
+        self, *, request_id: str, event_type: str,
+        broker_order_id: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        with closing(self._connect()) as conn:
+            cursor = conn.execute(
+                """INSERT INTO manual_order_events
+                (timestamp, request_id, event_type, broker_order_id, details)
+                VALUES (?, ?, ?, ?, ?)""",
+                (
+                    self._now(), request_id, event_type, broker_order_id,
+                    json.dumps(details or {}, sort_keys=True),
+                ),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def manual_order_intent(self, request_id: str) -> Optional[Dict[str, Any]]:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT * FROM manual_order_intents WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def recent_equity_snapshots(self, limit: int = 500) -> List[Dict[str, Any]]:
         with closing(self._connect()) as conn:

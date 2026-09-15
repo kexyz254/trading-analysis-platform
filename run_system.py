@@ -31,6 +31,11 @@ from trading_assistant.agents.symbol_discovery import SymbolDiscoveryAgent
 from trading_assistant.annualization import bars_per_year, periods_per_year_from_seconds
 from trading_assistant.config import Config, load_config
 from trading_assistant.exchange_factory import build_exchange
+from trading_assistant.execution.canary_guard import (
+    CanaryGuard,
+    CanaryLimits,
+)
+from trading_assistant.market.runtime import bootstrap_market_universe
 from trading_assistant.logging_setup import configure_logging
 from trading_assistant.persistence.journal import Journal
 from trading_assistant.persistence.paths import trading_db_path
@@ -86,9 +91,57 @@ def build_alert_manager(journal: Journal) -> AlertManager:
     )
 
 
+from time import perf_counter
+
+
 def build_orchestrator(config: Config) -> Orchestrator:
+    step_started = perf_counter()
     exchange = build_exchange(config)
+    logger.info(
+        "startup performance",
+        extra={"context": {
+            "step": "build_exchange",
+            "seconds": round(perf_counter() - step_started, 4),
+        }},
+    )
+
+    # Authoritative broker catalog plus dynamically tracked markets.
+    # This performs broker reads only; execution authority remains separate.
+    step_started = perf_counter()
+    market_universe = bootstrap_market_universe(
+        exchange,
+        config.symbols,
+        quote_currency=config.symbol_discovery.quote_currency,
+    )
+    logger.info(
+        "startup performance",
+        extra={"context": {
+            "step": "bootstrap_market_universe",
+            "seconds": round(perf_counter() - step_started, 4),
+        }},
+    )
+
+    step_started = perf_counter()
     journal = Journal(db_path=trading_db_path())
+
+    canary_guard = CanaryGuard(
+        "/app/data/autonomous_canary.db",
+        CanaryLimits(
+            max_order_notional=10.0,
+            max_gross_exposure=20.0,
+            max_open_positions=2,
+            max_entries=3,
+            max_cumulative_loss=5.0,
+        ),
+    )
+
+    logger.info(
+        "startup performance",
+        extra={"context": {
+            "step": "journal",
+            "seconds": round(perf_counter() - step_started, 4),
+        }},
+    )
     alert_manager = build_alert_manager(journal)
 
     # See trading_assistant.annualization: a Sharpe ratio's annualization
@@ -261,6 +314,7 @@ def build_orchestrator(config: Config) -> Orchestrator:
             stop_loss_pct=config.risk.stop_loss_pct,
             max_spread_pct=config.risk.max_spread_pct,
             enable_adaptive_order_type=config.risk.enable_adaptive_order_type,
+            execution_mode=config.execution_mode,
         ),
         portfolio=PortfolioAgent(portfolio=portfolio_manager, journal=journal, is_live=config.is_live),
         journal=journal,
@@ -287,6 +341,7 @@ def build_orchestrator(config: Config) -> Orchestrator:
         retention_interval_seconds=(
             config.retention.run_interval_hours * 3600 if config.retention.enabled else None
         ),
+        canary_guard=canary_guard,
     )
 
 
@@ -312,7 +367,18 @@ def main() -> None:
             extra={"context": {"mode": config.mode, "symbols": config.symbols, "cycles": args.cycles}},
         )
 
+        orchestrator_started = perf_counter()
         orchestrator = build_orchestrator(config)
+        logger.info(
+            "startup performance",
+            extra={"context": {
+                "step": "build_orchestrator_total",
+                "seconds": round(
+                    perf_counter() - orchestrator_started,
+                    4,
+                ),
+            }},
+        )
         asyncio.run(_run_with_graceful_shutdown(orchestrator, args.cycles))
     finally:
         lock_file.close()

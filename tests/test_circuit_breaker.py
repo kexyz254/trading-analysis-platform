@@ -123,3 +123,23 @@ def test_trip_raises_an_alert_when_an_alert_manager_is_configured(tmp_path):
 def test_no_alert_manager_does_not_raise():
     breaker = CircuitBreaker()
     breaker.trip("simulated serious failure")  # must not raise
+
+def test_reset_raises_one_recovery_alert_and_double_reset_does_not_duplicate(tmp_path):
+    journal = Journal(db_path=str(tmp_path / "journal.db"))
+    alert_manager = AlertManager(journal=journal)
+    breaker = CircuitBreaker(journal=journal, alert_manager=alert_manager)
+
+    breaker.trip("simulated serious failure")
+    breaker.reset(operator="ops")
+
+    alerts = journal.recent_alerts()
+    recoveries = [a for a in alerts if a["category"] == "circuit_breaker_recovery"]
+
+    assert len(recoveries) == 1
+    assert recoveries[0]["severity"] == "info"
+
+    breaker.reset(operator="ops")
+
+    alerts = journal.recent_alerts()
+    recoveries = [a for a in alerts if a["category"] == "circuit_breaker_recovery"]
+    assert len(recoveries) == 1

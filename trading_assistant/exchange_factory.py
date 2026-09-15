@@ -8,6 +8,7 @@ XGBoost, scikit-learn, or pandas merely to obtain a factory function.
 from __future__ import annotations
 
 import logging
+from trading_assistant.exchange_authority import ReadOnlyExchangeProxy
 
 from trading_assistant.config import Config
 
@@ -47,5 +48,11 @@ def build_exchange(config: Config):
         logger.info("exchange configured in TESTNET/sandbox mode")
     else:
         logger.warning("exchange configured in LIVE mode - real funds are at risk")
+
+    if config.execution_mode == "manual_assist":
+        logger.warning(
+            "execution authority is MANUAL_ASSIST - exchange mutations are blocked"
+        )
+        exchange = ReadOnlyExchangeProxy(exchange)
 
     return exchange

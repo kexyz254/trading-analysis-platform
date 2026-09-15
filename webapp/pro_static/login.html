@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ATS Operator Login</title>
+<link rel="stylesheet" href="/pro/static/style.css">
+<style>
+.login-shell{max-width:420px;margin:10vh auto;padding:30px}
+.login-card{padding:28px;border:1px solid rgba(255,255,255,.14);border-radius:14px}
+.login-card input,.login-card button{width:100%;padding:12px;margin-top:12px}
+.login-error{margin-top:14px}
+</style>
+</head>
+<body>
+<main class="login-shell">
+<div class="login-card">
+<div class="eyebrow">ATS PROFESSIONAL</div>
+<h1>Operator Access</h1>
+<p>Authentication is required for the capital-control workspace.</p>
+
+<input id="password"
+       type="password"
+       autocomplete="current-password"
+       placeholder="Operator password">
+
+<button id="login">Authenticate</button>
+
+<div id="error" class="login-error"></div>
+</div>
+</main>
+
+<script src="/pro/static/login.js"></script>
+</body>
+</html>

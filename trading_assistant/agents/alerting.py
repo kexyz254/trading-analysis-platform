@@ -83,6 +83,15 @@ _CATEGORY_INFO: Dict[str, Dict[str, Any]] = {
         "action_detail": "Yes - trading stays paused until a person reviews what happened and manually "
         "resumes it. It will not resume on its own, even after a restart.",
     },
+    "circuit_breaker_recovery": {
+        "icon": "\u2705",
+        "title": "Trading Safety Hold Was Cleared",
+        "what_happened": "An operator deliberately reset an active circuit breaker after reviewing the incident.",
+        "why_it_matters": "The previous safety hold is no longer active. This records a deliberate recovery transition.",
+        "system_action": "Cleared the persisted breaker state and reset its consecutive-error counters.",
+        "needs_action": False,
+        "action_detail": "No immediate action. Confirm execution authority and account state before autonomous trading.",
+    },
     "emergency_flatten": {
         "icon": "\U0001F6A8",
         "title": "All Positions Were Closed",
@@ -483,6 +492,10 @@ class AlertManager:
         self.webhook_cooldown_seconds = webhook_cooldown_seconds
         self.email_cooldown_seconds = email_cooldown_seconds
         self._last_sent: Dict[tuple, float] = {}
+        # Prevent two same-key deliveries from racing while the first
+        # background SMTP/webhook attempt is still in flight.
+        self._delivery_inflight = set()
+        self._delivery_lock = threading.Lock()
         # Tracks background delivery threads (see raise_alert) purely so
         # tests can deterministically wait for one to finish rather than
         # racing it - wait_for_pending_alerts() below. Production code
@@ -508,6 +521,7 @@ class AlertManager:
         message: str,
         context: Optional[Dict[str, Any]] = None,
         dedupe_key: Optional[str] = None,
+        force_email: bool = False,
     ) -> Alert:
         if severity not in SEVERITIES:
             raise ValueError(f"severity must be one of {SEVERITIES}, got {severity!r}")
@@ -537,62 +551,92 @@ class AlertManager:
         # the external notification itself could be lost, an acceptable
         # trade against blocking a clean, bounded shutdown.
         if self.webhook_url and self._should_send("webhook", dedupe_key, self.webhook_cooldown_seconds):
-            thread = threading.Thread(target=self._send_webhook, args=(alert,), daemon=True)
+            thread = threading.Thread(
+                target=self._deliver_tracked,
+                args=("webhook", dedupe_key, alert, self._send_webhook),
+                daemon=True,
+            )
             thread.start()
             self._pending_alert_threads.append(thread)
 
         if (
             self.email_configured
-            and SEVERITIES.index(severity) >= SEVERITIES.index(self.email_min_severity)
+            and (
+                force_email
+                or SEVERITIES.index(severity) >= SEVERITIES.index(self.email_min_severity)
+            )
             and self._should_send("email", dedupe_key, self.email_cooldown_seconds)
         ):
-            thread = threading.Thread(target=self._send_email, args=(alert,), daemon=True)
+            thread = threading.Thread(
+                target=self._deliver_tracked,
+                args=("email", dedupe_key, alert, self._send_email),
+                daemon=True,
+            )
             thread.start()
             self._pending_alert_threads.append(thread)
 
         return alert
 
     def _should_send(self, channel: str, dedupe_key: Optional[str], cooldown_seconds: float) -> bool:
-        """No dedupe_key means the caller considers this event inherently
-        singular (e.g. a circuit breaker trip, already only fires once per
-        trip) - always send. With a dedupe_key, suppress a repeat send on
-        THIS channel for the same key within cooldown_seconds - tracked
-        per (channel, dedupe_key) so throttling one channel never silently
-        throttles the other.
-
-        Journal-backed when a journal is configured (the live/production
-        case) so the cooldown survives a restart - a crash-restart loop
-        (scripts/run_forever.sh retries every 15s) used to reset the
-        in-memory cooldown on every attempt, so a persistent failure could
-        spam a webhook/email once per restart instead of respecting
-        cooldown_seconds across the whole episode. Falls back to the
-        in-memory dict when no journal is available (matches the original,
-        process-lifetime-only behavior - some callers/tests deliberately
-        construct an AlertManager with journal=None)."""
+        """Claim one external delivery without marking it successful yet."""
         if dedupe_key is None:
             return True
-        if self.journal is not None:
-            return self._should_send_persisted(channel, dedupe_key, cooldown_seconds)
+
         key = (channel, dedupe_key)
-        now = time.monotonic()
-        last_sent = self._last_sent.get(key)
-        if last_sent is not None and now - last_sent < cooldown_seconds:
-            return False
-        self._last_sent[key] = now
-        return True
 
-    def _should_send_persisted(self, channel: str, dedupe_key: str, cooldown_seconds: float) -> bool:
-        last_sent_str = self.journal.last_alert_delivery(channel=channel, dedupe_key=dedupe_key)
-        if last_sent_str is not None:
-            last_sent = datetime.fromisoformat(last_sent_str)
-            if last_sent.tzinfo is None:
-                last_sent = last_sent.replace(tzinfo=timezone.utc)
-            if (datetime.now(timezone.utc) - last_sent).total_seconds() < cooldown_seconds:
+        with self._delivery_lock:
+            if key in self._delivery_inflight:
                 return False
-        self.journal.record_alert_delivery(channel=channel, dedupe_key=dedupe_key)
-        return True
 
-    def _send_webhook(self, alert: Alert) -> None:
+            if self.journal is not None:
+                last_sent_str = self.journal.last_alert_delivery(
+                    channel=channel,
+                    dedupe_key=dedupe_key,
+                )
+                if last_sent_str is not None:
+                    last_sent = datetime.fromisoformat(last_sent_str)
+                    if last_sent.tzinfo is None:
+                        last_sent = last_sent.replace(tzinfo=timezone.utc)
+                    age = (datetime.now(timezone.utc) - last_sent).total_seconds()
+                    if age < cooldown_seconds:
+                        return False
+            else:
+                last_sent = self._last_sent.get(key)
+                if last_sent is not None and time.monotonic() - last_sent < cooldown_seconds:
+                    return False
+
+            self._delivery_inflight.add(key)
+            return True
+
+    def _mark_delivery_success(self, channel: str, dedupe_key: Optional[str]) -> None:
+        if dedupe_key is None:
+            return
+        key = (channel, dedupe_key)
+        if self.journal is not None:
+            self.journal.record_alert_delivery(channel=channel, dedupe_key=dedupe_key)
+        else:
+            self._last_sent[key] = time.monotonic()
+
+    def _release_delivery_claim(self, channel: str, dedupe_key: Optional[str]) -> None:
+        if dedupe_key is None:
+            return
+        with self._delivery_lock:
+            self._delivery_inflight.discard((channel, dedupe_key))
+
+    def _deliver_tracked(self, channel: str, dedupe_key: Optional[str], alert: Alert, sender) -> None:
+        try:
+            success = bool(sender(alert))
+            if success:
+                self._mark_delivery_success(channel, dedupe_key)
+        except Exception:  # defensive: senders normally swallow their own errors
+            logger.exception(
+                "unexpected alert delivery failure",
+                extra={"context": {"channel": channel, "category": alert.category}},
+            )
+        finally:
+            self._release_delivery_claim(channel, dedupe_key)
+
+    def _send_webhook(self, alert: Alert) -> bool:
         # A webhook delivery failure (network blip, revoked URL, rate
         # limit) must never interrupt the trading loop that raised this
         # alert - it's already durably persisted to the journal above
@@ -604,10 +648,12 @@ class AlertManager:
                 json={"text": f"[{alert.severity.upper()}] {alert.category}: {alert.message}"},
                 timeout=self.webhook_timeout_seconds,
             )
+            return True
         except Exception:  # noqa: BLE001
             logger.exception("failed to deliver alert webhook", extra={"context": {"category": alert.category}})
+            return False
 
-    def _send_email(self, alert: Alert) -> None:
+    def _send_email(self, alert: Alert) -> bool:
         # Same best-effort guarantee as the webhook above - an SMTP outage
         # or a revoked app password must never interrupt the trading loop.
         try:
@@ -630,5 +676,7 @@ class AlertManager:
                 server.starttls()
                 server.login(self.smtp_username, self.smtp_password)
                 server.send_message(email)
+            return True
         except Exception:  # noqa: BLE001
             logger.exception("failed to deliver alert email", extra={"context": {"category": alert.category}})
+            return False

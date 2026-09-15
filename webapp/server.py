@@ -30,6 +30,12 @@ from trading_assistant.persistence.paths import trading_db_path
 from trading_assistant.stability import compute_stability_score
 from webapp import data_access as da
 from webapp.bankroll_api import router as bankroll_router
+from webapp.manual_trading import build_manual_trading_router
+from webapp.order_confirmation import OrderConfirmationService
+from webapp.operator_auth import (
+    OperatorAuth,
+    build_operator_auth_router,
+)
 from webapp.umil_gateway import router as umil_gateway_router
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -70,6 +76,13 @@ _config = load_config(_args.config)
 _db_path = _args.db
 
 logger = logging.getLogger(__name__)
+
+_operator_auth = OperatorAuth.from_dashboard_data()
+
+_order_confirmations = OrderConfirmationService(
+    _operator_auth.session_secret,
+    ttl_seconds=60,
+)
 
 
 
@@ -161,6 +174,14 @@ async def protect_research_responses(request: Request, call_next):
 # Register the incoming bankroll sub-router channels cleanly
 app.include_router(bankroll_router)
 app.include_router(umil_gateway_router)
+app.include_router(build_operator_auth_router(_operator_auth))
+app.include_router(
+    build_manual_trading_router(
+        _config,
+        _operator_auth,
+        _order_confirmations,
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +807,24 @@ def _pro_asset_version() -> str:
 
 
 _PRO_ASSET_VERSION = _pro_asset_version()
+
+
+@app.get("/pro/login", response_class=HTMLResponse)
+def operator_login():
+    return HTMLResponse(
+        (PRO_STATIC_DIR / "login.html").read_text(encoding="utf-8")
+    )
+
+
+@app.get("/pro/manual", response_class=HTMLResponse)
+def manual_workspace(request: Request):
+    if _operator_auth.get_session(request) is None:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/pro/login", status_code=303)
+
+    return HTMLResponse(
+        (PRO_STATIC_DIR / "manual.html").read_text(encoding="utf-8")
+    )
 
 
 @app.get("/pro", response_class=HTMLResponse)

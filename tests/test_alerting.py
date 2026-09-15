@@ -562,3 +562,45 @@ def test_no_dedupe_key_always_sends():
     manager.wait_for_pending_alerts()
 
     assert len(calls) == 2
+
+def test_failed_email_is_not_marked_delivered_and_can_retry(tmp_path, monkeypatch):
+    class RaisingSMTP(FakeSMTP):
+        def __enter__(self):
+            raise ConnectionError("smtp down")
+
+    journal = Journal(db_path=str(tmp_path / "journal.db"))
+    monkeypatch.setattr("trading_assistant.agents.alerting.smtplib.SMTP", RaisingSMTP)
+
+    manager = AlertManager(
+        journal=journal,
+        smtp_username="bot@example.com",
+        smtp_password="x",
+        email_to=["ops@example.com"],
+    )
+
+    key = "production:test"
+    manager.raise_alert("category", "critical", "first", dedupe_key=key)
+    manager.wait_for_pending_alerts()
+
+    assert journal.last_alert_delivery(channel="email", dedupe_key=key) is None
+
+    monkeypatch.setattr("trading_assistant.agents.alerting.smtplib.SMTP", FakeSMTP)
+    manager.raise_alert("category", "critical", "retry", dedupe_key=key)
+    manager.wait_for_pending_alerts()
+
+    assert journal.last_alert_delivery(channel="email", dedupe_key=key) is not None
+
+
+def test_force_email_allows_one_recovery_notification(monkeypatch):
+    manager = _email_manager(monkeypatch)
+
+    manager.raise_alert(
+        "circuit_breaker_recovery",
+        "info",
+        "breaker reset",
+        dedupe_key="breaker-recovery:incident-1",
+        force_email=True,
+    )
+    manager.wait_for_pending_alerts()
+
+    assert len(FakeSMTP.instances) == 1

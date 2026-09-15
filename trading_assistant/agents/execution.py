@@ -66,6 +66,7 @@ class ExecutionAgent:
         # comfortably tight - see trading_assistant.execution.order_type.
         # False (default) always uses market orders, backward compatible.
         enable_adaptive_order_type: bool = False,
+        execution_mode: str = "autonomous",
     ):
         self.portfolio = portfolio
         self.exchange = exchange
@@ -83,10 +84,19 @@ class ExecutionAgent:
         # None disables this pre-trade check (opt-in, backward compatible).
         self.max_spread_pct = max_spread_pct
         self.enable_adaptive_order_type = enable_adaptive_order_type
+        self.execution_mode = execution_mode
 
     def execute(
         self, symbol: str, signal: Signal, price: float, quantity: float, stop_loss_pct: Optional[float] = None
     ) -> ExecutionResult:
+        if self.execution_mode != "autonomous":
+            return ExecutionResult(
+                symbol=symbol,
+                action="no_action",
+                price=price,
+                quantity=0.0,
+                error="autonomous execution disabled: manual_assist",
+            )
         if signal == Signal.BUY and symbol not in self.portfolio.positions:
             return self._buy(symbol, price, quantity, stop_loss_pct)
         if signal == Signal.SELL and symbol in self.portfolio.positions:
@@ -381,6 +391,15 @@ class ExecutionAgent:
         insufficient free balance) and a new one placed for the reduced
         quantity afterward - a position coming out of this method must
         never be left holding shares with no protective floor at all."""
+        if self.execution_mode != "autonomous":
+            return ExecutionResult(
+                symbol=symbol,
+                action="no_action",
+                price=price,
+                quantity=0.0,
+                error="autonomous execution disabled: manual_assist",
+            )
+
         position = self.portfolio.positions.get(symbol)
         if position is None or sell_quantity <= 0:
             return ExecutionResult(symbol=symbol, action="no_action", price=price, quantity=0.0)

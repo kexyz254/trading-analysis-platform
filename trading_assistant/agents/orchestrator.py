@@ -34,6 +34,11 @@ from trading_assistant.risk.partial_profit import should_take_partial_profit, un
 from trading_assistant.risk.trailing_stop import compute_trailing_stop_price, should_raise_stop, update_high_water_mark
 from trading_assistant.strategies.base import Signal
 
+
+from trading_assistant.execution.canary_guard import CanaryGuard
+from trading_assistant.execution.ownership import OwnershipService
+from trading_assistant.execution.provenance import TradeProvenance
+
 logger = logging.getLogger(__name__)
 
 # ExecutionAgent outcomes that represent a real attempt to touch the exchange.
@@ -117,6 +122,7 @@ class Orchestrator:
         # this was added. See Journal.prune_old_records / _PRUNABLE_TABLES.
         retention_days: int = 180,
         retention_interval_seconds: Optional[float] = None,
+        canary_guard: Optional[CanaryGuard] = None,
     ):
         self.market_monitor = market_monitor
         self.prediction = prediction
@@ -164,6 +170,19 @@ class Orchestrator:
         self._last_snapshots: Dict[str, Any] = {}
         self.retention_days = retention_days
         self.retention_interval_seconds = retention_interval_seconds
+
+        # Hard safety envelope for the first real autonomous-capital run.
+        # This gates NEW BUY exposure only. Existing positions may always
+        # be reduced/protected/exited.
+        self.canary_guard = canary_guard
+
+        # Provenance accounting must know which fills belong to ATS rather
+        # than manual/external activity.
+        self.ownership_service = (
+            OwnershipService(journal)
+            if journal is not None
+            else None
+        )
         # Set by request_shutdown() (called from a SIGTERM/SIGINT handler
         # registered in run_system.py) - run_forever's main loop checks
         # this and exits cleanly after the CURRENT cycle finishes, never
@@ -217,11 +236,24 @@ class Orchestrator:
                     logger.exception("Failed to persist OHLCV snapshot for %s", symbol)
         # ----------------------------------------------------------------------------
 
-        # A persistent market-data outage must be able to trip the breaker
-        # just like execution failures do - otherwise the system silently
-        # loops forever on a dead feed with no escalation.
-        for symbol in self.market_monitor.failed_symbols:
-            self.risk.circuit_breaker.record_result(symbol, success=False)
+        # Market-data/network availability failures are NOT execution
+        # failures. Counting them against the execution circuit breaker caused
+        # a host-wide Binance outage to be falsely recorded as
+        # "3 consecutive execution errors" for whichever symbol happened to
+        # fail repeatedly. Market-data health is handled separately; only an
+        # actual authorized exchange execution attempt may consume execution
+        # breaker budget.
+        failed_market_symbols = sorted(set(self.market_monitor.failed_symbols))
+        if failed_market_symbols:
+            logger.warning(
+                "market data degraded - skipping execution-breaker accounting",
+                extra={
+                    "context": {
+                        "failed_count": len(failed_market_symbols),
+                        "failed_symbols": failed_market_symbols[:50],
+                    }
+                },
+            )
 
         current_prices = {symbol: float(snap.frame["close"].iloc[-1]) for symbol, snap in snapshots.items()}
         # Reuses OHLCV already fetched this cycle for the correlation-aware
@@ -403,6 +435,52 @@ class Orchestrator:
         )
         return results
 
+    def _canary_current_gross_exposure(
+        self,
+        current_prices: dict,
+    ) -> float:
+        """Current real in-memory long exposure in quote currency.
+
+        This intentionally derives exposure from PortfolioManager's actual
+        currently-held positions, not from how much the canary previously
+        requested. A filled position therefore continues consuming the
+        canary exposure budget until it is actually closed.
+        """
+        positions = self.portfolio.portfolio.positions
+        gross = 0.0
+
+        for symbol, position in positions.items():
+            if isinstance(position, dict):
+                quantity = position.get("quantity", 0.0)
+                fallback_price = (
+                    position.get("entry_price")
+                    or position.get("price")
+                    or 0.0
+                )
+            else:
+                quantity = getattr(position, "quantity", 0.0)
+                fallback_price = (
+                    getattr(position, "entry_price", None)
+                    or getattr(position, "price", None)
+                    or 0.0
+                )
+
+            try:
+                quantity = abs(float(quantity or 0.0))
+                price = float(
+                    current_prices.get(symbol)
+                    or fallback_price
+                    or 0.0
+                )
+            except (TypeError, ValueError):
+                continue
+
+            if quantity > 0 and price > 0:
+                gross += quantity * price
+
+        return gross
+
+
     def _process_symbol(self, symbol: str, snapshot, current_prices: dict, price_history: Optional[dict] = None) -> None:
         price = current_prices[symbol]
 
@@ -521,23 +599,168 @@ class Orchestrator:
         if prediction.signal == Signal.BUY:
             positions_df = self.portfolio.positions_frame(current_prices)
             verdict = self.risk.evaluate_buy(
-                symbol, price, self.portfolio.capital, positions_df,
-                price_history=price_history, ohlcv_frame=snapshot.frame,
+                symbol,
+                price,
+                self.portfolio.capital,
+                positions_df,
+                price_history=price_history,
+                ohlcv_frame=snapshot.frame,
                 exchange_min_notional=self._exchange_min_notional(symbol),
             )
-            risk_approved, risk_reason = verdict.approved, verdict.reason
-            if verdict.approved:
-                exec_quantity = verdict.quantity / price if price > 0 else 0.0
-                result = self.execution.execute(
-                    symbol, prediction.signal, price, exec_quantity, stop_loss_pct=verdict.stop_loss_pct
+
+            risk_approved = verdict.approved
+            risk_reason = verdict.reason
+
+            # RiskAgent determines the maximum sensible stake. The canary
+            # may make that stake SMALLER, but can never make it larger.
+            approved_notional = (
+                float(verdict.quantity)
+                if verdict.approved
+                else 0.0
+            )
+
+            if risk_approved and self.canary_guard is not None:
+                current_gross = (
+                    self._canary_current_gross_exposure(
+                        current_prices
+                    )
                 )
+
+                remaining_gross = max(
+                    0.0,
+                    self.canary_guard.limits.max_gross_exposure
+                    - current_gross,
+                )
+
+                approved_notional = min(
+                    approved_notional,
+                    self.canary_guard.limits.max_order_notional,
+                    remaining_gross,
+                )
+
+                minimum_notional = (
+                    self._exchange_min_notional(symbol)
+                )
+
+                if (
+                    approved_notional <= 0
+                    or (
+                        minimum_notional is not None
+                        and approved_notional
+                            < float(minimum_notional)
+                    )
+                ):
+                    risk_approved = False
+                    risk_reason = (
+                        "canary:no executable notional remains"
+                    )
+                else:
+                    canary_decision = (
+                        self.canary_guard.authorize_entry(
+                            order_notional=approved_notional,
+                            current_gross_exposure=current_gross,
+                            open_positions=len(
+                                self.portfolio.portfolio.positions
+                            ),
+                        )
+                    )
+
+                    if not canary_decision.approved:
+                        risk_approved = False
+                        risk_reason = (
+                            "canary:"
+                            + canary_decision.reason
+                        )
+
+            if risk_approved:
+                exec_quantity = (
+                    approved_notional / price
+                    if price > 0
+                    else 0.0
+                )
+
+                result = self.execution.execute(
+                    symbol,
+                    prediction.signal,
+                    price,
+                    exec_quantity,
+                    stop_loss_pct=verdict.stop_loss_pct,
+                )
+
                 if result.action in _ATTEMPTED_ACTIONS:
-                    self.risk.circuit_breaker.record_result(symbol, success=result.action != "error")
-                action, quantity = result.action, result.quantity
+                    success = result.action != "error"
+
+                    self.risk.circuit_breaker.record_result(
+                        symbol,
+                        success=success,
+                    )
+
+                    # During the canary, even one ambiguous/failed real
+                    # execution disables NEW exposure. Existing positions
+                    # can still be protected or sold.
+                    if (
+                        not success
+                        and self.canary_guard is not None
+                    ):
+                        self.canary_guard.record_uncertain_execution(
+                            symbol=symbol,
+                        )
+
+                action = result.action
+                quantity = result.quantity
+
                 if result.action == "opened_position":
-                    self.portfolio.record_trade(symbol, "buy", price, quantity)
-                    self._record_execution_quality(symbol, "buy", price, result)
-                self._maybe_alert_unprotected_position(symbol, result)
+                    self.portfolio.record_trade(
+                        symbol,
+                        "buy",
+                        price,
+                        quantity,
+                    )
+
+                    self._record_execution_quality(
+                        symbol,
+                        "buy",
+                        price,
+                        result,
+                    )
+
+                    actual_notional = (
+                        float(quantity) * float(price)
+                    )
+
+                    if self.canary_guard is not None:
+                        self.canary_guard.record_entry(
+                            symbol=symbol,
+                            notional=actual_notional,
+                        )
+
+                    if self.ownership_service is not None:
+                        self.ownership_service.record_fill(
+                            account_id="primary",
+                            symbol=symbol,
+                            provenance=(
+                                TradeProvenance.ATS_AUTONOMOUS
+                            ),
+                            side="buy",
+                            quantity=float(quantity),
+                            price=float(price),
+                        )
+
+                    # A failed protective stop is a hard canary incident.
+                    # Do NOT block SELLs; simply prevent another entry.
+                    if (
+                        result.stop_order_placed is False
+                        and self.canary_guard is not None
+                    ):
+                        self.canary_guard.halt(
+                            f"{symbol}: protective stop "
+                            "placement failed"
+                        )
+
+                self._maybe_alert_unprotected_position(
+                    symbol,
+                    result,
+                )
 
         elif prediction.signal == Signal.SELL:
             verdict = self.risk.evaluate_sell(symbol)
@@ -553,10 +776,50 @@ class Orchestrator:
                     self.risk.circuit_breaker.record_result(symbol, success=result.action != "error")
                 action, quantity, pnl = result.action, result.quantity, result.pnl
                 if result.action == "closed_position":
-                    self.portfolio.record_trade(symbol, "sell", price, quantity, pnl=pnl)
-                    self._record_execution_quality(symbol, "sell", price, result)
+                    self.portfolio.record_trade(
+                        symbol,
+                        "sell",
+                        price,
+                        quantity,
+                        pnl=pnl,
+                    )
+
+                    self._record_execution_quality(
+                        symbol,
+                        "sell",
+                        price,
+                        result,
+                    )
+
                     if pnl is not None:
-                        self.risk.record_realized_pnl(pnl, capital_before_trade)
+                        self.risk.record_realized_pnl(
+                            pnl,
+                            capital_before_trade,
+                        )
+
+                        if self.canary_guard is not None:
+                            self.canary_guard.record_realized_pnl(
+                                float(pnl),
+                                symbol=symbol,
+                            )
+
+                    if self.ownership_service is not None:
+                        self.ownership_service.record_fill(
+                            account_id="primary",
+                            symbol=symbol,
+                            provenance=(
+                                TradeProvenance.ATS_AUTONOMOUS
+                            ),
+                            side="sell",
+                            quantity=float(quantity),
+                            price=float(price),
+                            realized_pnl=(
+                                float(pnl)
+                                if pnl is not None
+                                else None
+                            ),
+                        )
+
                     self._record_trade_audit_close(
                         symbol, price, quantity,
                         exit_reason=f"SELL signal (regime={snapshot.regime}, champion={champion_name})",
@@ -963,6 +1226,17 @@ class Orchestrator:
         # actually held to sell) - only the dust-skip path sets it.
         if result.action != "no_action" or result.error is None:
             return
+
+        # Only classify a no-action result as unsellable dust when the
+        # exchange minimum itself makes the held quantity unsellable.
+        # Authority denials such as manual_assist are intentional controls,
+        # not dust incidents.
+        error_text = result.error.lower()
+        if (
+            "below exchange minimum" not in error_text
+            and "cannot be sold at this size" not in error_text
+        ):
+            return
         if self.alert_manager is not None:
             self.alert_manager.raise_alert(
                 "dust_position_unsellable",
@@ -1226,23 +1500,71 @@ class Orchestrator:
                 # config constant that has no relationship to the real
                 # balance (which could be $0, or any amount that changes
                 # independently as the operator deposits/withdraws).
-                await asyncio.to_thread(
+                classification = await asyncio.to_thread(
                     self.portfolio.sync_capital_with_exchange, self.execution.exchange, self.quote_currency
                 )
+                self._maybe_handle_external_capital_flow(classification)
 
-        if self.learning is not None and warm_start:
-            # Without this, a fresh deployment would run with no model - and
-            # therefore never trade - until the first background retrain
-            # fires, up to retrain_interval_seconds later (default 24h).
-            await self._retrain_all_symbols()
+        # In autonomous mode the historical conservative behavior remains:
+        # model/tournament warm-up finishes before the live loop can act.
+        #
+        # In manual_assist mode, however, exchange mutations are already
+        # blocked for autonomous decisions. There is no safety benefit in
+        # making account reconciliation, position monitoring, the manual
+        # control plane, and heartbeat readiness wait behind potentially
+        # lengthy model training/tournament work. Run that heavy warm-up as
+        # a supervised background task instead.
+        heavy_warm_start_task: Optional[asyncio.Task] = None
+        defer_heavy_warm_start = (
+            warm_start
+            and getattr(
+                self.execution,
+                "execution_mode",
+                "autonomous",
+            ) == "manual_assist"
+        )
 
-        if self.strategy_manager is not None and warm_start:
-            # Without this, winner_history's first data point wouldn't land
-            # until tournament_interval_seconds later (default 24h) - and
-            # stability_score() needs at least 2 runs to say anything at all,
-            # so every warm-start skipped here is a full cycle's delay before
-            # the stability track record even starts accumulating.
-            await self._run_tournament_all_symbols()
+        async def deferred_heavy_warm_start() -> None:
+            # Yield once so heartbeat/control loops become schedulable before
+            # CPU/network-heavy model work starts.
+            await asyncio.sleep(1)
+
+            if (
+                self.learning is not None
+                and not self._shutdown_event.is_set()
+            ):
+                await self._run_supervised(
+                    "warm_start_retrain",
+                    self._retrain_all_symbols,
+                )
+
+            if (
+                self.strategy_manager is not None
+                and not self._shutdown_event.is_set()
+            ):
+                await self._run_supervised(
+                    "warm_start_tournament",
+                    self._run_tournament_all_symbols,
+                )
+
+        if defer_heavy_warm_start:
+            if (
+                self.learning is not None
+                or self.strategy_manager is not None
+            ):
+                heavy_warm_start_task = asyncio.create_task(
+                    deferred_heavy_warm_start()
+                )
+                logger.info(
+                    "manual-assist fast startup enabled - "
+                    "heavy ML warm-start deferred to background"
+                )
+        else:
+            if self.learning is not None and warm_start:
+                await self._retrain_all_symbols()
+
+            if self.strategy_manager is not None and warm_start:
+                await self._run_tournament_all_symbols()
 
         retrain_task: Optional[asyncio.Task] = None
         if self.learning is not None and self.retrain_interval_seconds:
@@ -1283,9 +1605,55 @@ class Orchestrator:
                     # Calling it directly on the event loop would freeze
                     # _retrain_loop's scheduling (and any other coroutine)
                     # for the duration of every cycle.
+                    loop_clock = asyncio.get_running_loop()
+                    cycle_started = loop_clock.time()
+
                     await asyncio.to_thread(self.run_cycle)
+
+                    cycle_seconds = (
+                        loop_clock.time() - cycle_started
+                    )
+
+                    logger.info(
+                        "cycle performance",
+                        extra={
+                            "context": {
+                                "cycle_number": cycles,
+                                "seconds": round(
+                                    cycle_seconds,
+                                    4,
+                                ),
+                                "symbols": len(
+                                    self.market_monitor.symbols
+                                ),
+                                "poll_interval_seconds":
+                                    self.poll_interval_seconds,
+                            }
+                        },
+                    )
+
+                    if cycle_seconds > self.poll_interval_seconds:
+                        logger.warning(
+                            "decision cycle runtime exceeds "
+                            "configured poll interval",
+                            extra={
+                                "context": {
+                                    "cycle_number": cycles,
+                                    "seconds": round(
+                                        cycle_seconds,
+                                        4,
+                                    ),
+                                    "poll_interval_seconds":
+                                        self.poll_interval_seconds,
+                                }
+                            },
+                        )
+
                     if self.journal is not None:
-                        self.journal.record_heartbeat_cycle(cycle_number=cycles, status="ok")
+                        self.journal.record_heartbeat_cycle(
+                            cycle_number=cycles,
+                            status="ok",
+                        )
                 except Exception:  # noqa: BLE001 - one bad cycle must not kill a 24/7 process
                     logger.exception("cycle failed")
                     if self.journal is not None:
@@ -1309,6 +1677,8 @@ class Orchestrator:
         finally:
             if self._shutdown_event.is_set():
                 logger.info("graceful shutdown requested - background loops cancelled, exiting cleanly")
+            if heavy_warm_start_task is not None:
+                heavy_warm_start_task.cancel()
             if retrain_task is not None:
                 retrain_task.cancel()
             if discovery_task is not None:

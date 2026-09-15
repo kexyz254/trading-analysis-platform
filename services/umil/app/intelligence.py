@@ -53,6 +53,7 @@ class IntelligenceEngine:
             event_type="MARKET_INPUT_BATCH",
             instrument_id=instrument_id,
             observed_at=as_of,
+            externalize_payload=True,
             payload={
                 "instrument_id": instrument_id,
                 "as_of": as_of,
