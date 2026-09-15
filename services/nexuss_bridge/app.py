@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from .protocol import Auth, MAX_BODY
+from .worker import ObservationStore
 
 # Intentionally projected fields: arbitrary logs, configuration and raw free-text
 # records are not exported because they may contain credentials.
@@ -48,8 +49,9 @@ def project(value, keys):
     return None
 
 
-def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=None):
+def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=None, worker_database=None):
     auth = Auth(secret, database)
+    observations = ObservationStore(worker_database or str(database) + ".observations")
     with sqlite3.connect(database) as db:
         db.execute("CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY, digest TEXT, payload TEXT)")
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -78,7 +80,19 @@ def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=Non
     @app.get("/agent/v1/capabilities")
     def capabilities():
         return {"reads": list(READS), "feedback": "advisory_only", "execution": False,
-                "maintenance_execution": False, "schema_version": 1}
+                "maintenance_execution": False, "schema_version": 1,
+                "offline_observations": True}
+
+    @app.get("/agent/v1/worker/status")
+    def worker_status():
+        return observations.status()
+
+    @app.get("/agent/v1/observations")
+    def worker_events(after: int = 0, limit: int = 100):
+        try:
+            return observations.events(after, limit)
+        except ValueError:
+            raise HTTPException(422, "Invalid cursor or limit") from None
 
     @app.get("/agent/v1/evidence/{resource}")
     async def evidence(resource: str, symbol: str = "BTC/USDT"):
@@ -139,4 +153,5 @@ def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=Non
 def from_environment():
     secret = Path(os.environ["NEXUSS_BRIDGE_SECRET_FILE"]).read_bytes().strip()
     return create_app(secret, os.environ["NEXUSS_BRIDGE_DATABASE"],
-                      os.getenv("NEXUSS_TAS_LOCAL_URL", "http://127.0.0.1:8000"))
+                      os.getenv("NEXUSS_TAS_LOCAL_URL", "http://127.0.0.1:8000"),
+                      worker_database=os.getenv("NEXUSS_WORKER_DATABASE"))

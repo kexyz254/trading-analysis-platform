@@ -14,7 +14,29 @@ services:
     environment:
       NEXUSS_BRIDGE_SECRET_FILE: /run/nexuss/bridge.key
       NEXUSS_BRIDGE_DATABASE: /state/bridge.db
+      NEXUSS_WORKER_DATABASE: /state/observations.db
       NEXUSS_TAS_LOCAL_URL: http://127.0.0.1:8000
+    volumes:
+      - /etc/nexuss-bridge:/run/nexuss:ro
+      - /var/lib/nexuss-bridge:/state
+    tmpfs:
+      - /tmp:size=16m
+  offline-observer:
+    build:
+      context: ../..
+      dockerfile: services/nexuss_bridge/Dockerfile
+    command: ["python", "-m", "services.nexuss_bridge.worker"]
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 32
+    environment:
+      NEXUSS_BRIDGE_SECRET_FILE: /run/nexuss/bridge.key
+      NEXUSS_WORKER_DATABASE: /state/observations.db
     volumes:
       - /etc/nexuss-bridge:/run/nexuss:ro
       - /var/lib/nexuss-bridge:/state

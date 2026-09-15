@@ -35,7 +35,8 @@ Use a separate checkout of the reviewed bridge branch. Do not pull over the VPS'
 modified config.yaml/docker-compose.yml. From that separate checkout:
 
 ```bash
-sudo install -d -m 0700 -o 65532 -g 65532 /etc/nexuss-bridge /var/lib/nexuss-bridge
+sudo install -d -m 0700 /etc/nexuss-bridge /var/lib/nexuss-bridge
+sudo chown 65532:65532 /etc/nexuss-bridge /var/lib/nexuss-bridge
 sudo bash -c 'set -e; umask 077; if [ ! -e /etc/nexuss-bridge/bridge.key ]; then openssl rand -hex 32 > /etc/nexuss-bridge/bridge.key; fi; chown 65532:65532 /etc/nexuss-bridge/bridge.key'
 docker compose -p nexuss-supervisor -f services/nexuss_bridge/compose.yaml up -d --build
 ```
@@ -53,6 +54,31 @@ Rollback: `docker compose -p nexuss-supervisor -f services/nexuss_bridge/compose
 Retain /var/lib/nexuss-bridge and its replay/feedback database; do not delete volumes.
 
 ## Outstanding before the complete requested system
+
+### Offline observer
+
+Compose also starts offline-observer on the VPS. Every 60 seconds it makes a
+signed local health request; this is health polling, not decision-event streaming.
+It stores health transitions and hourly checkpoints in observations.db and
+continues while Windows Nexuss is offline. It never calls an LLM, trades, resets
+a breaker, or restarts an execution worker. If TAS is unreachable it records an
+unavailable observation and retries; it cannot gather fresh data during an outage.
+
+GET /agent/v1/worker/status reports last_checked (Unix time), queue count and state.
+Consumers must check last_checked for staleness; observing is not a liveness proof.
+GET /agent/v1/observations?after=0&limit=100 provides ordered replay with next_cursor.
+Persist that cursor only after processing; reads do not remove events. Replay is
+consumer-driven, not automatic delivery to Windows. At 50,000 events recording
+stops with backlog_full, preserving existing evidence. No automatic purge exists.
+This is a bounded observer, not the full research/repair worker requested.
+
+After startup, verify without printing secrets:
+
+```bash
+docker compose -p nexuss-supervisor -f services/nexuss_bridge/compose.yaml exec -T nexuss-bridge python -m services.nexuss_bridge.check
+```
+
+### Remaining work
 
 - Transactional decision outbox and event push/replay; current reads are on demand.
 - Live news/economic/research providers, provenance, freshness and evaluation.
