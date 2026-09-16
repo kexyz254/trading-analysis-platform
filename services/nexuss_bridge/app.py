@@ -23,9 +23,28 @@ READS = {
                                 "last_heartbeat_status", "staleness_seconds",
                                 "recent_error_rate", "circuit_breaker_tripped"}),
     "status": ("/api/status", {"mode", "is_live", "symbols", "timeframe"}),
+    "incident": ("/api/journal", set()),
     "decisions": ("/api/pro/decisions/{symbol}", {"symbol", "decisions", "timestamp",
                     "signal", "confidence", "price", "action"}),
 }
+
+
+def incident_summary(value):
+    """Return a structured trigger; never export journal trades or raw reasons."""
+    event = value.get("circuit_breaker") if isinstance(value, dict) else None
+    if not isinstance(event, dict):
+        return {"reason_code": "no_event", "event_at": None, "error_count": None}
+    reason = event.get("reason")
+    match = re.fullmatch(r"([0-9]{1,6}) consecutive execution errors on [A-Z0-9]{1,20}/[A-Z0-9]{1,20}", reason) if isinstance(reason, str) else None
+    stamp = None
+    try:
+        parsed = datetime.fromisoformat(event.get("timestamp"))
+        if parsed.tzinfo:
+            stamp = parsed.astimezone(timezone.utc).isoformat()
+    except (ValueError, TypeError):
+        pass
+    return {"reason_code": "execution_errors" if match else "other", "event_at": stamp,
+            "error_count": int(match[1]) if match else None}
 
 
 class Feedback(BaseModel):
@@ -113,7 +132,8 @@ def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=Non
                         raw.extend(chunk)
                         if len(raw) > 1_000_000:
                             raise HTTPException(502, "TAS response too large")
-            data = project(json.loads(raw), keys)
+            parsed = json.loads(raw)
+            data = incident_summary(parsed) if resource == "incident" else project(parsed, keys)
         except (httpx.HTTPError, ValueError):
             raise HTTPException(502, "TAS evidence unavailable") from None
         return {"resource": resource, "retrieved_at": datetime.now(timezone.utc).isoformat(),
