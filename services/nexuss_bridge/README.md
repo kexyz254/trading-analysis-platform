@@ -80,6 +80,25 @@ docker compose -p nexuss-supervisor -f services/nexuss_bridge/compose.yaml exec 
 
 ### Remaining work
 
+### Optional tunnel-free transport
+
+The additional tailscale.yaml service listens only on 100.93.64.23:8300,
+the VPS Tailscale IP observed during setup. It leaves the loopback listener and
+offline observer in place. Both listeners share persistent replay protection.
+Enable only after confirming both machines belong to your private tailnet and
+network ACLs allow the intended Windows client. No Tailscale enrollment or ACL
+changes are performed by this code. The startup address validator refuses public
+and wildcard binds; a missing Tailscale address causes startup to fail.
+
+```bash
+docker compose -p nexuss-supervisor -f services/nexuss_bridge/compose.yaml -f services/nexuss_bridge/tailscale.yaml up -d --build
+```
+
+On Windows, configure the client with http://100.93.64.23:8300 using the existing
+private key. A successful signed health request verifies the complete private path.
+Do not close the SSH tunnel until that request succeeds. This transport removes
+the open-terminal dependency, but is not an always-on Nexuss AI worker.
+
 - Transactional decision outbox and event push/replay; current reads are on demand.
 - Live news/economic/research providers, provenance, freshness and evaluation.
 - Capability registry, conversation routing and dashboard integration in Nexuss.
