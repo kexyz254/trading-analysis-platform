@@ -1,0 +1,7 @@
+# Build separately on the Nexuss engineering host. No source or credentials baked in.
+FROM python:3.12-slim
+WORKDIR /workspace
+COPY requirements.txt /tmp/tas-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/tas-requirements.txt
+USER 65532:65532
+ENTRYPOINT ["python", "-m", "pytest"]
