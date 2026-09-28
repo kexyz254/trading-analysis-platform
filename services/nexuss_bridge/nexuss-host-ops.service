@@ -1,0 +1,25 @@
+[Unit]
+Description=Nexuss allowlisted TAS maintenance executor
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=nexuss-agent
+RuntimeDirectoryMode=0755
+StateDirectory=nexuss-agent
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /opt/nexuss-agent/host_ops.py --socket /run/nexuss-agent/ops.sock --key-file /etc/nexuss-bridge/bridge.key --state /var/lib/nexuss-agent/receipts.sqlite3
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run/nexuss-agent /var/lib/nexuss-agent
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
