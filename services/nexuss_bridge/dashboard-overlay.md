@@ -13,7 +13,7 @@ base_image=$(docker inspect -f '{{.Image}}' trading-analysis-platform-dashboard-
 docker image inspect "$base_image" >/dev/null
 docker image tag "$base_image" trading-analysis-platform-dashboard:nexuss-pre-overlay
 docker build --pull=false \
-  --build-arg "BASE_IMAGE=$base_image" \
+  --build-arg BASE_IMAGE=trading-analysis-platform-dashboard:nexuss-pre-overlay \
   -f services/nexuss_bridge/Dockerfile.dashboard-overlay \
   -t trading-analysis-platform-dashboard:nexuss-account-overlay .
 docker compose -f docker-compose.yml \
