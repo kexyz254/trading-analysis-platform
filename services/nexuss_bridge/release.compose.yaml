@@ -1,0 +1,6 @@
+services:
+  nexuss-bridge:
+    environment:
+      NEXUSS_RELEASE_SOCKET: /run/nexuss-release/release.sock
+    volumes:
+      - /run/nexuss-release:/run/nexuss-release:ro

@@ -1,0 +1,20 @@
+name: P6.32 Approved Dashboard Release
+on:
+  pull_request:
+    paths:
+      - 'services/nexuss_bridge/release_ops.py'
+      - 'services/nexuss_bridge/app.py'
+      - 'tests/test_nexuss_release_ops.py'
+      - 'tests/test_nexuss_release_bridge.py'
+      - '.github/workflows/p632-dashboard-release.yml'
+  workflow_dispatch:
+jobs:
+  release-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest fastapi httpx
+      - run: pytest --noconftest -q tests/test_nexuss_release_ops.py tests/test_nexuss_release_bridge.py tests/test_price_call_results_bridge.py
