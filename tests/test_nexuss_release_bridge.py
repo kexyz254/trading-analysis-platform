@@ -27,7 +27,9 @@ def test_release_requires_signed_exact_request_and_enabled_socket(tmp_path, monk
     target = "/agent/v1/releases/prepare"
     body = json.dumps(item).encode()
     assert client.post(target, content=body).status_code == 401
-    response = client.post(target, content=body, headers=signed_headers(SECRET, "POST", target, body))
+    response = client.post(target, content=body,
+                           headers={**signed_headers(SECRET, "POST", target, body),
+                                    "Content-Type": "application/json"})
     assert response.status_code == 200
     assert called == [("/run/nexuss-release/release.sock", "prepare", "a" * 40)]
     wrong = "/agent/v1/releases/shell"
@@ -43,4 +45,5 @@ def test_release_unavailable_without_host_socket(tmp_path):
     target = "/agent/v1/releases/prepare"
     body = json.dumps(item).encode()
     assert client.post(target, content=body,
-                       headers=signed_headers(SECRET, "POST", target, body)).status_code == 503
+                       headers={**signed_headers(SECRET, "POST", target, body),
+                                "Content-Type": "application/json"}).status_code == 503
