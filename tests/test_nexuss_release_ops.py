@@ -5,12 +5,14 @@ from services.nexuss_bridge.release_ops import FILES, Releases, approval_signatu
 
 COMMIT = "a" * 40
 IMAGE = "sha256:" + "b" * 64
+NEW_IMAGE = "sha256:" + "c" * 64
 SECRET = b"test-only-release-signing-key-123456789"
 APPROVAL = b"test-only-owner-approval-key-1234567890"
 
 
 def _executor(tmp_path, *, probe=lambda: True, run=None):
     calls = []
+    current_image = [IMAGE]
 
     def fake_run(argv, timeout=25, input=None):
         calls.append(argv)
@@ -19,7 +21,14 @@ def _executor(tmp_path, *, probe=lambda: True, run=None):
         if argv[1:4] == ["-C", str(tmp_path / "source"), "show"]:
             return b"def harmless():\n    return 1\n"
         if argv[1:4] == ["inspect", "-f", "{{.Image}}"]:
-            return IMAGE.encode() + b"\n"
+            return current_image[0].encode() + b"\n"
+        if argv[1:4] == ["image", "inspect", "-f"]:
+            return NEW_IMAGE.encode() + b"\n"
+        if "compose" in argv:
+            with open(argv[len(argv) - 1 - argv[::-1].index("-f") + 1], encoding="utf-8") as override:
+                config = __import__("json").load(override)
+            current_image[0] = (IMAGE if "rollback" in config["services"]["dashboard"]["image"]
+                                else NEW_IMAGE)
         return b""
 
     service = Releases(SECRET, str(tmp_path / "receipts.db"), approval_secret=APPROVAL,
@@ -92,6 +101,8 @@ def test_source_change_fails_closed_before_image_mutation(tmp_path):
             return contents[0 if len([v for v in calls if "show" in v]) <= 2 else 1]
         if argv[1] == "inspect":
             return IMAGE.encode() + b"\n"
+        if argv[1:3] == ["image", "inspect"]:
+            return NEW_IMAGE.encode() + b"\n"
         return b""
 
     service, _ = _executor(tmp_path, run=fake_run)
@@ -129,16 +140,19 @@ def test_failed_health_check_restores_previous_image(tmp_path, monkeypatch):
 
 def test_compose_error_attempts_rollback(tmp_path):
     compose_calls = []
+    state = [IMAGE]
 
     def run(argv):
         if "show" in argv:
             return b"x=1\n"
         if "inspect" in argv:
-            return IMAGE.encode() + b"\n"
+            return (NEW_IMAGE if argv[1] == "image" else state[0]).encode() + b"\n"
         if "compose" in argv:
             compose_calls.append(argv)
             if len(compose_calls) == 1:
+                state[0] = NEW_IMAGE
                 raise RuntimeError("Simulated partial Compose failure")
+            state[0] = IMAGE
         return b""
 
     service, _ = _executor(tmp_path, run=run)
@@ -147,3 +161,25 @@ def test_compose_error_attempts_rollback(tmp_path):
     result = _signed(service, "apply", rid, digest=prepared["digest"])
     assert result["status"] == "rolled_back"
     assert len(compose_calls) == 2
+
+
+def test_old_dashboard_still_responding_cannot_verify_release(tmp_path):
+    # A successful HTTP response from the old dashboard alone is insufficient.
+    calls = []
+
+    def run(argv):
+        calls.append(argv)
+        if "show" in argv:
+            return b"x=1\n"
+        if argv[1] == "image":
+            return NEW_IMAGE.encode() + b"\n"
+        if argv[1] == "inspect":
+            return IMAGE.encode() + b"\n"
+        return b""
+
+    service, _ = _executor(tmp_path, run=run)
+    rid = "8" * 32
+    prepared = _signed(service, "prepare", rid)
+    result = _signed(service, "apply", rid, digest=prepared["digest"])
+    assert result["status"] == "rolled_back"
+    assert not result["verified"]
