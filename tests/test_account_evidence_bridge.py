@@ -42,6 +42,7 @@ def test_account_evidence_reports_misclassified_spending_without_raw_text(tmp_pa
     assert abs(result["classified_external_sum"] + 23.35) < 1e-9
     assert result["trade_count"] == 0
     assert result["highest_snapshot_equity"] == 206.18
+    assert result["after_incident_equity"] == 135.10
     assert result["truncated"] is False
     assert "secret" not in str(result) and "password" not in str(result)
     with sqlite3.connect(path) as db:
