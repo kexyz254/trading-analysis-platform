@@ -34,7 +34,8 @@ def test_release_requires_signed_exact_request_and_enabled_socket(tmp_path, monk
     assert called == [("/run/nexuss-release/release.sock", "prepare", "a" * 40)]
     wrong = "/agent/v1/releases/shell"
     assert client.post(wrong, content=body,
-                       headers=signed_headers(SECRET, "POST", wrong, body)).status_code == 404
+                       headers={**signed_headers(SECRET, "POST", wrong, body),
+                                "Content-Type": "application/json"}).status_code == 404
 
 
 def test_release_unavailable_without_host_socket(tmp_path):
