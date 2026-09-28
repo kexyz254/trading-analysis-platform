@@ -3,10 +3,13 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 from urllib.parse import quote
 
 import httpx
@@ -15,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from .protocol import Auth, MAX_BODY
 from .worker import ObservationStore
+from .host_ops import signature as host_signature
 
 # Intentionally projected fields: arbitrary logs, configuration and raw free-text
 # records are not exported because they may contain credentials.
@@ -86,6 +90,31 @@ class Feedback(BaseModel):
     execution_requested: Literal[False] = False
 
 
+class MaintenanceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+
+
+def host_operation(socket_path: str, secret: bytes, operation: str, request_id: str):
+    stamp = int(time.time())
+    payload = json.dumps({"operation": operation, "request_id": request_id.replace("-", ""),
+                          "time": stamp, "signature": host_signature(
+                              secret, operation, request_id.replace("-", ""), stamp)},
+                         separators=(",", ":")).encode() + b"\n"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(95)
+        sock.connect(socket_path)
+        sock.sendall(payload)
+        with sock.makefile("rb") as stream:
+            raw = stream.readline(4097)
+    if not raw.endswith(b"\n") or len(raw) > 4096:
+        raise ValueError("Invalid executor response")
+    result = json.loads(raw)
+    if not isinstance(result, dict) or result.get("request_id") != request_id.replace("-", ""):
+        raise ValueError("Invalid executor receipt")
+    return result
+
+
 def project(value, keys):
     if isinstance(value, dict):
         return {k: project(v, keys) for k, v in value.items() if k in keys}
@@ -96,7 +125,8 @@ def project(value, keys):
     return None
 
 
-def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=None, worker_database=None):
+def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=None, worker_database=None,
+               operations_socket=None):
     auth = Auth(secret, database)
     observations = ObservationStore(worker_database or str(database) + ".observations")
     with sqlite3.connect(database) as db:
@@ -127,8 +157,20 @@ def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=Non
     @app.get("/agent/v1/capabilities")
     def capabilities():
         return {"reads": list(READS), "feedback": "advisory_only", "execution": False,
-                "maintenance_execution": False, "schema_version": 1,
+                "maintenance_execution": ["diagnostics", "restart_dashboard"] if operations_socket else False,
+                "schema_version": 1,
                 "offline_observations": True}
+
+    @app.post("/agent/v1/ops/{operation}")
+    def operations(operation: str, item: MaintenanceRequest):
+        if operation not in {"diagnostics", "restart_dashboard"}:
+            raise HTTPException(404, "Operation unavailable")
+        if not operations_socket:
+            raise HTTPException(503, "Maintenance executor not configured")
+        try:
+            return host_operation(operations_socket, secret, operation, item.request_id.hex)
+        except (OSError, ValueError, json.JSONDecodeError):
+            raise HTTPException(503, "Maintenance executor unavailable") from None
 
     @app.get("/agent/v1/worker/status")
     def worker_status():
@@ -202,4 +244,5 @@ def from_environment():
     secret = Path(os.environ["NEXUSS_BRIDGE_SECRET_FILE"]).read_bytes().strip()
     return create_app(secret, os.environ["NEXUSS_BRIDGE_DATABASE"],
                       os.getenv("NEXUSS_TAS_LOCAL_URL", "http://127.0.0.1:8000"),
-                      worker_database=os.getenv("NEXUSS_WORKER_DATABASE"))
+                      worker_database=os.getenv("NEXUSS_WORKER_DATABASE"),
+                      operations_socket=os.getenv("NEXUSS_HOST_OPS_SOCKET"))
