@@ -77,6 +77,12 @@ def account_evidence(db_path: str) -> dict:
             "SELECT timestamp, total_equity FROM equity_snapshots WHERE is_live=1 "
             "ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        after = db.execute(
+            "SELECT timestamp, total_equity FROM equity_snapshots "
+            "WHERE is_live=1 AND timestamp>=? AND timestamp<=? "
+            "ORDER BY timestamp, id LIMIT 1",
+            (end, (incident + timedelta(minutes=15)).isoformat()),
+        ).fetchone()
         return {
             "status": "recorded",
             "incident_at": end,
@@ -84,6 +90,8 @@ def account_evidence(db_path: str) -> dict:
             "minimum_movement": 0.1,
             "highest_snapshot_at": _utc(flow_start).isoformat(),
             "highest_snapshot_equity": _amount(peak[1]),
+            "after_incident_at": _utc(after[0]).isoformat() if after else None,
+            "after_incident_equity": _amount(after[1]) if after else None,
             "last_live_equity_at": _utc(latest[0]).isoformat() if latest else None,
             "last_live_equity": _amount(latest[1]) if latest else None,
             "movement_count": count,
