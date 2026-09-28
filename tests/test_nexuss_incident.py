@@ -26,3 +26,15 @@ def test_unrecognized_and_missing_reason_never_leak():
     result = incident_summary({"circuit_breaker": {"reason": "password=secret", "timestamp": "secret"}})
     assert result == {"reason_code": "other", "event_at": None, "error_count": None}
     assert incident_summary({})["reason_code"] == "no_event"
+
+
+def test_known_risk_trips_are_classified_without_exporting_financial_values():
+    daily = incident_summary({"circuit_breaker": {"reason": "daily loss limit breached",
+        "timestamp": "2026-09-27T17:42:00+00:00"}})
+    assert daily == {"reason_code": "daily_loss_limit", "event_at": "2026-09-27T17:42:00+00:00", "error_count": None}
+    drawdown = incident_summary({"circuit_breaker": {"reason":
+        "max drawdown breached: 12.3% >= 10.0% (peak equity 12345.00, current 10826.56)",
+        "timestamp": "2026-09-27T17:42:00+00:00"}})
+    assert drawdown["reason_code"] == "max_drawdown"
+    assert "12345" not in str(drawdown)
+    assert incident_summary({"circuit_breaker": {"reason": "daily loss limit breached password=secret"}})["reason_code"] == "other"

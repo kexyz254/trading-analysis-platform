@@ -36,6 +36,16 @@ def incident_summary(value):
         return {"reason_code": "no_event", "event_at": None, "error_count": None}
     reason = event.get("reason")
     match = re.fullmatch(r"([0-9]{1,6}) consecutive execution errors on [A-Z0-9]{1,20}/[A-Z0-9]{1,20}", reason) if isinstance(reason, str) else None
+    code = "other"
+    if match:
+        code = "execution_errors"
+    elif reason == "daily loss limit breached":
+        code = "daily_loss_limit"
+    elif isinstance(reason, str) and re.fullmatch(
+        r"max drawdown breached: [0-9]{1,3}(?:\.[0-9])?% >= [0-9]{1,3}(?:\.[0-9])?% "
+        r"\(peak equity [0-9]+(?:\.[0-9]{2})?, current [0-9]+(?:\.[0-9]{2})?\)", reason
+    ):
+        code = "max_drawdown"
     stamp = None
     try:
         parsed = datetime.fromisoformat(event.get("timestamp"))
@@ -43,7 +53,7 @@ def incident_summary(value):
             stamp = parsed.astimezone(timezone.utc).isoformat()
     except (ValueError, TypeError):
         pass
-    return {"reason_code": "execution_errors" if match else "other", "event_at": stamp,
+    return {"reason_code": code, "event_at": stamp,
             "error_count": int(match[1]) if match else None}
 
 
