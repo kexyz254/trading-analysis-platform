@@ -107,3 +107,43 @@ def test_tripped_or_unavailable_dashboard_blocks_prepare(tmp_path):
     with pytest.raises(ValueError):
         _signed(service, "prepare", "4" * 32)
     assert not calls
+
+
+def test_failed_health_check_restores_previous_image(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.nexuss_bridge.release_ops.time.sleep", lambda _: None)
+    observed = [0]
+
+    def probe():
+        observed[0] += 1
+        return observed[0] == 1 or observed[0] >= 12
+
+    service, calls = _executor(tmp_path, probe=probe)
+    rid = "6" * 32
+    prepared = _signed(service, "prepare", rid)
+    result = _signed(service, "apply", rid, digest=prepared["digest"])
+    assert result["status"] == "rolled_back"
+    assert result["verified"] is False
+    compose_calls = [argv for argv in calls if "compose" in argv]
+    assert len(compose_calls) == 2 and all(argv[-1] == "dashboard" for argv in compose_calls)
+
+
+def test_compose_error_attempts_rollback(tmp_path):
+    compose_calls = []
+
+    def run(argv):
+        if "show" in argv:
+            return b"x=1\n"
+        if "inspect" in argv:
+            return IMAGE.encode() + b"\n"
+        if "compose" in argv:
+            compose_calls.append(argv)
+            if len(compose_calls) == 1:
+                raise RuntimeError("Simulated partial Compose failure")
+        return b""
+
+    service, _ = _executor(tmp_path, run=run)
+    rid = "7" * 32
+    prepared = _signed(service, "prepare", rid)
+    result = _signed(service, "apply", rid, digest=prepared["digest"])
+    assert result["status"] == "rolled_back"
+    assert len(compose_calls) == 2
