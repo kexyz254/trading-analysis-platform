@@ -106,6 +106,12 @@ class Releases:
             raise ValueError("Invalid running dashboard image")
         return image
 
+    def _tag_image(self, tag):
+        image = self.run(["/usr/bin/docker", "image", "inspect", "-f", "{{.Id}}", tag], 10).decode().strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image):
+            raise ValueError("Invalid built dashboard image")
+        return image
+
     def execute(self, data):
         if not isinstance(data, dict) or set(data) != {"operation", "request_id", "time", "commit", "digest", "signature", "approval_signature"}:
             raise ValueError("Invalid release request")
@@ -190,6 +196,7 @@ class Releases:
                     self.run(["/usr/bin/docker", "image", "tag", row[2], rollback], 15)
                     self.run(["/usr/bin/docker", "build", "--pull=false", "--network=none",
                               "--build-arg", "BASE_IMAGE=" + rollback, "-t", tag, str(context)], 120)
+                    built_image = self._tag_image(tag)
                     override = context / "dashboard.json"
                     override.write_text(json.dumps({"services": {"dashboard": {"image": tag,
                         "command": ["uvicorn", "webapp.nexuss_account_overlay:app", "--host",
@@ -208,7 +215,7 @@ class Releases:
                         compose_completed = False
                     if compose_completed:
                         for _ in range(10):
-                            if self.probe():
+                            if self._image() == built_image and self.probe():
                                 status, verified = "deployed_verified", True
                                 break
                             time.sleep(3)
@@ -218,7 +225,8 @@ class Releases:
                                         "0.0.0.0", "--port", "8000"]}}}), encoding="utf-8")
                         try:
                             self.run(compose, 90)
-                            status = "rolled_back" if self.probe() else "rollback_unverified"
+                            status = ("rolled_back" if self._image() == row[2] and self.probe()
+                                      else "rollback_unverified")
                         except (OSError, RuntimeError, subprocess.TimeoutExpired):
                             status = "rollback_unverified"
         except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
