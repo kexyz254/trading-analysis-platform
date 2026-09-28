@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from .protocol import Auth, MAX_BODY
 from .worker import ObservationStore
 from .host_ops import signature as host_signature
+from .release_ops import signature as release_signature
 
 # Intentionally projected fields: arbitrary logs, configuration and raw free-text
 # records are not exported because they may contain credentials.
@@ -103,6 +104,39 @@ class MaintenanceRequest(BaseModel):
     request_id: UUID
 
 
+class ReleaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+    commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approval_signature: str = Field(default="", max_length=64, pattern=r"^(?:[0-9a-f]{64})?$")
+
+
+def release_operation(socket_path: str, secret: bytes, operation: str, item: ReleaseRequest):
+    stamp = int(time.time())
+    rid = item.request_id.hex
+    payload = json.dumps({"operation": operation, "request_id": rid,
+                          "time": stamp, "commit": item.commit, "digest": item.digest,
+                          "approval_signature": item.approval_signature,
+                          "signature": release_signature(secret, operation, rid, stamp,
+                                                         item.commit, item.digest,
+                                                         item.approval_signature)},
+                         separators=(",", ":")).encode() + b"\n"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(350)
+        sock.connect(socket_path)
+        sock.sendall(payload)
+        with sock.makefile("rb") as stream:
+            raw = stream.readline(4097)
+    if not raw.endswith(b"\n") or len(raw) > 4096:
+        raise ValueError("Invalid release receipt")
+    result = json.loads(raw)
+    if (not isinstance(result, dict) or result.get("release_id") != rid
+            or result.get("commit") != item.commit or result.get("digest") is None):
+        raise ValueError("Invalid release receipt")
+    return result
+
+
 def host_operation(socket_path: str, secret: bytes, operation: str, request_id: str):
     stamp = int(time.time())
     payload = json.dumps({"operation": operation, "request_id": request_id.replace("-", ""),
@@ -134,7 +168,7 @@ def project(value, keys):
 
 
 def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=None, worker_database=None,
-               operations_socket=None):
+               operations_socket=None, release_socket=None):
     auth = Auth(secret, database)
     observations = ObservationStore(worker_database or str(database) + ".observations")
     with sqlite3.connect(database) as db:
@@ -166,6 +200,7 @@ def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=Non
     def capabilities():
         return {"reads": list(READS), "feedback": "advisory_only", "execution": False,
                 "maintenance_execution": ["diagnostics", "restart_dashboard"] if operations_socket else False,
+                "dashboard_release": ["prepare", "apply"] if release_socket else False,
                 "schema_version": 1,
                 "offline_observations": True}
 
@@ -179,6 +214,22 @@ def create_app(secret, database, upstream="http://127.0.0.1:8000", transport=Non
             return host_operation(operations_socket, secret, operation, item.request_id.hex)
         except (OSError, ValueError, json.JSONDecodeError):
             raise HTTPException(503, "Maintenance executor unavailable") from None
+
+    @app.post("/agent/v1/releases/{operation}")
+    def release(operation: str, item: ReleaseRequest):
+        if operation not in {"prepare", "apply"}:
+            raise HTTPException(404, "Release operation unavailable")
+        if not release_socket:
+            raise HTTPException(503, "Release executor not configured")
+        if operation == "prepare" and item.digest != "0" * 64:
+            raise HTTPException(422, "Prepare digest must be empty")
+        if (operation == "prepare" and item.approval_signature
+                or operation == "apply" and not item.approval_signature):
+            raise HTTPException(422, "Invalid release approval signature")
+        try:
+            return release_operation(release_socket, secret, operation, item)
+        except (OSError, ValueError, json.JSONDecodeError):
+            raise HTTPException(503, "Release executor unavailable") from None
 
     @app.get("/agent/v1/worker/status")
     def worker_status():
@@ -253,4 +304,5 @@ def from_environment():
     return create_app(secret, os.environ["NEXUSS_BRIDGE_DATABASE"],
                       os.getenv("NEXUSS_TAS_LOCAL_URL", "http://127.0.0.1:8000"),
                       worker_database=os.getenv("NEXUSS_WORKER_DATABASE"),
-                      operations_socket=os.getenv("NEXUSS_HOST_OPS_SOCKET"))
+                      operations_socket=os.getenv("NEXUSS_HOST_OPS_SOCKET"),
+                      release_socket=os.getenv("NEXUSS_RELEASE_SOCKET"))
