@@ -154,7 +154,7 @@ if _allowed_origins:
 async def protect_research_responses(request: Request, call_next):
     """Prevent browser/proxy retention and passive embedding of research UI."""
     response = await call_next(request)
-    if request.url.path == "/pro" or request.url.path.startswith(("/pro/", "/api/pro/")):
+    if request.url.path == "/pro" or request.url.path.startswith(("/pro/", "/api/pro/", "/api/agent/")):
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -206,6 +206,18 @@ def status():
 @app.get("/api/journal")
 def journal():
     return da.journal_snapshot(_db_path, _config.is_live)
+
+
+@app.get("/api/agent/account-evidence")
+def agent_account_evidence():
+    """Typed journal figures for the signed supervisory bridge."""
+    import sqlite3
+    from webapp.account_evidence import account_evidence
+
+    try:
+        return account_evidence(_db_path)
+    except (sqlite3.Error, ValueError, OSError):
+        raise HTTPException(503, "Account evidence unavailable") from None
 
 
 @app.get("/api/alerts")

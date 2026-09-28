@@ -24,6 +24,15 @@ READS = {
                                 "recent_error_rate", "circuit_breaker_tripped"}),
     "status": ("/api/status", {"mode", "is_live", "symbols", "timeframe"}),
     "incident": ("/api/journal", set()),
+    "account_flow": ("/api/agent/account-evidence", {
+        "status", "incident_at", "window_hours", "minimum_movement",
+        "highest_snapshot_at", "highest_snapshot_equity", "after_incident_at",
+        "after_incident_equity", "last_live_equity_at",
+        "last_live_equity", "movement_count", "movement_sum",
+        "classified_external_sum", "unclassified_sum", "trade_count",
+        "audited_realized_pnl", "truncated", "movements", "at",
+        "raw_delta", "trading_delta", "unexplained_delta", "classified_external",
+    }),
     "decisions": ("/api/pro/decisions/{symbol}", {"symbol", "decisions", "timestamp",
                     "signal", "confidence", "price", "action"}),
 }
