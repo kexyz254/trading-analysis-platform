@@ -1,0 +1,6 @@
+services:
+  nexuss-bridge:
+    environment:
+      NEXUSS_HOST_OPS_SOCKET: /run/nexuss-agent/ops.sock
+    volumes:
+      - /run/nexuss-agent:/run/nexuss-agent:ro
