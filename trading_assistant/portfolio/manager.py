@@ -2,6 +2,7 @@
 
 import pandas as pd
 import numpy as np
+import math
 from datetime import date
 from typing import Any, Dict, List, Tuple, Optional
 
@@ -304,10 +305,18 @@ class PortfolioManager:
         return position['quantity'] - position.get('unexplained_quantity', 0.0)
 
     def get_total_value(self, current_prices: Dict[str, float]) -> float:
-        positions_value = sum(
-            self._tracked_quantity(sym) * current_prices.get(sym, 0)
-            for sym in self.positions
-        )
+        positions_value = 0.0
+        for sym in self.positions:
+            quantity = self._tracked_quantity(sym)
+            if quantity == 0:
+                continue
+            price = current_prices.get(sym)
+            # An absent/invalid price is missing evidence, not a zero-valued
+            # asset. Fail the cycle before risk evaluation or any new order;
+            # a partial market poll must never create a false drawdown trip.
+            if price is None or not math.isfinite(price) or price <= 0:
+                raise ValueError(f"Missing valid price for tracked position: {sym}")
+            positions_value += quantity * price
         return self.capital + positions_value
 
     def get_position_pnl(self, symbol: str, current_price: float) -> Optional[float]:
