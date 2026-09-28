@@ -41,10 +41,10 @@ def incident_summary(value):
         code = "execution_errors"
     elif reason == "daily loss limit breached":
         code = "daily_loss_limit"
-    elif isinstance(reason, str) and re.fullmatch(
-        r"max drawdown breached: [0-9]{1,3}(?:\.[0-9])?% >= [0-9]{1,3}(?:\.[0-9])?% "
-        r"\(peak equity [0-9]+(?:\.[0-9]{2})?, current [0-9]+(?:\.[0-9]{2})?\)", reason
-    ):
+    elif isinstance(reason, str) and (drawdown := re.fullmatch(
+        r"max drawdown breached: ([0-9]{1,3}\.[0-9])% >= ([0-9]{1,3}\.[0-9])% "
+        r"\(peak equity ([0-9]{1,15}\.[0-9]{2}), current ([0-9]{1,15}\.[0-9]{2})\)", reason
+    )):
         code = "max_drawdown"
     stamp = None
     try:
@@ -53,8 +53,17 @@ def incident_summary(value):
             stamp = parsed.astimezone(timezone.utc).isoformat()
     except (ValueError, TypeError):
         pass
-    return {"reason_code": code, "event_at": stamp,
-            "error_count": int(match[1]) if match else None}
+    result = {"reason_code": code, "event_at": stamp,
+              "error_count": int(match[1]) if match else None}
+    if code == "max_drawdown":
+        # Exact generated fields, and only for the known reason grammar.
+        # These are the *journal's recorded claims*, not independently
+        # verified valuations. No arbitrary reason or trade data is exported.
+        result["reported_drawdown_pct"] = float(drawdown[1])
+        result["configured_limit_pct"] = float(drawdown[2])
+        result["reported_peak_equity"] = float(drawdown[3])
+        result["reported_current_equity"] = float(drawdown[4])
+    return result
 
 
 class Feedback(BaseModel):
