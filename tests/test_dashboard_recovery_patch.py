@@ -74,7 +74,10 @@ def test_database_readiness_checks_live_schema(tmp_path: Path):
 def test_dashboard_import_does_not_import_autonomous_engine():
     code = """
 import sys
-import webapp.server
+from unittest.mock import patch
+from webapp.operator_auth import OperatorAuth
+with patch.object(OperatorAuth, 'from_dashboard_data', return_value=OperatorAuth('test-hash', 'test-session-secret')):
+    import webapp.server
 assert 'run_system' not in sys.modules
 assert 'trading_assistant.agents.strategy_manager' not in sys.modules
 print('ok')
