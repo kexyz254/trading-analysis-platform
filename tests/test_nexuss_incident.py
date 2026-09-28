@@ -36,5 +36,11 @@ def test_known_risk_trips_are_classified_without_exporting_financial_values():
         "max drawdown breached: 12.3% >= 10.0% (peak equity 12345.00, current 10826.56)",
         "timestamp": "2026-09-27T17:42:00+00:00"}})
     assert drawdown["reason_code"] == "max_drawdown"
-    assert "12345" not in str(drawdown)
+    assert drawdown["reported_drawdown_pct"] == 12.3
+    assert drawdown["configured_limit_pct"] == 10.0
+    assert drawdown["reported_peak_equity"] == 12345.0
+    assert drawdown["reported_current_equity"] == 10826.56
+    assert "max drawdown breached" not in str(drawdown)
     assert incident_summary({"circuit_breaker": {"reason": "daily loss limit breached password=secret"}})["reason_code"] == "other"
+    assert incident_summary({"circuit_breaker": {"reason":
+        "max drawdown breached: 12.3% >= 10.0% (peak equity 12345.00, current 10826.56) password=secret"}})["reason_code"] == "other"
