@@ -1,0 +1,25 @@
+[Unit]
+Description=Nexuss approved dashboard release executor
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=nexuss-release
+RuntimeDirectoryMode=0755
+StateDirectory=nexuss-release
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /opt/nexuss-agent/release_ops.py --socket /run/nexuss-release/release.sock --key-file /etc/nexuss-bridge/bridge.key --approval-key-file /etc/nexuss-release/approval.key --state /var/lib/nexuss-release/receipts.sqlite3
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ReadWritePaths=/run/nexuss-release /var/lib/nexuss-release
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
