@@ -1,0 +1,4 @@
+services:
+  dashboard:
+    image: trading-analysis-platform-dashboard:nexuss-price-results
+    command: ["uvicorn", "webapp.nexuss_account_overlay:app", "--host", "0.0.0.0", "--port", "8000"]

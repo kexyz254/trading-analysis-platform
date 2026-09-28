@@ -1,0 +1,21 @@
+name: P6.31 TAS BTC Price Call Results
+on:
+  pull_request:
+    paths:
+      - 'webapp/price_call_results.py'
+      - 'webapp/nexuss_account_overlay.py'
+      - 'services/nexuss_bridge/app.py'
+      - 'tests/test_price_call_results.py'
+      - 'tests/test_price_call_results_bridge.py'
+      - '.github/workflows/p631-btc-price-results.yml'
+  workflow_dispatch:
+jobs:
+  tracker-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest fastapi httpx
+      - run: pytest --noconftest -q tests/test_price_call_results.py tests/test_price_call_results_bridge.py

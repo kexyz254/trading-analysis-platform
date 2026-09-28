@@ -1,0 +1,3 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY --chown=appuser:appuser webapp/price_call_results.py webapp/nexuss_account_overlay.py /app/webapp/

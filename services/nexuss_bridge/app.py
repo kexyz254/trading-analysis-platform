@@ -37,6 +37,14 @@ READS = {
         "audited_realized_pnl", "truncated", "movements", "at",
         "raw_delta", "trading_delta", "unexplained_delta", "classified_external",
     }),
+    "btc_price_results": ("/api/agent/btc-price-call-results", {
+        "symbol", "status", "as_of_ms", "scope", "horizons", "5m", "15m",
+        "recorded", "voided", "open", "last_24h", "last_7d", "recent",
+        "resolved", "directional", "hits", "hit_rate", "benchmark_eligible",
+        "latest_settled_ms", "sample_sufficient", "issued_ms", "due_ms",
+        "settled_ms", "direction", "actual_direction", "entry_price",
+        "close_price", "correct", "settlement_method",
+    }),
     "decisions": ("/api/pro/decisions/{symbol}", {"symbol", "decisions", "timestamp",
                     "signal", "confidence", "price", "action"}),
 }
